@@ -22,6 +22,8 @@ env/
 data/
 runs/
 artifacts/
+.test-tmp/
+*.egg-info/
 
 # Secrets and local configuration
 .env

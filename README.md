@@ -6,8 +6,10 @@ summaries, task proposals, and long-term-memory proposals.
 
 ## Current status
 
-The repository currently contains the preflight design only. No application,
-agent behavior, evaluation result, or deployment is implemented or claimed yet.
+Phase 1 is complete: the repository contains a deterministic local capture
+slice with no model, Agent, task extraction, or memory behavior. The recorded
+gate evidence is in [docs/phase-1-evidence.md](docs/phase-1-evidence.md).
+Phase 2 and later are not implemented.
 
 The implementation sequence is intentionally gated:
 
@@ -27,6 +29,17 @@ Use the existing Conda environment:
 conda activate llm-course
 ```
 
-The project has no Python dependencies of its own yet. Dependencies will be
-declared when Phase 1 begins, rather than preemptively inheriting an
-environment-specific package list.
+Install the project's declared dependencies into that environment, then run the
+local shell:
+
+```powershell
+python -m pip install -e .
+streamlit run app.py
+```
+
+The application stores local data in `data/captureflow.sqlite3`, which is not
+committed. To run the deterministic unit tests:
+
+```powershell
+python -m unittest discover -s tests -v
+```

@@ -1,8 +1,10 @@
 # CaptureFlow Preflight
 
-> Status: design only. No application, agent, evaluation result, or deployment
-> described below should be treated as implemented until the corresponding
-> phase gate has passed with saved evidence.
+> Status: Phase 1 is implemented and its gate evidence is recorded in
+> [`docs/phase-1-evidence.md`](docs/phase-1-evidence.md). No Phase 2 or later
+> application behavior, agent, evaluation result, or deployment described
+> below should be treated as implemented until its corresponding phase gate has
+> passed with saved evidence.
 
 ## 1. Purpose
 
