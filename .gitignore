@@ -1,0 +1,35 @@
+# Python bytecode and test artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local environments
+.venv/
+venv/
+env/
+
+# Streamlit local state
+.streamlit/secrets.toml
+
+# Local application data and generated artifacts
+*.sqlite
+*.sqlite3
+*.db
+data/
+runs/
+artifacts/
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
