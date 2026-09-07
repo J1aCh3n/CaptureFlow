@@ -147,7 +147,13 @@ class CaptureRun(BaseModel):
 
     id: str = Field(default_factory=lambda: str(uuid4()))
     capture_id: str
-    status: Literal["completed", "grounding_failed", "failed"]
+    status: Literal[
+        "completed",
+        "completed_with_omissions",
+        "needs_review",
+        "grounding_failed",
+        "failed",
+    ]
     plan: CapturePlan | None = None
     output: OrganizerDraft | None = None
     grounding_report: GroundingReport | None = None

@@ -108,6 +108,11 @@ class OpenAICompatibleModel:
                 "calendar expression, never for urgency wording such as 'at your earliest "
                 "convenience' or 'ASAP'; retain relevant urgency in task text. For a long article, "
                 "return one or two non-overlapping, useful summary claims and omit weak details. "
+                "For an idea or product proposal, make the first claim synthesize its objective, "
+                "input-to-outcome flow, and any explicit risk-handling principle; an optional "
+                "second claim may summarize the proposed technical pipeline. Treat suggested "
+                "technologies as options, not committed implementation, and do not turn an idea "
+                "into a task unless the source assigns an action. "
                 "If grounding feedback is supplied, correct every cited issue. Preserve source "
                 "wording: never silently correct a possible typo. For a materially ambiguous "
                 "term, add a review_note quoting the original term."
@@ -123,16 +128,18 @@ class OpenAICompatibleModel:
         return self._complete(
             GroundingReport,
             system=(
-                "You are CaptureFlow's grounding critic. Return JSON only. Mark pass only "
-                "when every paraphrased claim and task is entailed by its cited quote. "
+                "You are CaptureFlow's source-grounding critic. Return JSON only. Check only "
+                "whether every claim, task, and review note is entailed by its cited source "
+                "quote without adding facts or changing meaning. A concise paraphrase or a "
+                "restatement passes when it is entailed. Do not judge usefulness, depth, style, "
+                "brevity, or whether a summary combines multiple sentences. "
                 "Date resolution is a deterministic typed-tool result and is not a source "
                 "claim: assess whether the original due_expression is cited, but never require "
                 "the resolved calendar date or its year to occur in the source quote. "
                 "For a task that combines details from separate clauses, its quote must contain "
-                "all details needed to entail the task. "
-                "Also request revision when a summary merely restates one source sentence or a "
-                "task without adding useful consolidation. Review notes must preserve original "
-                "source wording. Otherwise request revise with item-specific feedback."
+                "all details needed to entail the task. Review notes must preserve original "
+                "source wording. Request revise only for unsupported content and return "
+                "item-specific feedback."
             ),
             payload={"source_text": source_text, "draft": draft.model_dump(mode="json")},
         )

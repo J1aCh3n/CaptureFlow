@@ -49,6 +49,15 @@ REVISE = GroundingReport.model_validate(
         ],
     }
 )
+REVISE_ALL = GroundingReport.model_validate(
+    {
+        "verdict": "revise",
+        "feedback": [
+            {"item_kind": "summary", "item_index": 0, "reason": "Unsupported summary."},
+            {"item_kind": "task", "item_index": 0, "reason": "Unsupported task."},
+        ],
+    }
+)
 
 
 class PhaseTwoWorkflowTests(unittest.TestCase):
@@ -205,14 +214,48 @@ class PhaseTwoWorkflowTests(unittest.TestCase):
         self.assertEqual(critic_task.date_status, "not_requested")
 
     def test_grounding_exhaustion_omits_generated_items(self) -> None:
-        model = ScriptedModel(plans=[PLAN], drafts=[DRAFT, DRAFT], reports=[REVISE, REVISE])
+        model = ScriptedModel(
+            plans=[PLAN], drafts=[DRAFT, DRAFT], reports=[REVISE_ALL, REVISE_ALL]
+        )
 
         result = self.run_workflow(model)
 
         self.assertEqual(result.status, "grounding_failed")
         self.assertEqual(result.output.summary_claims, [])
         self.assertEqual(result.output.tasks, [])
-        self.assertIn("generated items were omitted", result.warnings[-1])
+        self.assertIn("no supported items remained", result.warnings[-1])
+
+    def test_final_grounding_omits_only_rejected_items(self) -> None:
+        model = ScriptedModel(plans=[PLAN], drafts=[DRAFT, DRAFT], reports=[REVISE, REVISE])
+
+        result = self.run_workflow(model)
+
+        self.assertEqual(result.status, "completed_with_omissions")
+        self.assertEqual(result.output.summary_claims, [])
+        self.assertEqual(result.output.tasks[0].text, "Ship the release.")
+        self.assertIn("summary 1", result.warnings[-1])
+
+    def test_remaining_items_receive_critic_after_deterministic_omission(self) -> None:
+        invalid_draft = DRAFT.model_copy(
+            update={
+                "summary_claims": [
+                    DRAFT.summary_claims[0].model_copy(
+                        update={"source_quote": "This quote is not in the capture."}
+                    )
+                ]
+            }
+        )
+        model = ScriptedModel(
+            plans=[PLAN], drafts=[invalid_draft, invalid_draft], reports=[PASS]
+        )
+
+        result = self.run_workflow(model)
+
+        self.assertEqual(result.status, "completed_with_omissions")
+        self.assertEqual(result.model_calls, 4)
+        self.assertEqual(model.calls, ["plan", "organize", "organize", "critique"])
+        self.assertEqual(result.output.summary_claims, [])
+        self.assertEqual(result.output.tasks[0].text, "Ship the release.")
 
     def test_urgency_phrase_is_not_sent_to_date_tool(self) -> None:
         source = "Please pay the $42.98 utility payment at your earliest convenience."
@@ -361,7 +404,7 @@ class PhaseTwoWorkflowTests(unittest.TestCase):
             timezone="America/Vancouver",
         )
 
-        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.status, "needs_review")
         self.assertEqual(result.output.tasks[0].text, "购买毛条")
         self.assertEqual(result.output.review_notes[0].source_quote, "毛条")
 

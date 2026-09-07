@@ -13,6 +13,11 @@ requirements are in [docs/phase-2-evidence.md](docs/phase-2-evidence.md).
 Phase 3 and later are not implemented. In particular, a visible confirmation
 note cannot yet receive a reply, confirm, edit, or task-update action.
 
+Runtime source safety is separated from offline output-quality evaluation in
+[docs/gate-contract.md](docs/gate-contract.md). The fixed Phase 2 article,
+email, and idea checks are recorded in
+[docs/phase-2-live-fixtures.md](docs/phase-2-live-fixtures.md).
+
 The implementation sequence is intentionally gated:
 
 1. Phase 1: deterministic Streamlit, typed models, and SQLite persistence.

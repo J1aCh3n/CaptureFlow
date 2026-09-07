@@ -319,16 +319,27 @@ Runtime grounding has two layers:
 1. **Deterministic validation:** required quotes must occur in the submitted
    source after documented whitespace normalization.
 2. **Semantic Critic:** the Critic checks whether each paraphrased claim or task
-   is entailed by its cited source span.
+   is entailed by its cited source span without adding facts or changing its
+   meaning.
+
+The runtime Critic evaluates source support only. Summary usefulness, depth,
+style, brevity, and whether a summary combines multiple sentences are offline
+quality criteria, not reasons to reject grounded content during a run.
 
 If the Critic rejects an output:
 
 1. structured feedback is returned to the Organizer;
 2. the Organizer may revise once;
 3. the revised output is checked again;
-4. remaining unsupported items are omitted and surfaced as warnings.
+4. specifically rejected items are omitted and surfaced as warnings;
+5. unrejected grounded items may complete as `completed_with_omissions`; if no
+   supported item remains, the run is `grounding_failed`.
 
 There is no third attempt and no silent acceptance after retry exhaustion.
+Grounded output that contains an ambiguous date or explicit confirmation item
+is `needs_review`, distinct from both completion and grounding failure. The
+full runtime and evaluation separation is in
+[`docs/gate-contract.md`](docs/gate-contract.md).
 
 The runtime Critic is not the evaluation oracle. Offline evaluation must use
 independently labeled expected actions and source spans. A model must not be
@@ -571,8 +582,14 @@ Gate:
 
 - scripted tests cover valid, invalid, revise, exhaustion, and tool-failure
   routes;
-- one live article, email, and idea run completes with saved traces;
+- the frozen article, email, and idea fixtures each retain their human-authored
+  expected action set and minimum acceptable grounded output;
+- all attempts remain in run history, so a failure cannot be hidden by swapping
+  in an easier input;
 - unsupported outputs remain visible rather than being silently accepted.
+
+The frozen fixture definitions and evidence-accounting rules are in
+[`docs/phase-2-live-fixtures.md`](docs/phase-2-live-fixtures.md).
 
 ### Phase 3: Cross-conversation memory
 

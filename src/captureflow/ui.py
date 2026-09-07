@@ -129,7 +129,9 @@ def render_run(run: CaptureRun | None) -> None:
         with st.expander("Validated plan"):
             for step in run.plan.steps:
                 st.write(f"{step.action}: {step.reason}")
-    if run.status == "completed" and run.output:
+    if run.status in {"completed", "completed_with_omissions", "needs_review"} and run.output:
+        if run.status == "needs_review":
+            st.info("This run has grounded output that needs user confirmation.")
         for claim in run.output.summary_claims:
             st.markdown(f"**Summary:** {claim.text}")
             st.caption(f"Evidence: {claim.source_quote}")

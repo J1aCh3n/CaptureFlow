@@ -27,12 +27,21 @@ class PhaseTwoState(TypedDict, total=False):
     plan: CapturePlan
     draft: OrganizerDraft
     grounding_report: GroundingReport
+    grounding_check: Literal["deterministic", "critic"]
     revision_feedback: GroundingReport
     retries: int
+    had_omissions: bool
     model_calls: int
     warnings: list[str]
     errors: list[RunError]
-    status: Literal["running", "completed", "grounding_failed", "failed"]
+    status: Literal[
+        "running",
+        "completed",
+        "completed_with_omissions",
+        "needs_review",
+        "grounding_failed",
+        "failed",
+    ]
 
 
 def validate_plan(plan: CapturePlan, source_text: str) -> None:
@@ -77,6 +86,7 @@ class PhaseTwoWorkflow:
                 "reference_date": reference_date,
                 "timezone": timezone,
                 "retries": 0,
+                "had_omissions": False,
                 "model_calls": 0,
                 "warnings": [],
                 "errors": [],
@@ -84,12 +94,13 @@ class PhaseTwoWorkflow:
             }
         )
         status = state["status"]
+        output_statuses = {"completed", "completed_with_omissions", "needs_review"}
         return CaptureRun(
             id=run_id,
             capture_id=capture_id,
             status=status,
             plan=state.get("plan"),
-            output=state.get("draft") if status == "completed" else OrganizerDraft(),
+            output=state.get("draft") if status in output_statuses else OrganizerDraft(),
             grounding_report=state.get("grounding_report"),
             warnings=state["warnings"],
             errors=state["errors"],
@@ -103,8 +114,9 @@ class PhaseTwoWorkflow:
         graph.add_node("resolve_dates", self._resolve_dates)
         graph.add_node("ground", self._ground)
         graph.add_node("prepare_revision", self._prepare_revision)
+        graph.add_node("filter_deterministic", self._filter_deterministic)
+        graph.add_node("omit_rejected", self._omit_rejected)
         graph.add_node("complete", self._complete)
-        graph.add_node("grounding_failed", self._grounding_failed)
         graph.add_edge(START, "plan")
         graph.add_conditional_edges(
             "plan",
@@ -117,19 +129,21 @@ class PhaseTwoWorkflow:
             {"resolve_dates": "resolve_dates", "end": END},
         )
         graph.add_edge("resolve_dates", "ground")
+        grounding_routes = {
+            "complete": "complete",
+            "revise": "prepare_revision",
+            "filter_deterministic": "filter_deterministic",
+            "omit": "omit_rejected",
+            "done": END,
+            "failed": END,
+        }
+        graph.add_conditional_edges("ground", self._after_grounding, grounding_routes)
         graph.add_conditional_edges(
-            "ground",
-            self._after_grounding,
-            {
-                "complete": "complete",
-                "revise": "prepare_revision",
-                "grounding_failed": "grounding_failed",
-                "failed": END,
-            },
+            "filter_deterministic", self._after_grounding, grounding_routes
         )
         graph.add_edge("prepare_revision", "organize")
+        graph.add_edge("omit_rejected", END)
         graph.add_edge("complete", END)
-        graph.add_edge("grounding_failed", END)
         return graph.compile()
 
     def _plan(self, state: PhaseTwoState) -> PhaseTwoState:
@@ -241,25 +255,34 @@ class PhaseTwoWorkflow:
             return {
                 "grounding_report": GroundingReport(
                     verdict="revise", feedback=deterministic_feedback
-                )
+                ),
+                "grounding_check": "deterministic",
             }
         calls = state["model_calls"] + 1
         try:
             report = self.model.critique(
                 state["source_text"], self._source_grounding_view(state["draft"])
             )
-            return {"grounding_report": report, "model_calls": calls}
+            return {
+                "grounding_report": report,
+                "grounding_check": "critic",
+                "model_calls": calls,
+            }
         except ModelError as error:
             return self._failure(state, "grounding", str(error), calls)
 
     def _after_grounding(self, state: PhaseTwoState) -> str:
         if state["status"] == "failed":
             return "failed"
+        if state["status"] == "grounding_failed":
+            return "done"
         if state["grounding_report"].verdict == "pass":
             return "complete"
         if state["retries"] < 1:
             return "revise"
-        return "grounding_failed"
+        if state["grounding_check"] == "deterministic":
+            return "filter_deterministic"
+        return "omit"
 
     def _prepare_revision(self, state: PhaseTwoState) -> PhaseTwoState:
         return {
@@ -269,17 +292,124 @@ class PhaseTwoWorkflow:
 
     @staticmethod
     def _complete(state: PhaseTwoState) -> PhaseTwoState:
+        draft = state.get("draft")
+        if draft and _needs_review(draft):
+            return {"status": "needs_review"}
+        if state["had_omissions"]:
+            return {"status": "completed_with_omissions"}
         return {"status": "completed"}
 
-    @staticmethod
-    def _grounding_failed(state: PhaseTwoState) -> PhaseTwoState:
+    def _omit_rejected(self, state: PhaseTwoState) -> PhaseTwoState:
+        report = state["grounding_report"]
+        draft = state["draft"]
+        pruned_result = self._prune_items(draft, report)
+        if pruned_result is None:
+            return {
+                "status": "grounding_failed",
+                "warnings": [
+                    *state["warnings"],
+                    "Grounding feedback could not be mapped safely; generated items were omitted.",
+                ],
+            }
+        pruned, omitted = pruned_result
+        if not omitted or not (pruned.summary_claims or pruned.tasks or pruned.review_notes):
+            return {
+                "draft": pruned,
+                "status": "grounding_failed",
+                "warnings": [
+                    *state["warnings"],
+                    "Grounding did not pass after one revision; no supported items remained.",
+                ],
+            }
+        status = "needs_review" if _needs_review(pruned) else "completed_with_omissions"
         return {
-            "status": "grounding_failed",
+            "draft": pruned,
+            "had_omissions": True,
+            "status": status,
             "warnings": [
                 *state["warnings"],
-                "Grounding did not pass after one revision; generated items were omitted.",
+                "Grounding rejected " + ", ".join(omitted) + "; those items were omitted.",
             ],
         }
+
+    def _filter_deterministic(self, state: PhaseTwoState) -> PhaseTwoState:
+        pruned_result = self._prune_items(state["draft"], state["grounding_report"])
+        if pruned_result is None:
+            return {
+                "status": "grounding_failed",
+                "warnings": [
+                    *state["warnings"],
+                    "Grounding feedback could not be mapped safely; generated items were omitted.",
+                ],
+            }
+        pruned, omitted = pruned_result
+        if not omitted or not (pruned.summary_claims or pruned.tasks or pruned.review_notes):
+            return {
+                "draft": pruned,
+                "status": "grounding_failed",
+                "warnings": [
+                    *state["warnings"],
+                    "Grounding did not pass after one revision; no supported items remained.",
+                ],
+            }
+        calls = state["model_calls"] + 1
+        try:
+            report = self.model.critique(
+                state["source_text"], self._source_grounding_view(pruned)
+            )
+            return {
+                "draft": pruned,
+                "grounding_report": report,
+                "grounding_check": "critic",
+                "had_omissions": True,
+                "model_calls": calls,
+                "warnings": [
+                    *state["warnings"],
+                    "Grounding rejected " + ", ".join(omitted) + "; those items were omitted.",
+                ],
+            }
+        except ModelError as error:
+            return self._failure(state, "grounding", str(error), calls)
+
+    @staticmethod
+    def _prune_items(
+        draft: OrganizerDraft, report: GroundingReport
+    ) -> tuple[OrganizerDraft, list[str]] | None:
+        collections = {
+            "summary": draft.summary_claims,
+            "task": draft.tasks,
+            "review": draft.review_notes,
+        }
+        rejected: dict[str, set[int]] = {kind: set() for kind in collections}
+        for issue in report.feedback:
+            items = collections.get(issue.item_kind)
+            if items is None or issue.item_index is None or issue.item_index >= len(items):
+                return None
+            rejected[issue.item_kind].add(issue.item_index)
+
+        pruned = draft.model_copy(
+            update={
+                "summary_claims": [
+                    item
+                    for index, item in enumerate(draft.summary_claims)
+                    if index not in rejected["summary"]
+                ],
+                "tasks": [
+                    item for index, item in enumerate(draft.tasks) if index not in rejected["task"]
+                ],
+                "review_notes": [
+                    item
+                    for index, item in enumerate(draft.review_notes)
+                    if index not in rejected["review"]
+                ],
+            }
+        )
+        omitted = [
+            f"{kind} {index + 1}"
+            for kind, indexes in rejected.items()
+            for index in sorted(indexes)
+        ]
+        return pruned, omitted
 
     @staticmethod
     def _failure(
@@ -392,3 +522,9 @@ def _is_non_calendar_urgency(expression: str) -> bool:
         "有空时",
         "方便时",
     }
+
+
+def _needs_review(draft: OrganizerDraft) -> bool:
+    return bool(draft.review_notes) or any(
+        task.date_status == "ambiguous" for task in draft.tasks
+    )

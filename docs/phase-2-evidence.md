@@ -24,7 +24,7 @@ python -m unittest discover -s tests -v
 python -m compileall -q app.py src tests
 ```
 
-Result on 2026-09-07: 32 tests passed.
+Result on 2026-09-07: 36 tests passed; bytecode compilation also passed.
 
 The tests cover valid and invalid plans, English and Chinese date ambiguity,
 documented `M/D` date rollover, date-tool failure, one successful revision,
@@ -33,8 +33,11 @@ with generated items omitted, persisted run traces, complete run-history
 retrieval, an external-search capability boundary, preserved ambiguous source
 terms, no redundant summary outside a summary plan, no exposed unimplemented
 conditional fields, omitted temperature for reasoning-model compatibility, and
-a visible configuration failure when no model is configured. Source grounding
-checks original date expressions but not deterministic typed date resolutions.
+a visible configuration failure when no model is configured. They also cover
+item-level omission after retry exhaustion, semantic Critic review after
+deterministic quote filtering, and the separation of source grounding from
+summary-usefulness judgments. Source grounding checks original date expressions
+but not deterministic typed date resolutions.
 
 ## Implemented repairs and diagnostics
 
@@ -59,6 +62,18 @@ checks original date expressions but not deterministic typed date resolutions.
 - The source-grounding Critic receives the original due expression but not the
   deterministic date-tool result; it must not demand the resolved calendar
   date or year in the source quote.
+- The Critic now evaluates only source entailment and added or changed facts.
+  Usefulness, depth, style, brevity, and multi-sentence synthesis are offline
+  evaluation criteria and cannot cause a runtime grounding rejection.
+- For an idea or product proposal, the Organizer is prompted to synthesize the
+  objective, input-to-outcome flow, and explicit risk principle before an
+  optional architecture claim. Suggested technologies remain proposals rather
+  than implementation commitments, and an idea is not converted into a task
+  unless the source assigns work.
+- After the one permitted Organizer revision, only specifically rejected items
+  are omitted. Supported survivors are returned as
+  `completed_with_omissions`; ambiguous dates or explicit confirmations produce
+  `needs_review`; `grounding_failed` means no safely retainable item remains.
 - Latest-run and run-history views expose structured Critic feedback when a
   run is rejected.
 
@@ -85,8 +100,16 @@ and idea examples.
 
 ## Required live evidence
 
-Before marking the Phase 2 gate complete, run and retain one configured live
-capture for each of these input styles: article, email, and idea. Each stored
-trace must show its validated plan, output or typed failure, grounding result,
-warnings, and model-call count. Scripted results do not establish live planning
-or grounding quality.
+The exact article, email, and idea inputs and their human-authored minimum
+expectations are frozen in
+[`phase-2-live-fixtures.md`](phase-2-live-fixtures.md). Runtime safety and
+offline quality are separated in [`gate-contract.md`](gate-contract.md).
+
+The retained email run already satisfies its task-only expectation. The latest
+article and idea attempts were rejected under the retired criterion that a
+grounded summary must add enough consolidation or higher-level synthesis.
+Those failures remain useful history, but neither proves the revised gate. The
+same stored article and idea captures must be run again under the new contract.
+Each trace must still show its validated plan, output or typed failure,
+grounding result, warnings, and model-call count. Scripted results do not
+establish live planning or grounding quality.
