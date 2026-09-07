@@ -1,9 +1,10 @@
 import sqlite3
 from collections.abc import Generator
 from contextlib import contextmanager
+import json
 from pathlib import Path
 
-from .models import Capture, Conversation, DEFAULT_WORKSPACE_ID
+from .models import Capture, CaptureRun, Conversation, DEFAULT_WORKSPACE_ID
 
 
 class CaptureStore:
@@ -36,6 +37,15 @@ class CaptureStore:
                     conversation_id TEXT NOT NULL REFERENCES conversations(id)
                         ON DELETE CASCADE,
                     source_text TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS capture_runs (
+                    id TEXT PRIMARY KEY,
+                    capture_id TEXT NOT NULL REFERENCES captures(id)
+                        ON DELETE CASCADE,
+                    status TEXT NOT NULL,
+                    result_json TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 );
                 """
@@ -143,6 +153,51 @@ class CaptureStore:
         with self._connect() as connection:
             cursor = connection.execute("DELETE FROM captures WHERE id = ?", (capture_id,))
         return cursor.rowcount == 1
+
+    def save_run(self, run: CaptureRun) -> CaptureRun:
+        serialized = run.model_dump(mode="json")
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT OR IGNORE INTO capture_runs (id, capture_id, status, result_json, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    run.id,
+                    run.capture_id,
+                    run.status,
+                    json.dumps(serialized, sort_keys=True),
+                    run.created_at.isoformat(),
+                ),
+            )
+            inserted = cursor.rowcount == 1
+        if not inserted:
+            existing = self.get_run(run.id)
+            if existing != run:
+                raise ValueError("run ID already exists with different content")
+        return self.get_run(run.id)
+
+    def get_run(self, run_id: str) -> CaptureRun:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT result_json FROM capture_runs WHERE id = ?", (run_id,)
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"run not found: {run_id}")
+        return CaptureRun.model_validate_json(row["result_json"])
+
+    def latest_run_for_capture(self, capture_id: str) -> CaptureRun | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT result_json FROM capture_runs
+                WHERE capture_id = ?
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                """,
+                (capture_id,),
+            ).fetchone()
+        return None if row is None else CaptureRun.model_validate_json(row["result_json"])
 
     @contextmanager
     def _connect(self) -> Generator[sqlite3.Connection, None, None]:

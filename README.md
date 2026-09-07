@@ -6,10 +6,10 @@ summaries, task proposals, and long-term-memory proposals.
 
 ## Current status
 
-Phase 1 is complete: the repository contains a deterministic local capture
-slice with no model, Agent, task extraction, or memory behavior. The recorded
-gate evidence is in [docs/phase-1-evidence.md](docs/phase-1-evidence.md).
-Phase 2 and later are not implemented.
+Phase 1 is complete. Phase 2's bounded planning and grounding implementation is
+present, but its gate remains open pending three saved live runs. Evidence and
+remaining requirements are in [docs/phase-2-evidence.md](docs/phase-2-evidence.md).
+Phase 3 and later are not implemented.
 
 The implementation sequence is intentionally gated:
 
@@ -43,3 +43,23 @@ committed. To run the deterministic unit tests:
 ```powershell
 python -m unittest discover -s tests -v
 ```
+
+## Phase 2 model configuration
+
+Analysis is opt-in: pressing **Analyze** sends the capture to a configured
+OpenAI-compatible chat-completions endpoint. Set these environment variables
+in the shell that starts Streamlit:
+
+```powershell
+$env:CAPTUREFLOW_API_KEY = "..."
+$env:CAPTUREFLOW_MODEL = "your-model-id"
+# Optional for a compatible provider endpoint:
+$env:CAPTUREFLOW_BASE_URL = "https://provider.example/v1"
+# Optional; defaults to America/Vancouver:
+$env:CAPTUREFLOW_TIMEZONE = "America/Vancouver"
+streamlit run app.py
+```
+
+The configured endpoint must support chat-completions JSON-object responses.
+Without the required key and model variables, Analyze saves and displays a
+typed configuration failure; it never fabricates a result.

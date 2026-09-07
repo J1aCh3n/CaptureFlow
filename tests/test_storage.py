@@ -3,7 +3,7 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
-from captureflow.models import Capture, Conversation
+from captureflow.models import Capture, CaptureRun, Conversation
 from captureflow.storage import CaptureStore
 
 
@@ -69,3 +69,16 @@ class CaptureStoreTests(unittest.TestCase):
         self.assertTrue(self.store.delete_capture(capture.id))
         self.assertFalse(self.store.delete_capture(capture.id))
         self.assertEqual(self.store.list_captures(conversation.id), [])
+
+    def test_run_trace_survives_store_restart(self) -> None:
+        conversation = self.store.save_conversation(Conversation(id="conversation-1", title="Inbox"))
+        capture = self.store.save_capture(
+            Capture(id="capture-1", conversation_id=conversation.id, source_text="Read the brief.")
+        )
+        run = CaptureRun(id="run-1", capture_id=capture.id, status="completed", model_calls=0)
+        self.store.save_run(run)
+
+        restarted_store = CaptureStore(self.database_path)
+        restarted_store.initialize()
+
+        self.assertEqual(restarted_store.latest_run_for_capture(capture.id), run)

@@ -8,6 +8,8 @@ version = "0.1.0"
 description = "A bounded local capture inbox."
 requires-python = ">=3.11"
 dependencies = [
+    "langgraph>=0.2,<2.0",
+    "openai>=1.0,<3.0",
     "pydantic>=2.0,<3.0",
     "streamlit>=1.40,<2.0",
 ]

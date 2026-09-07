@@ -1,7 +1,8 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from typing import Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 DEFAULT_WORKSPACE_ID = "default"
@@ -47,3 +48,95 @@ class Capture(BaseModel):
         if not value.strip():
             raise ValueError("source_text must not be blank")
         return value
+
+
+class StepCondition(BaseModel):
+    source_step_id: str
+    predicate: Literal["has_tasks"]
+    expected: bool = True
+
+
+class PlanStep(BaseModel):
+    """Phase 2 exposes only the actions implemented by its Organizer flow."""
+
+    id: str = Field(min_length=1)
+    action: Literal["summarize", "extract_task"]
+    source_span: str = Field(min_length=1)
+    depends_on: list[str] = Field(default_factory=list)
+    run_if: StepCondition | None = None
+    reason: str = Field(min_length=1)
+
+
+class CapturePlan(BaseModel):
+    steps: list[PlanStep] = Field(default_factory=list)
+    user_clarification_required: bool = False
+    clarification_question: str | None = None
+
+    @model_validator(mode="after")
+    def clarification_has_question(self) -> "CapturePlan":
+        if self.user_clarification_required and not self.clarification_question:
+            raise ValueError("clarification_question is required when clarification is needed")
+        if not self.user_clarification_required and not self.steps:
+            raise ValueError("a plan needs at least one step or a clarification question")
+        return self
+
+
+class SummaryClaim(BaseModel):
+    text: str = Field(min_length=1)
+    source_quote: str = Field(min_length=1)
+
+
+class TaskCandidate(BaseModel):
+    text: str = Field(min_length=1)
+    source_quote: str = Field(min_length=1)
+    due_expression: str | None = None
+    resolved_due_date: date | None = None
+    date_status: Literal["not_requested", "resolved", "ambiguous", "unsupported", "failed"] = (
+        "not_requested"
+    )
+
+
+class OrganizerDraft(BaseModel):
+    summary_claims: list[SummaryClaim] = Field(default_factory=list)
+    tasks: list[TaskCandidate] = Field(default_factory=list)
+
+
+class GroundingIssue(BaseModel):
+    item_kind: Literal["summary", "task", "plan"]
+    item_index: int | None = Field(default=None, ge=0)
+    reason: str = Field(min_length=1)
+
+
+class GroundingReport(BaseModel):
+    verdict: Literal["pass", "revise"]
+    feedback: list[GroundingIssue] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def verdict_matches_feedback(self) -> "GroundingReport":
+        if self.verdict == "pass" and self.feedback:
+            raise ValueError("a passing grounding report cannot contain revision feedback")
+        if self.verdict == "revise" and not self.feedback:
+            raise ValueError("a revision report needs at least one grounding issue")
+        return self
+
+
+class RunError(BaseModel):
+    stage: Literal["plan", "organize", "date_tool", "grounding", "configuration"]
+    message: str
+
+
+class CaptureRun(BaseModel):
+    """Persisted, user-visible Phase 2 trace; private reasoning is excluded."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    capture_id: str
+    status: Literal["completed", "grounding_failed", "failed"]
+    plan: CapturePlan | None = None
+    output: OrganizerDraft | None = None
+    grounding_report: GroundingReport | None = None
+    warnings: list[str] = Field(default_factory=list)
+    errors: list[RunError] = Field(default_factory=list)
+    model_calls: int = Field(ge=0, le=6)
+    created_at: datetime = Field(default_factory=utc_now)

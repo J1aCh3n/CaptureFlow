@@ -1,18 +1,23 @@
+import os
 from pathlib import Path
+from uuid import uuid4
 
 import streamlit as st
 from pydantic import ValidationError
 
-from .models import Capture, Conversation, MAX_CAPTURE_CHARACTERS
+from .llm import ModelError, ModelSettings, OpenAICompatibleModel
+from .models import Capture, CaptureRun, Conversation, MAX_CAPTURE_CHARACTERS, RunError
 from .storage import CaptureStore
+from .workflow import PhaseTwoWorkflow, configured_reference_date
 
 
-DATABASE_PATH = Path("data") / "captureflow.sqlite3"
+def database_path() -> Path:
+    return Path(os.getenv("CAPTUREFLOW_DATABASE_PATH", "data/captureflow.sqlite3"))
 
 
 @st.cache_resource
-def get_store() -> CaptureStore:
-    store = CaptureStore(DATABASE_PATH)
+def get_store(path: str) -> CaptureStore:
+    store = CaptureStore(path)
     store.initialize()
     return store
 
@@ -20,9 +25,11 @@ def get_store() -> CaptureStore:
 def main() -> None:
     st.set_page_config(page_title="CaptureFlow", page_icon="📥")
     st.title("CaptureFlow")
-    st.caption("Phase 1: deterministic local capture storage. No model is called.")
+    st.caption(
+        "Phase 2: bounded planning, grounded summaries and tasks, and one revision at most."
+    )
 
-    store = get_store()
+    store = get_store(str(database_path()))
     conversations = store.list_conversations()
     if not conversations:
         conversation = store.save_conversation(Conversation(title="First capture"))
@@ -49,12 +56,12 @@ def main() -> None:
                 st.success(f"Created {created.title}.")
                 st.rerun()
 
-    st.subheader("Manual capture")
+    st.subheader("Capture")
     source_text = st.text_area(
         "Paste or write plain text",
         max_chars=MAX_CAPTURE_CHARACTERS,
         height=180,
-        placeholder="This is stored exactly as entered; Phase 1 does not summarize or analyze it.",
+        placeholder="Analysis uses a configured model only after you select Analyze.",
     )
     if st.button("Save capture", type="primary"):
         try:
@@ -76,6 +83,63 @@ def main() -> None:
         with st.container(border=True):
             st.caption(f"Saved {capture.created_at.isoformat()}")
             st.text(capture.source_text)
+            if st.button("Analyze", key=f"analyze-{capture.id}"):
+                run = analyze_capture(capture)
+                store.save_run(run)
+                st.rerun()
+            render_run(store.latest_run_for_capture(capture.id))
             if st.button("Delete", key=f"delete-{capture.id}"):
                 store.delete_capture(capture.id)
                 st.rerun()
+
+
+def analyze_capture(capture: Capture) -> CaptureRun:
+    run_id = str(uuid4())
+    try:
+        settings = ModelSettings.from_environment()
+        timezone = os.getenv("CAPTUREFLOW_TIMEZONE", "America/Vancouver")
+        reference_date = configured_reference_date(timezone)
+        workflow = PhaseTwoWorkflow(OpenAICompatibleModel(settings))
+        return workflow.run(
+            capture_id=capture.id,
+            source_text=capture.source_text,
+            run_id=run_id,
+            reference_date=reference_date,
+            timezone=timezone,
+        )
+    except (ModelError, ValueError) as error:
+        return CaptureRun(
+            id=run_id,
+            capture_id=capture.id,
+            status="failed",
+            errors=[RunError(stage="configuration", message=str(error))],
+            model_calls=0,
+        )
+
+
+def render_run(run: CaptureRun | None) -> None:
+    if run is None:
+        st.caption("Not analyzed yet.")
+        return
+    st.caption(f"Latest run: {run.status}; {run.model_calls} model calls")
+    if run.plan and run.plan.user_clarification_required:
+        st.warning(run.plan.clarification_question)
+    elif run.plan:
+        with st.expander("Validated plan"):
+            for step in run.plan.steps:
+                st.write(f"{step.action}: {step.reason}")
+    if run.status == "completed" and run.output:
+        for claim in run.output.summary_claims:
+            st.markdown(f"**Summary:** {claim.text}")
+            st.caption(f"Evidence: {claim.source_quote}")
+        for task in run.output.tasks:
+            st.markdown(f"**Task:** {task.text}")
+            st.caption(f"Evidence: {task.source_quote}")
+            if task.due_expression:
+                st.caption(
+                    f"Date: {task.due_expression} → {task.resolved_due_date or task.date_status}"
+                )
+    for warning in run.warnings:
+        st.warning(warning)
+    for error in run.errors:
+        st.error(f"{error.stage}: {error.message}")
