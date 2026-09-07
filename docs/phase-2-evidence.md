@@ -1,7 +1,7 @@
 # Phase 2 evidence status
 
-**Status:** implementation and scripted routes verified; Phase 2 gate is not
-complete until three configured live runs are saved.
+**Status:** Phase 2 gate passed on 2026-09-07. The implementation passed 36
+scripted tests and all three frozen live checks have retained SQLite traces.
 
 ## Implemented boundary
 
@@ -94,22 +94,37 @@ can display review notes, but has no reply, confirm, edit, or task-update
 transition. The note is not actionable by entering another capture; doing so
 creates a separate capture.
 
-This is one retained live trace, not evidence that the Phase 2 gate is
-complete. It is a meeting note rather than one of the required article, email,
-and idea examples.
+This meeting note is supplementary evidence rather than one of the three
+frozen Phase 2 gate fixtures.
 
-## Required live evidence
+## Frozen live-check evidence
 
 The exact article, email, and idea inputs and their human-authored minimum
 expectations are frozen in
 [`phase-2-live-fixtures.md`](phase-2-live-fixtures.md). Runtime safety and
 offline quality are separated in [`gate-contract.md`](gate-contract.md).
 
-The retained email run already satisfies its task-only expectation. The latest
-article and idea attempts were rejected under the retired criterion that a
-grounded summary must add enough consolidation or higher-level synthesis.
-Those failures remain useful history, but neither proves the revised gate. The
-same stored article and idea captures must be run again under the new contract.
-Each trace must still show its validated plan, output or typed failure,
-grounding result, warnings, and model-call count. Scripted results do not
-establish live planning or grounding quality.
+The latest persisted run for each frozen capture was checked directly in
+`data/captureflow.sqlite3`:
+
+| Fixture | UTC time | Run ID | Result |
+| --- | --- | --- | --- |
+| Article (`news`) | 2026-09-07T18:49:18.236080Z | `d7b359de-425d-4b72-98ba-4d4ea2c247a8` | `completed`; 3 model calls; exact action set `summarize`; two grounded claims; Critic `pass`; no warnings or errors |
+| Email (`emails`) | 2026-09-07T18:20:49.270398Z | `5a79efd5-f762-4267-8f82-744c1836e568` | `completed`; 3 model calls; exact action set `extract_task`; grounded `$42.98` payment task; no invented date; Critic `pass`; no warnings or errors |
+| Idea (`ideas`) | 2026-09-07T18:48:40.672185Z | `1f3f62d2-b37c-454b-8e75-34ad79604fd0` | `completed`; 3 model calls; exact action set `summarize`; grounded product/risk and proposed-pipeline claims; Critic `pass`; no warnings or errors |
+
+All three latest runs meet the minimum expectations frozen before the reruns.
+Earlier failed attempts remain in run history rather than being removed or
+replaced with easier captures.
+
+## Gate conclusion and claim boundary
+
+Phase 2's planned Organizer flow has passed its scripted route tests and three
+frozen live acceptance examples. This establishes that the bounded Coordinator
+→ Organizer → typed date handling → grounding path works for those retained
+examples with the configured model.
+
+It does not establish reliable understanding of arbitrary articles, emails, or
+ideas; cross-run stability; general summary quality; or superiority over a
+simpler single-prompt design. Those claims require the larger labeled offline
+evaluation defined for later work.

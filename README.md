@@ -1,17 +1,18 @@
 # CaptureFlow
 
-CaptureFlow is a planned local, single-user AI capture inbox. It accepts pasted
-plain text and routes it through a bounded plan to produce only relevant
-summaries, task proposals, and long-term-memory proposals.
+CaptureFlow is a local, single-user AI capture inbox under staged development.
+It accepts pasted plain text and routes it through a bounded plan. Phase 2
+produces source-grounded summaries and task proposals; long-term-memory
+proposals remain Phase 3 work.
 
 ## Current status
 
-Phase 1 is complete. Phase 2's bounded planning and grounding implementation is
-present, including one saved live meeting-note trace, but its gate remains open
-pending the required article, email, and idea runs. Evidence and remaining
-requirements are in [docs/phase-2-evidence.md](docs/phase-2-evidence.md).
-Phase 3 and later are not implemented. In particular, a visible confirmation
-note cannot yet receive a reply, confirm, edit, or task-update action.
+Phases 1 and 2 are complete. Phase 2 passed 36 scripted tests and the frozen
+article, email, and idea live checks with retained SQLite traces. The evidence
+and claim boundary are in
+[docs/phase-2-evidence.md](docs/phase-2-evidence.md). Phase 3 and later are not
+implemented. In particular, a visible confirmation note cannot yet receive a
+reply, confirm, edit, or task-update action.
 
 Runtime source safety is separated from offline output-quality evaluation in
 [docs/gate-contract.md](docs/gate-contract.md). The fixed Phase 2 article,
