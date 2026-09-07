@@ -63,6 +63,16 @@ def resolve_relative_date(expression: str, reference_date: date, timezone: str) 
             resolved_date=iso_date,
             explanation="The expression is an ISO calendar date.",
         )
+    if month_day := _parse_month_day(normalized, reference_date):
+        return DateResolution(
+            **base,
+            status="resolved",
+            resolved_date=month_day,
+            explanation=(
+                "Resolved M/D using the reference year, or the following year when that date "
+                "has already passed."
+            ),
+        )
     if match := re.fullmatch(r"next (monday|tuesday|wednesday|thursday|friday|saturday|sunday)", normalized):
         weekday = _WEEKDAYS[match.group(1)]
         days_ahead = (weekday - reference_date.weekday()) % 7 or 7
@@ -99,3 +109,20 @@ def _parse_iso_date(value: str) -> date | None:
         return date.fromisoformat(value)
     except ValueError:
         return None
+
+
+def _parse_month_day(value: str, reference_date: date) -> date | None:
+    match = re.fullmatch(r"(\d{1,2})/(\d{1,2})", value)
+    if not match:
+        return None
+    month, day = (int(part) for part in match.groups())
+    try:
+        candidate = date(reference_date.year, month, day)
+    except ValueError:
+        return None
+    if candidate < reference_date:
+        try:
+            return date(reference_date.year + 1, month, day)
+        except ValueError:
+            return None
+    return candidate

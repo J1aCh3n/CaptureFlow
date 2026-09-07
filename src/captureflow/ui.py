@@ -145,6 +145,13 @@ def render_run(run: CaptureRun | None) -> None:
                     )
         for note in run.output.review_notes:
             st.info(f"Needs confirmation: {note.question}\n\nOriginal text: {note.source_quote}")
+    if run.grounding_report and run.grounding_report.verdict == "revise":
+        with st.expander("Grounding feedback"):
+            for issue in run.grounding_report.feedback:
+                item = issue.item_kind
+                if issue.item_index is not None:
+                    item = f"{item} {issue.item_index + 1}"
+                st.write(f"{item}: {issue.reason}")
     for warning in run.warnings:
         st.warning(warning)
     for error in run.errors:
@@ -157,6 +164,9 @@ def render_run_history(runs: list[CaptureRun]) -> None:
     with st.expander(f"Run history ({len(runs)})"):
         for run in runs:
             st.write(f"{run.created_at.isoformat()} — {run.status}; {run.model_calls} model calls")
+            if run.grounding_report and run.grounding_report.verdict == "revise":
+                for issue in run.grounding_report.feedback:
+                    st.caption(f"Grounding: {issue.item_kind}: {issue.reason}")
             for error in run.errors:
                 st.caption(f"{error.stage}: {error.message}")
             for warning in run.warnings:

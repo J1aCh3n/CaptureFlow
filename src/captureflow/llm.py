@@ -78,7 +78,12 @@ class OpenAICompatibleModel:
             system=(
                 "You are CaptureFlow's Organizer. Return JSON only. Produce claims and "
                 "tasks only for actions in the supplied plan. Every item must include an "
-                "exact quote from the source. Do not infer missing facts or dates. Do not create "
+                "exact, continuous quote from the source that is sufficient by itself to support "
+                "the item. When a task combines a problem, requested action, or deadline from "
+                "different clauses, quote the continuous source span containing all required "
+                "clauses; otherwise preserve only the scope stated in the quote. If grounding "
+                "feedback is supplied, correct every cited issue before returning. Do not infer "
+                "missing facts or dates. Do not create "
                 "a summary that merely repeats a task or one source sentence. Preserve source "
                 "wording exactly: never silently correct a possible typo. If a term seems "
                 "materially ambiguous, add a review_note asking the user to confirm it and quote "
@@ -97,6 +102,8 @@ class OpenAICompatibleModel:
             system=(
                 "You are CaptureFlow's grounding critic. Return JSON only. Mark pass only "
                 "when every paraphrased claim and task is entailed by its cited quote. "
+                "For a task that combines details from separate clauses, its quote must contain "
+                "all details needed to entail the task. "
                 "Also request revision when a summary merely restates one source sentence or a "
                 "task without adding useful consolidation. Review notes must preserve original "
                 "source wording. Otherwise request revise with item-specific feedback."

@@ -22,3 +22,15 @@ class DateToolTests(unittest.TestCase):
 
         self.assertEqual(result.status, "ambiguous")
         self.assertIn("中文星期", result.explanation)
+
+    def test_month_day_uses_reference_year_when_not_yet_passed(self) -> None:
+        result = resolve_relative_date("9/8", date(2026, 9, 6), "America/Vancouver")
+
+        self.assertEqual(result.status, "resolved")
+        self.assertEqual(result.resolved_date, date(2026, 9, 8))
+
+    def test_month_day_rolls_to_next_year_when_passed(self) -> None:
+        result = resolve_relative_date("9/8", date(2026, 9, 9), "America/Vancouver")
+
+        self.assertEqual(result.status, "resolved")
+        self.assertEqual(result.resolved_date, date(2027, 9, 8))

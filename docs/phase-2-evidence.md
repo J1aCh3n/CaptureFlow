@@ -24,15 +24,16 @@ python -m unittest discover -s tests -v
 python -m compileall -q app.py src tests
 ```
 
-Result on 2026-09-06: 25 tests passed.
+Result on 2026-09-06: 28 tests passed.
 
 The tests cover valid and invalid plans, English and Chinese date ambiguity,
-date-tool failure, one successful revision, retry exhaustion with generated
-items omitted, persisted run traces, complete run-history retrieval, an
-external-search capability boundary, preserved ambiguous source terms, no
-redundant summary outside a summary plan, no exposed unimplemented conditional
-fields, omitted temperature for reasoning-model compatibility, and a visible
-configuration failure when no model is configured.
+documented `M/D` date rollover, date-tool failure, one successful revision,
+meeting-task revision with complete cross-clause evidence, retry exhaustion
+with generated items omitted, persisted run traces, complete run-history
+retrieval, an external-search capability boundary, preserved ambiguous source
+terms, no redundant summary outside a summary plan, no exposed unimplemented
+conditional fields, omitted temperature for reasoning-model compatibility, and
+a visible configuration failure when no model is configured.
 
 ## Required live evidence
 

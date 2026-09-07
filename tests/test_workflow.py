@@ -100,6 +100,68 @@ class PhaseTwoWorkflowTests(unittest.TestCase):
         self.assertEqual(result.model_calls, 5)
         self.assertEqual(model.calls, ["plan", "organize", "critique", "organize", "critique"])
 
+    def test_meeting_task_revision_cites_problem_action_and_deadline_together(self) -> None:
+        source = "背景：上线临近；问题：接口延迟阻塞联调；待办：P0，9/8修复交付。"
+        plan = CapturePlan(
+            steps=[
+                PlanStep(
+                    id="task",
+                    action="extract_task",
+                    source_span="问题：接口延迟阻塞联调；待办：P0，9/8修复交付。",
+                    reason="The capture identifies a blocking issue and a P0 delivery task.",
+                )
+            ]
+        )
+        initial_draft = OrganizerDraft.model_validate(
+            {
+                "tasks": [
+                    {
+                        "text": "完成接口延迟修复交付",
+                        "source_quote": "待办：P0，9/8修复交付。",
+                        "due_expression": "9/8",
+                    }
+                ]
+            }
+        )
+        revised_draft = OrganizerDraft.model_validate(
+            {
+                "tasks": [
+                    {
+                        "text": "完成接口延迟修复交付",
+                        "source_quote": "问题：接口延迟阻塞联调；待办：P0，9/8修复交付。",
+                        "due_expression": "9/8",
+                    }
+                ]
+            }
+        )
+        revise = GroundingReport.model_validate(
+            {
+                "verdict": "revise",
+                "feedback": [
+                    {
+                        "item_kind": "task",
+                        "item_index": 0,
+                        "reason": "Include the blocking issue in the cited source quote.",
+                    }
+                ],
+            }
+        )
+        model = ScriptedModel(
+            plans=[plan], drafts=[initial_draft, revised_draft], reports=[revise, PASS]
+        )
+
+        result = PhaseTwoWorkflow(model).run(
+            capture_id="capture-1",
+            source_text=source,
+            run_id="run-1",
+            reference_date=date(2026, 9, 6),
+            timezone="America/Vancouver",
+        )
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.output.tasks[0].resolved_due_date, date(2026, 9, 8))
+        self.assertIn("接口延迟阻塞联调", result.output.tasks[0].source_quote)
+
     def test_grounding_exhaustion_omits_generated_items(self) -> None:
         model = ScriptedModel(plans=[PLAN], drafts=[DRAFT, DRAFT], reports=[REVISE, REVISE])
 
