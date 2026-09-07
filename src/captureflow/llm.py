@@ -104,6 +104,9 @@ class OpenAICompatibleModel:
             system=(
                 "You are CaptureFlow's grounding critic. Return JSON only. Mark pass only "
                 "when every paraphrased claim and task is entailed by its cited quote. "
+                "Date resolution is a deterministic typed-tool result and is not a source "
+                "claim: assess whether the original due_expression is cited, but never require "
+                "the resolved calendar date or its year to occur in the source quote. "
                 "For a task that combines details from separate clauses, its quote must contain "
                 "all details needed to entail the task. "
                 "Also request revision when a summary merely restates one source sentence or a "
@@ -151,6 +154,7 @@ class ScriptedModel:
         self.drafts = drafts
         self.reports = reports
         self.calls: list[str] = []
+        self.critique_drafts: list[OrganizerDraft] = []
 
     def plan(self, source_text: str) -> CapturePlan:
         self.calls.append("plan")
@@ -167,6 +171,7 @@ class ScriptedModel:
 
     def critique(self, source_text: str, draft: OrganizerDraft) -> GroundingReport:
         self.calls.append("critique")
+        self.critique_drafts.append(draft)
         return GroundingReport.model_validate(self._next(self.reports, "critique"))
 
     @staticmethod

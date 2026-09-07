@@ -162,6 +162,17 @@ class PhaseTwoWorkflowTests(unittest.TestCase):
         self.assertEqual(result.output.tasks[0].resolved_due_date, date(2026, 9, 8))
         self.assertIn("接口延迟阻塞联调", result.output.tasks[0].source_quote)
 
+    def test_critic_receives_due_expression_but_not_typed_date_resolution(self) -> None:
+        model = ScriptedModel(plans=[PLAN], drafts=[DRAFT], reports=[PASS])
+
+        result = self.run_workflow(model)
+
+        critic_task = model.critique_drafts[0].tasks[0]
+        self.assertEqual(result.output.tasks[0].resolved_due_date, date(2026, 9, 9))
+        self.assertEqual(critic_task.due_expression, "next Wednesday")
+        self.assertIsNone(critic_task.resolved_due_date)
+        self.assertEqual(critic_task.date_status, "not_requested")
+
     def test_grounding_exhaustion_omits_generated_items(self) -> None:
         model = ScriptedModel(plans=[PLAN], drafts=[DRAFT, DRAFT], reports=[REVISE, REVISE])
 

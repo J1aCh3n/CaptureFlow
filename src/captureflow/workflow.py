@@ -222,7 +222,9 @@ class PhaseTwoWorkflow:
             }
         calls = state["model_calls"] + 1
         try:
-            report = self.model.critique(state["source_text"], state["draft"])
+            report = self.model.critique(
+                state["source_text"], self._source_grounding_view(state["draft"])
+            )
             return {"grounding_report": report, "model_calls": calls}
         except ModelError as error:
             return self._failure(state, "grounding", str(error), calls)
@@ -315,6 +317,21 @@ class PhaseTwoWorkflow:
                     )
                 )
         return feedback
+
+    @staticmethod
+    def _source_grounding_view(draft: OrganizerDraft) -> OrganizerDraft:
+        """Hide deterministic date-tool outputs from the source-only Critic."""
+
+        return draft.model_copy(
+            update={
+                "tasks": [
+                    task.model_copy(
+                        update={"resolved_due_date": None, "date_status": "not_requested"}
+                    )
+                    for task in draft.tasks
+                ]
+            }
+        )
 
 
 def configured_reference_date(timezone: str) -> date:
