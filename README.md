@@ -7,9 +7,11 @@ summaries, task proposals, and long-term-memory proposals.
 ## Current status
 
 Phase 1 is complete. Phase 2's bounded planning and grounding implementation is
-present, but its gate remains open pending three saved live runs. Evidence and
-remaining requirements are in [docs/phase-2-evidence.md](docs/phase-2-evidence.md).
-Phase 3 and later are not implemented.
+present, including one saved live meeting-note trace, but its gate remains open
+pending the required article, email, and idea runs. Evidence and remaining
+requirements are in [docs/phase-2-evidence.md](docs/phase-2-evidence.md).
+Phase 3 and later are not implemented. In particular, a visible confirmation
+note cannot yet receive a reply, confirm, edit, or task-update action.
 
 The implementation sequence is intentionally gated:
 
