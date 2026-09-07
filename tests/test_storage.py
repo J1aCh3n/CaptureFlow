@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from datetime import datetime, timezone
+import json
 from pathlib import Path
 
 from captureflow.models import Capture, CaptureRun, Conversation
@@ -82,3 +83,47 @@ class CaptureStoreTests(unittest.TestCase):
         restarted_store.initialize()
 
         self.assertEqual(restarted_store.latest_run_for_capture(capture.id), run)
+        self.assertEqual(restarted_store.list_runs_for_capture(capture.id), [run])
+
+    def test_legacy_plan_trace_with_retired_fields_remains_readable(self) -> None:
+        conversation = self.store.save_conversation(Conversation(id="conversation-1", title="Inbox"))
+        capture = self.store.save_capture(
+            Capture(id="capture-1", conversation_id=conversation.id, source_text="Read the brief.")
+        )
+        legacy_payload = {
+            "id": "run-1",
+            "capture_id": capture.id,
+            "status": "completed",
+            "plan": {
+                "steps": [
+                    {
+                        "id": "task",
+                        "action": "extract_task",
+                        "source_span": "Read the brief.",
+                        "depends_on": [],
+                        "run_if": None,
+                        "reason": "Legacy plan.",
+                    }
+                ],
+                "user_clarification_required": False,
+                "clarification_question": None,
+            },
+            "output": {"summary_claims": [], "tasks": []},
+            "grounding_report": None,
+            "warnings": [],
+            "errors": [],
+            "model_calls": 3,
+            "created_at": "2026-09-06T00:00:00+00:00",
+        }
+        with self.store._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO capture_runs (id, capture_id, status, result_json, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                ("run-1", capture.id, "completed", json.dumps(legacy_payload), legacy_payload["created_at"]),
+            )
+
+        run = self.store.get_run("run-1")
+
+        self.assertEqual(run.plan.steps[0].action, "extract_task")

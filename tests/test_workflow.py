@@ -2,7 +2,7 @@ import unittest
 from datetime import date
 
 from captureflow.llm import ScriptedModel
-from captureflow.models import CapturePlan, GroundingReport, OrganizerDraft, PlanStep, StepCondition
+from captureflow.models import CapturePlan, GroundingReport, OrganizerDraft, PlanStep
 from captureflow.workflow import PhaseTwoWorkflow, validate_plan
 
 
@@ -131,48 +131,79 @@ class PhaseTwoWorkflowTests(unittest.TestCase):
         self.assertEqual(result.output.tasks[0].date_status, "failed")
         self.assertIn("Date tool failed", result.warnings[0])
 
-    def test_dependency_cycle_is_rejected(self) -> None:
-        cyclic_plan = CapturePlan(
-            steps=[
-                PlanStep(
-                    id="one",
-                    action="summarize",
-                    source_span="Ship the release next Wednesday.",
-                    depends_on=["two"],
-                    reason="Cycle test.",
-                ),
-                PlanStep(
-                    id="two",
-                    action="extract_task",
-                    source_span="The release checklist is ready.",
-                    depends_on=["one"],
-                    reason="Cycle test.",
-                ),
-            ]
+    def test_external_search_request_becomes_a_capability_clarification(self) -> None:
+        model = ScriptedModel(plans=[], drafts=[], reports=[])
+
+        result = PhaseTwoWorkflow(model).run(
+            capture_id="capture-1",
+            source_text="帮我搜搜邮编 91006 最近的 PetSmart 是哪家店",
+            run_id="run-1",
+            reference_date=date(2026, 9, 6),
+            timezone="America/Vancouver",
         )
 
-        with self.assertRaisesRegex(ValueError, "cycle"):
-            validate_plan(cyclic_plan, SOURCE)
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.model_calls, 0)
+        self.assertEqual(model.calls, [])
+        self.assertTrue(result.plan.user_clarification_required)
+        self.assertIn("cannot perform web searches", result.plan.clarification_question)
 
-    def test_conditional_step_is_rejected_until_its_router_exists(self) -> None:
-        conditional_plan = CapturePlan(
+    def test_task_only_plan_rejects_a_redundant_summary(self) -> None:
+        task_only_plan = CapturePlan(
             steps=[
                 PlanStep(
                     id="task",
                     action="extract_task",
                     source_span="Ship the release next Wednesday.",
-                    reason="Extract the stated task.",
-                ),
-                PlanStep(
-                    id="summary",
-                    action="summarize",
-                    source_span="The release checklist is ready.",
-                    depends_on=["task"],
-                    run_if=StepCondition(source_step_id="task", predicate="has_tasks"),
-                    reason="This must not be silently ignored.",
+                    reason="The capture contains an explicit task.",
                 ),
             ]
         )
+        model = ScriptedModel(plans=[task_only_plan], drafts=[DRAFT], reports=[])
 
-        with self.assertRaisesRegex(ValueError, "not implemented"):
-            validate_plan(conditional_plan, SOURCE)
+        result = self.run_workflow(model)
+
+        self.assertEqual(result.status, "failed")
+        self.assertIn("summaries not requested", result.errors[0].message)
+
+    def test_review_note_preserves_an_ambiguous_source_term(self) -> None:
+        plan = CapturePlan(
+            steps=[
+                PlanStep(
+                    id="task",
+                    action="extract_task",
+                    source_span="买毛条",
+                    reason="The capture contains a purchase task.",
+                )
+            ]
+        )
+        draft = OrganizerDraft.model_validate(
+            {
+                "tasks": [{"text": "购买毛条", "source_quote": "买毛条"}],
+                "review_notes": [
+                    {
+                        "question": "“毛条”是否需要确认？",
+                        "source_quote": "毛条",
+                    }
+                ],
+            }
+        )
+        model = ScriptedModel(plans=[plan], drafts=[draft], reports=[PASS])
+
+        result = PhaseTwoWorkflow(model).run(
+            capture_id="capture-1",
+            source_text="周二去 PetSmart 买毛条。",
+            run_id="run-1",
+            reference_date=date(2026, 9, 6),
+            timezone="America/Vancouver",
+        )
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.output.tasks[0].text, "购买毛条")
+        self.assertEqual(result.output.review_notes[0].source_quote, "毛条")
+
+    def test_phase_two_plan_schema_does_not_expose_conditions_or_dependencies(self) -> None:
+        fields = PlanStep.model_json_schema()["properties"]
+
+        self.assertNotIn("run_if", fields)
+        self.assertNotIn("depends_on", fields)

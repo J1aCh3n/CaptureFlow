@@ -56,8 +56,13 @@ class OpenAICompatibleModel:
             CapturePlan,
             system=(
                 "You are CaptureFlow's Coordinator. Return JSON only. Plan only the "
-                "implemented actions summarize and extract_task. Use exact source spans. "
-                "If the input needs clarification, return no steps and one concise question."
+                "implemented actions summarize and extract_task; do not emit dependencies or "
+                "conditions. Use exact source spans. For a short, direct personal to-do list, "
+                "choose extract_task only and omit summarize. Summaries must consolidate useful "
+                "context rather than restate individual source sentences. This application cannot "
+                "browse the web, search local businesses, or access current external information. "
+                "For such a request, return no steps and one concise question asking whether to "
+                "save it as a manual research task instead."
             ),
             payload={"source_text": source_text},
         )
@@ -73,7 +78,11 @@ class OpenAICompatibleModel:
             system=(
                 "You are CaptureFlow's Organizer. Return JSON only. Produce claims and "
                 "tasks only for actions in the supplied plan. Every item must include an "
-                "exact quote from the source. Do not infer missing facts or dates."
+                "exact quote from the source. Do not infer missing facts or dates. Do not create "
+                "a summary that merely repeats a task or one source sentence. Preserve source "
+                "wording exactly: never silently correct a possible typo. If a term seems "
+                "materially ambiguous, add a review_note asking the user to confirm it and quote "
+                "the original term."
             ),
             payload={
                 "source_text": source_text,
@@ -88,7 +97,9 @@ class OpenAICompatibleModel:
             system=(
                 "You are CaptureFlow's grounding critic. Return JSON only. Mark pass only "
                 "when every paraphrased claim and task is entailed by its cited quote. "
-                "Otherwise request revise with item-specific feedback."
+                "Also request revision when a summary merely restates one source sentence or a "
+                "task without adding useful consolidation. Review notes must preserve original "
+                "source wording. Otherwise request revise with item-specific feedback."
             ),
             payload={"source_text": source_text, "draft": draft.model_dump(mode="json")},
         )
@@ -100,7 +111,6 @@ class OpenAICompatibleModel:
         try:
             response = self.client.chat.completions.create(
                 model=self.settings.model,
-                temperature=0,
                 response_format={"type": "json_object"},
                 messages=[
                     {"role": "system", "content": system},

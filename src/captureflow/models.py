@@ -50,24 +50,20 @@ class Capture(BaseModel):
         return value
 
 
-class StepCondition(BaseModel):
-    source_step_id: str
-    predicate: Literal["has_tasks"]
-    expected: bool = True
-
-
 class PlanStep(BaseModel):
     """Phase 2 exposes only the actions implemented by its Organizer flow."""
+
+    model_config = ConfigDict(extra="forbid")
 
     id: str = Field(min_length=1)
     action: Literal["summarize", "extract_task"]
     source_span: str = Field(min_length=1)
-    depends_on: list[str] = Field(default_factory=list)
-    run_if: StepCondition | None = None
     reason: str = Field(min_length=1)
 
 
 class CapturePlan(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     steps: list[PlanStep] = Field(default_factory=list)
     user_clarification_required: bool = False
     clarification_question: str | None = None
@@ -82,11 +78,15 @@ class CapturePlan(BaseModel):
 
 
 class SummaryClaim(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     text: str = Field(min_length=1)
     source_quote: str = Field(min_length=1)
 
 
 class TaskCandidate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     text: str = Field(min_length=1)
     source_quote: str = Field(min_length=1)
     due_expression: str | None = None
@@ -96,18 +96,33 @@ class TaskCandidate(BaseModel):
     )
 
 
+class ReviewNote(BaseModel):
+    """A user confirmation request that preserves, rather than corrects, source text."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    question: str = Field(min_length=1)
+    source_quote: str = Field(min_length=1)
+
+
 class OrganizerDraft(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     summary_claims: list[SummaryClaim] = Field(default_factory=list)
     tasks: list[TaskCandidate] = Field(default_factory=list)
+    review_notes: list[ReviewNote] = Field(default_factory=list)
 
 
 class GroundingIssue(BaseModel):
-    item_kind: Literal["summary", "task", "plan"]
+    model_config = ConfigDict(extra="forbid")
+
+    item_kind: Literal["summary", "task", "review", "plan"]
     item_index: int | None = Field(default=None, ge=0)
     reason: str = Field(min_length=1)
 
 
 class GroundingReport(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     verdict: Literal["pass", "revise"]
     feedback: list[GroundingIssue] = Field(default_factory=list)
 

@@ -88,6 +88,7 @@ def main() -> None:
                 store.save_run(run)
                 st.rerun()
             render_run(store.latest_run_for_capture(capture.id))
+            render_run_history(store.list_runs_for_capture(capture.id))
             if st.button("Delete", key=f"delete-{capture.id}"):
                 store.delete_capture(capture.id)
                 st.rerun()
@@ -133,13 +134,30 @@ def render_run(run: CaptureRun | None) -> None:
             st.markdown(f"**Summary:** {claim.text}")
             st.caption(f"Evidence: {claim.source_quote}")
         for task in run.output.tasks:
-            st.markdown(f"**Task:** {task.text}")
+            st.markdown(f"**Task candidate:** {task.text}")
             st.caption(f"Evidence: {task.source_quote}")
             if task.due_expression:
-                st.caption(
-                    f"Date: {task.due_expression} → {task.resolved_due_date or task.date_status}"
-                )
+                if task.date_status == "ambiguous":
+                    st.info(f"Date needs confirmation: {task.due_expression}")
+                else:
+                    st.caption(
+                        f"Date: {task.due_expression} → {task.resolved_due_date or task.date_status}"
+                    )
+        for note in run.output.review_notes:
+            st.info(f"Needs confirmation: {note.question}\n\nOriginal text: {note.source_quote}")
     for warning in run.warnings:
         st.warning(warning)
     for error in run.errors:
         st.error(f"{error.stage}: {error.message}")
+
+
+def render_run_history(runs: list[CaptureRun]) -> None:
+    if not runs:
+        return
+    with st.expander(f"Run history ({len(runs)})"):
+        for run in runs:
+            st.write(f"{run.created_at.isoformat()} — {run.status}; {run.model_calls} model calls")
+            for error in run.errors:
+                st.caption(f"{error.stage}: {error.message}")
+            for warning in run.warnings:
+                st.caption(f"Warning: {warning}")

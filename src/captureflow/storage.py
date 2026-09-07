@@ -184,7 +184,7 @@ class CaptureStore:
             ).fetchone()
         if row is None:
             raise KeyError(f"run not found: {run_id}")
-        return CaptureRun.model_validate_json(row["result_json"])
+        return _decode_run(row["result_json"])
 
     def latest_run_for_capture(self, capture_id: str) -> CaptureRun | None:
         with self._connect() as connection:
@@ -197,7 +197,19 @@ class CaptureStore:
                 """,
                 (capture_id,),
             ).fetchone()
-        return None if row is None else CaptureRun.model_validate_json(row["result_json"])
+        return None if row is None else _decode_run(row["result_json"])
+
+    def list_runs_for_capture(self, capture_id: str) -> list[CaptureRun]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT result_json FROM capture_runs
+                WHERE capture_id = ?
+                ORDER BY created_at DESC, id DESC
+                """,
+                (capture_id,),
+            ).fetchall()
+        return [_decode_run(row["result_json"]) for row in rows]
 
     @contextmanager
     def _connect(self) -> Generator[sqlite3.Connection, None, None]:
@@ -212,3 +224,14 @@ class CaptureStore:
             raise
         finally:
             connection.close()
+
+
+def _decode_run(serialized: str) -> CaptureRun:
+    """Read pre-repair Phase 2 traces without rewriting their saved JSON evidence."""
+
+    payload = json.loads(serialized)
+    plan = payload.get("plan")
+    for step in plan.get("steps", []) if isinstance(plan, dict) else []:
+        step.pop("depends_on", None)
+        step.pop("run_if", None)
+    return CaptureRun.model_validate(payload)

@@ -16,3 +16,9 @@ class DateToolTests(unittest.TestCase):
 
         self.assertEqual(result.status, "ambiguous")
         self.assertIsNone(result.resolved_date)
+
+    def test_bare_chinese_weekday_is_reported_as_ambiguous(self) -> None:
+        result = resolve_relative_date("周二", date(2026, 9, 6), "America/Vancouver")
+
+        self.assertEqual(result.status, "ambiguous")
+        self.assertIn("中文星期", result.explanation)

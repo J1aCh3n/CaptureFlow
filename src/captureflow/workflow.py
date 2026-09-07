@@ -44,31 +44,11 @@ def validate_plan(plan: CapturePlan, source_text: str) -> None:
         return
 
     source = _normalize(source_text)
-    step_ids = {step.id for step in plan.steps}
-    if len(step_ids) != len(plan.steps):
+    if len({step.id for step in plan.steps}) != len(plan.steps):
         raise ValueError("plan step IDs must be unique")
     for step in plan.steps:
         if _normalize(step.source_span) not in source:
             raise ValueError(f"plan step {step.id} cites a source span not present in the capture")
-        unknown_dependencies = set(step.depends_on) - step_ids
-        if unknown_dependencies:
-            raise ValueError(f"plan step {step.id} has unknown dependencies")
-        if step.id in step.depends_on:
-            raise ValueError(f"plan step {step.id} cannot depend on itself")
-        if step.run_if:
-            raise ValueError("conditional plan steps are not implemented in Phase 2")
-    _assert_acyclic(plan)
-
-
-def _assert_acyclic(plan: CapturePlan) -> None:
-    dependencies = {step.id: set(step.depends_on) for step in plan.steps}
-    resolved: set[str] = set()
-    while dependencies:
-        ready = {step_id for step_id, needs in dependencies.items() if needs <= resolved}
-        if not ready:
-            raise ValueError("plan dependencies contain a cycle")
-        resolved.update(ready)
-        dependencies = {step_id: needs for step_id, needs in dependencies.items() if step_id not in ready}
 
 
 class PhaseTwoWorkflow:
@@ -131,7 +111,11 @@ class PhaseTwoWorkflow:
             self._after_plan,
             {"organize": "organize", "complete": "complete", "end": END},
         )
-        graph.add_edge("organize", "resolve_dates")
+        graph.add_conditional_edges(
+            "organize",
+            self._after_organize,
+            {"resolve_dates": "resolve_dates", "end": END},
+        )
         graph.add_edge("resolve_dates", "ground")
         graph.add_conditional_edges(
             "ground",
@@ -149,6 +133,16 @@ class PhaseTwoWorkflow:
         return graph.compile()
 
     def _plan(self, state: PhaseTwoState) -> PhaseTwoState:
+        if _requires_web_search(state["source_text"]):
+            return {
+                "plan": CapturePlan(
+                    user_clarification_required=True,
+                    clarification_question=(
+                        "This local version cannot perform web searches. Would you like to "
+                        "save this as a manual research task instead?"
+                    ),
+                )
+            }
         calls = state["model_calls"] + 1
         try:
             plan = self.model.plan(state["source_text"])
@@ -174,6 +168,10 @@ class PhaseTwoWorkflow:
             return {"draft": draft, "model_calls": calls}
         except (ModelError, ValueError) as error:
             return self._failure(state, "organize", str(error), calls)
+
+    @staticmethod
+    def _after_organize(state: PhaseTwoState) -> str:
+        return "end" if state["status"] == "failed" else "resolve_dates"
 
     def _resolve_dates(self, state: PhaseTwoState) -> PhaseTwoState:
         draft = state["draft"]
@@ -297,6 +295,15 @@ class PhaseTwoWorkflow:
                         reason="The cited quote does not occur in the source text.",
                     )
                 )
+        for index, note in enumerate(draft.review_notes):
+            if _normalize(note.source_quote) not in source:
+                feedback.append(
+                    GroundingIssue(
+                        item_kind="review",
+                        item_index=index,
+                        reason="The review note's quoted source does not occur in the capture.",
+                    )
+                )
         return feedback
 
 
@@ -309,3 +316,18 @@ def configured_reference_date(timezone: str) -> date:
 
 def _normalize(value: str) -> str:
     return " ".join(value.split())
+
+
+def _requires_web_search(source_text: str) -> bool:
+    normalized = source_text.lower()
+    return any(
+        phrase in normalized
+        for phrase in (
+            "帮我搜",
+            "帮我搜索",
+            "附近有什么",
+            "search nearby",
+            "find nearby",
+            "nearest ",
+        )
+    )

@@ -23,7 +23,6 @@ _WEEKDAYS = {
     "sunday": 6,
 }
 
-
 def resolve_relative_date(expression: str, reference_date: date, timezone: str) -> DateResolution:
     """Resolve a small, explicit v0 vocabulary without guessing bare weekdays."""
 
@@ -42,6 +41,20 @@ def resolve_relative_date(expression: str, reference_date: date, timezone: str) 
             status="resolved",
             resolved_date=reference_date + timedelta(days=1),
             explanation="Resolved relative to the supplied reference date.",
+        )
+    if expression.strip() == "今天":
+        return DateResolution(
+            **base,
+            status="resolved",
+            resolved_date=reference_date,
+            explanation="根据提供的参考日期解析。",
+        )
+    if expression.strip() == "明天":
+        return DateResolution(
+            **base,
+            status="resolved",
+            resolved_date=reference_date + timedelta(days=1),
+            explanation="根据提供的参考日期解析。",
         )
     if iso_date := _parse_iso_date(normalized):
         return DateResolution(
@@ -65,10 +78,19 @@ def resolve_relative_date(expression: str, reference_date: date, timezone: str) 
             status="ambiguous",
             explanation="A bare weekday can refer to more than one upcoming date.",
         )
+    if re.fullmatch(r"(?:周|星期|礼拜)[一二三四五六日天]", expression.strip()):
+        return DateResolution(
+            **base,
+            status="ambiguous",
+            explanation="未带周次的中文星期表达可能指不同的日期，请确认具体日期。",
+        )
     return DateResolution(
         **base,
         status="unsupported",
-        explanation="This Phase 2 date tool supports today, tomorrow, ISO dates, and next weekdays.",
+        explanation=(
+            "This Phase 2 date tool supports today, tomorrow, ISO dates, explicit next "
+            "weekdays, and reports bare English or Chinese weekdays as ambiguous."
+        ),
     )
 
 
