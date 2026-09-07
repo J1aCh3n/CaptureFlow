@@ -89,7 +89,38 @@ class PhaseTwoWorkflowTests(unittest.TestCase):
 
         self.assertEqual(result.status, "failed")
         self.assertEqual(result.errors[0].stage, "plan")
-        self.assertEqual(model.calls, ["plan"])
+        self.assertEqual(model.calls, ["plan", "repair_plan"])
+
+    def test_invalid_plan_receives_one_source_span_repair(self) -> None:
+        invalid_plan = CapturePlan(
+            steps=[
+                PlanStep(
+                    id="task",
+                    action="extract_task",
+                    source_span="Paraphrased release commitment.",
+                    reason="Invalid test plan.",
+                )
+            ]
+        )
+        repaired_plan = CapturePlan(
+            steps=[
+                PlanStep(
+                    id="task",
+                    action="extract_task",
+                    source_span="Ship the release next Wednesday.",
+                    reason="The capture contains an explicit task.",
+                )
+            ]
+        )
+        model = ScriptedModel(
+            plans=[invalid_plan], repair_plans=[repaired_plan], drafts=[DRAFT], reports=[PASS]
+        )
+
+        result = self.run_workflow(model)
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.model_calls, 4)
+        self.assertEqual(model.calls, ["plan", "repair_plan", "organize", "critique"])
 
     def test_critic_revision_runs_once_then_can_pass(self) -> None:
         model = ScriptedModel(plans=[PLAN], drafts=[DRAFT, DRAFT], reports=[REVISE, PASS])
@@ -174,30 +205,14 @@ class PhaseTwoWorkflowTests(unittest.TestCase):
         self.assertEqual(critic_task.date_status, "not_requested")
 
     def test_grounding_exhaustion_omits_generated_items(self) -> None:
-        model = ScriptedModel(
-            plans=[PLAN], drafts=[DRAFT, DRAFT], reports=[REVISE, REVISE, REVISE]
-        )
+        model = ScriptedModel(plans=[PLAN], drafts=[DRAFT, DRAFT], reports=[REVISE, REVISE])
 
         result = self.run_workflow(model)
 
         self.assertEqual(result.status, "grounding_failed")
-        self.assertEqual(result.model_calls, 6)
         self.assertEqual(result.output.summary_claims, [])
         self.assertEqual(result.output.tasks, [])
         self.assertIn("generated items were omitted", result.warnings[-1])
-
-    def test_rejected_summary_is_omitted_and_remaining_task_is_rechecked(self) -> None:
-        model = ScriptedModel(
-            plans=[PLAN], drafts=[DRAFT, DRAFT], reports=[REVISE, REVISE, PASS]
-        )
-
-        result = self.run_workflow(model)
-
-        self.assertEqual(result.status, "completed")
-        self.assertEqual(result.model_calls, 6)
-        self.assertEqual(result.output.summary_claims, [])
-        self.assertEqual(result.output.tasks[0].text, "Ship the release.")
-        self.assertIn("Critic rejected summary 1", result.warnings[-1])
 
     def test_urgency_phrase_is_not_sent_to_date_tool(self) -> None:
         source = "Please pay the $42.98 utility payment at your earliest convenience."

@@ -16,6 +16,10 @@ class ModelError(RuntimeError):
 class PhaseTwoModel(Protocol):
     def plan(self, source_text: str) -> CapturePlan: ...
 
+    def repair_plan(
+        self, source_text: str, invalid_plan: CapturePlan, validation_error: str
+    ) -> CapturePlan: ...
+
     def organize(
         self,
         source_text: str,
@@ -57,14 +61,33 @@ class OpenAICompatibleModel:
             system=(
                 "You are CaptureFlow's Coordinator. Return JSON only. Plan only the "
                 "implemented actions summarize and extract_task; do not emit dependencies or "
-                "conditions. Use exact source spans. For a short, direct personal to-do list, "
-                "choose extract_task only and omit summarize. Summaries must consolidate useful "
-                "context rather than restate individual source sentences. This application cannot "
+                "conditions. Each source_span must be copied verbatim from the source, apart "
+                "from whitespace normalization. For a message with one explicit request, choose "
+                "extract_task only; explanatory context does not by itself need a summary. "
+                "Summaries must consolidate useful context rather than restate individual source "
+                "sentences. This application cannot "
                 "browse the web, search local businesses, or access current external information. "
                 "For such a request, return no steps and one concise question asking whether to "
                 "save it as a manual research task instead."
             ),
             payload={"source_text": source_text},
+        )
+
+    def repair_plan(
+        self, source_text: str, invalid_plan: CapturePlan, validation_error: str
+    ) -> CapturePlan:
+        return self._complete(
+            CapturePlan,
+            system=(
+                "You are CaptureFlow's Coordinator repair pass. Return JSON only. Correct the "
+                "invalid plan without adding actions. Every source_span must be copied verbatim "
+                "from the supplied source, apart from whitespace normalization."
+            ),
+            payload={
+                "source_text": source_text,
+                "invalid_plan": invalid_plan.model_dump(mode="json"),
+                "validation_error": validation_error,
+            },
         )
 
     def organize(
@@ -76,23 +99,18 @@ class OpenAICompatibleModel:
         return self._complete(
             OrganizerDraft,
             system=(
-                "You are CaptureFlow's Organizer. Return JSON only. Produce claims and "
-                "tasks only for actions in the supplied plan. Every item must include an "
-                "When the supplied plan has no summarize step, return summary_claims as an "
-                "empty list even if the source includes useful context. "
-                "exact, continuous quote from the source that is sufficient by itself to support "
-                "the item. When a task combines a problem, requested action, or deadline from "
-                "different clauses, quote the continuous source span containing all required "
-                "clauses; otherwise preserve only the scope stated in the quote. If grounding "
-                "feedback is supplied, correct every cited issue before returning. Do not infer "
-                "missing facts or dates. Set due_expression only for an explicit calendar "
-                "expression, never for urgency wording such as 'at your earliest convenience' "
-                "or 'ASAP'. For a summarize plan, return one to three non-overlapping, useful "
-                "claims; omit a detail rather than restating it or adding interpretation. Do not create "
-                "a summary that merely repeats a task or one source sentence. Preserve source "
-                "wording exactly: never silently correct a possible typo. If a term seems "
-                "materially ambiguous, add a review_note asking the user to confirm it and quote "
-                "the original term."
+                "You are CaptureFlow's Organizer. Return JSON only. Produce output only for "
+                "actions in the supplied plan. Every claim and task needs one exact, continuous "
+                "source quote sufficient to support it. If there is no summarize step, return an "
+                "empty summary_claims list. If a task uses details from multiple clauses, quote "
+                "the continuous span containing all of them; otherwise preserve only the quoted "
+                "scope. Do not infer facts or dates. Set due_expression only for an explicit "
+                "calendar expression, never for urgency wording such as 'at your earliest "
+                "convenience' or 'ASAP'; retain relevant urgency in task text. For a long article, "
+                "return one or two non-overlapping, useful summary claims and omit weak details. "
+                "If grounding feedback is supplied, correct every cited issue. Preserve source "
+                "wording: never silently correct a possible typo. For a materially ambiguous "
+                "term, add a review_note quoting the original term."
             ),
             payload={
                 "source_text": source_text,
@@ -152,10 +170,12 @@ class ScriptedModel:
         plans: list[CapturePlan | dict[str, Any]],
         drafts: list[OrganizerDraft | dict[str, Any]],
         reports: list[GroundingReport | dict[str, Any]],
+        repair_plans: list[CapturePlan | dict[str, Any]] | None = None,
     ) -> None:
         self.plans = plans
         self.drafts = drafts
         self.reports = reports
+        self.repair_plans = repair_plans or []
         self.calls: list[str] = []
         self.critique_drafts: list[OrganizerDraft] = []
 
@@ -171,6 +191,12 @@ class ScriptedModel:
     ) -> OrganizerDraft:
         self.calls.append("organize")
         return OrganizerDraft.model_validate(self._next(self.drafts, "organize"))
+
+    def repair_plan(
+        self, source_text: str, invalid_plan: CapturePlan, validation_error: str
+    ) -> CapturePlan:
+        self.calls.append("repair_plan")
+        return CapturePlan.model_validate(self._next(self.repair_plans, "plan repair"))
 
     def critique(self, source_text: str, draft: OrganizerDraft) -> GroundingReport:
         self.calls.append("critique")

@@ -48,11 +48,11 @@ checks original date expressions but not deterministic typed date resolutions.
   Critic feedback for its single permitted revision.
 - A task-only plan deterministically omits an unplanned model-generated
   summary and records a warning. An unplanned task remains a typed failure.
-- A summarize plan keeps at most three claims. After the one permitted
-  Organizer revision, if the Critic still rejects specific items, the
-  orchestrator omits only those items and asks the Critic to validate what
-  remains. This final safe-retention check can bring a run to six model calls;
-  if no items remain, the run is still `grounding_failed`.
+- If a Coordinator plan cites a span outside the captured source, it receives
+  one structured repair pass with the validation error and the invalid plan.
+  A valid repair uses one additional model call; grounding still permits only
+  one Organizer revision and rejects all generated items when that revision
+  fails.
 - Non-calendar urgency phrases such as `at your earliest convenience` and
   `ASAP` are retained in task text but removed from `due_expression`, so they
   do not produce a misleading date-tool warning.
