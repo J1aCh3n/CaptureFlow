@@ -13,11 +13,19 @@ class ModelError(RuntimeError):
     """A configured model could not supply a schema-valid response."""
 
 
+class InvalidStructuredOutput(ModelError):
+    """A model response can be shown to the single bounded repair pass."""
+
+    def __init__(self, message: str, raw_output: str) -> None:
+        super().__init__(message)
+        self.raw_output = raw_output
+
+
 class PhaseTwoModel(Protocol):
     def plan(self, source_text: str) -> CapturePlan: ...
 
     def repair_plan(
-        self, source_text: str, invalid_plan: CapturePlan, validation_error: str
+        self, source_text: str, invalid_plan: CapturePlan | str, validation_error: str
     ) -> CapturePlan: ...
 
     def organize(
@@ -81,7 +89,12 @@ class OpenAICompatibleModel:
                 "and a next step. Each source_span must be copied verbatim from the source, "
                 "apart from whitespace normalization. For a message with one explicit action "
                 "request, choose extract_task only; explanatory context does not by itself need "
-                "a summary. "
+                "a summary. Examples: 'I prefer concise meeting notes', 'I decided to use "
+                "PostgreSQL', 'I have an idea for a meeting assistant', and 'My meeting notes "
+                "should be concise' require inspect_memory, not extract_task. 'Please pay the "
+                "utility bill' requires extract_task. Duplicate checking happens downstream, so "
+                "never omit inspect_memory merely because the information may already be saved. "
+                "Never return an empty step list for an executable local input. "
                 "Summaries must consolidate useful context rather than restate individual source "
                 "sentences. This application cannot "
                 "browse the web, search local businesses, or access current external information. "
@@ -111,18 +124,28 @@ class OpenAICompatibleModel:
         )
 
     def repair_plan(
-        self, source_text: str, invalid_plan: CapturePlan, validation_error: str
+        self, source_text: str, invalid_plan: CapturePlan | str, validation_error: str
     ) -> CapturePlan:
+        invalid_payload = (
+            invalid_plan.model_dump(mode="json")
+            if isinstance(invalid_plan, CapturePlan)
+            else invalid_plan
+        )
         return self._complete(
             CapturePlan,
             system=(
                 "You are CaptureFlow's Coordinator repair pass. Return JSON only. Correct the "
-                "invalid plan without adding actions. Every source_span must be copied verbatim "
-                "from the supplied source, apart from whitespace normalization."
+                "invalid plan using only summarize, extract_task, and inspect_memory. You may "
+                "add, remove, or replace steps as needed to satisfy the supplied validation "
+                "error, but never invent source content. Durable user-specific preferences, "
+                "decisions, facts, and ideas require inspect_memory and are not tasks unless the "
+                "source also contains an actionable next step. Never return an empty step list "
+                "for an executable local input. Every source_span must be copied verbatim from "
+                "the supplied source, apart from whitespace normalization."
             ),
             payload={
                 "source_text": source_text,
-                "invalid_plan": invalid_plan.model_dump(mode="json"),
+                "invalid_plan": invalid_payload,
                 "validation_error": validation_error,
             },
         )
@@ -185,6 +208,7 @@ class OpenAICompatibleModel:
         prompt = json.dumps(
             {"schema": schema.model_json_schema(), "input": payload}, ensure_ascii=False
         )
+        content: str | None = None
         try:
             response = self.client.chat.completions.create(
                 model=self.settings.model,
@@ -198,7 +222,11 @@ class OpenAICompatibleModel:
             if not content:
                 raise ModelError("The model returned an empty response.")
             return schema.model_validate_json(content)
-        except (IndexError, ValidationError, ValueError) as error:
+        except ValidationError as error:
+            raise InvalidStructuredOutput(
+                f"The model returned invalid structured output: {error}", content or ""
+            ) from error
+        except (IndexError, ValueError) as error:
             raise ModelError(f"The model returned invalid structured output: {error}") from error
         except Exception as error:
             if isinstance(error, ModelError):
@@ -227,7 +255,14 @@ class ScriptedModel:
 
     def plan(self, source_text: str) -> CapturePlan:
         self.calls.append("plan")
-        return CapturePlan.model_validate(self._next(self.plans, "plan"))
+        candidate = self._next(self.plans, "plan")
+        try:
+            return CapturePlan.model_validate(candidate)
+        except ValidationError as error:
+            raw_output = json.dumps(candidate, ensure_ascii=False, default=str)
+            raise InvalidStructuredOutput(
+                f"The model returned invalid structured output: {error}", raw_output
+            ) from error
 
     def organize(
         self,
@@ -239,7 +274,7 @@ class ScriptedModel:
         return OrganizerDraft.model_validate(self._next(self.drafts, "organize"))
 
     def repair_plan(
-        self, source_text: str, invalid_plan: CapturePlan, validation_error: str
+        self, source_text: str, invalid_plan: CapturePlan | str, validation_error: str
     ) -> CapturePlan:
         self.calls.append("repair_plan")
         return CapturePlan.model_validate(self._next(self.repair_plans, "plan repair"))

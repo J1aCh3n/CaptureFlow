@@ -1,7 +1,7 @@
 import unittest
 from types import SimpleNamespace
 
-from captureflow.llm import ModelSettings, OpenAICompatibleModel
+from captureflow.llm import InvalidStructuredOutput, ModelSettings, OpenAICompatibleModel
 from captureflow.models import CapturePlan, OrganizerDraft
 
 
@@ -57,6 +57,23 @@ class OpenAICompatibleModelTests(unittest.TestCase):
         )
         self.assertIn("is not by itself a task", system_prompt)
         self.assertIn("Select both actions only", system_prompt)
+        self.assertIn("Duplicate checking happens downstream", system_prompt)
+        self.assertIn("Never return an empty step list", system_prompt)
+
+    def test_invalid_plan_preserves_raw_output_for_bounded_repair(self) -> None:
+        raw_output = (
+            '{"steps":[],"user_clarification_required":false,'
+            '"clarification_question":null}'
+        )
+        completions = RecordingCompletions(raw_output)
+        model = OpenAICompatibleModel.__new__(OpenAICompatibleModel)
+        model.settings = ModelSettings(api_key="test-key", model="gpt-5.6-terra")
+        model.client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+
+        with self.assertRaises(InvalidStructuredOutput) as raised:
+            model.plan("I prefer concise meeting notes.")
+
+        self.assertEqual(raised.exception.raw_output, raw_output)
 
     def test_critic_does_not_treat_summary_usefulness_as_grounding(self) -> None:
         completions = RecordingCompletions('{"verdict":"pass","feedback":[]}')

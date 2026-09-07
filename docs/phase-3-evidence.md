@@ -32,13 +32,17 @@ Memory page are implemented and tested, but the Phase 3 gate is not complete.
 
 ## Verification
 
-On 2026-09-07, the suite completed 46 tests successfully. The Phase 3 tests
+On 2026-09-07, the suite completed 48 tests successfully. The Phase 3 tests
 cover opt-in retrieval followed by an automatic write, typed Memory Agent
 failure without a write, and the Memory page display plus automatic-write
 undo. A Coordinator prompt-contract test preserves the memory-versus-task
 routing boundary. The policy tests cover automatic-write idempotency, blocked
 secrets, conflict review and supersede, undo/delete/restore, bounded retrieval,
 and no duplicate task after a repeated checkpointed commit.
+
+Schema-invalid Coordinator responses, including an empty executable plan, now
+use the same single bounded plan-repair pass as source-span validation errors.
+The plan schema remains strict; no empty plan or fabricated fallback is accepted.
 
 ## Still required for the Phase 3 gate
 

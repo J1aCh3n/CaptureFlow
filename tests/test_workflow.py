@@ -131,6 +131,26 @@ class PhaseTwoWorkflowTests(unittest.TestCase):
         self.assertEqual(result.model_calls, 4)
         self.assertEqual(model.calls, ["plan", "repair_plan", "organize", "critique"])
 
+    def test_schema_invalid_empty_plan_receives_one_repair(self) -> None:
+        model = ScriptedModel(
+            plans=[
+                {
+                    "steps": [],
+                    "user_clarification_required": False,
+                    "clarification_question": None,
+                }
+            ],
+            repair_plans=[PLAN],
+            drafts=[DRAFT],
+            reports=[PASS],
+        )
+
+        result = self.run_workflow(model)
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.model_calls, 4)
+        self.assertEqual(model.calls, ["plan", "repair_plan", "organize", "critique"])
+
     def test_critic_revision_runs_once_then_can_pass(self) -> None:
         model = ScriptedModel(plans=[PLAN], drafts=[DRAFT, DRAFT], reports=[REVISE, PASS])
 

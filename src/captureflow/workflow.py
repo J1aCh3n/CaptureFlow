@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from langgraph.graph import END, START, StateGraph
 
 from .date_tool import DateResolution, resolve_relative_date
-from .llm import ModelError, PhaseTwoModel
+from .llm import InvalidStructuredOutput, ModelError, PhaseTwoModel
 from .models import (
     CapturePlan,
     CaptureRun,
@@ -160,19 +160,32 @@ class PhaseTwoWorkflow:
         calls = state["model_calls"] + 1
         try:
             plan = self.model.plan(state["source_text"])
+        except InvalidStructuredOutput as error:
+            return self._repair_plan(state, error.raw_output, str(error), calls)
         except (ModelError, ValueError) as error:
             return self._failure(state, "plan", str(error), calls)
         try:
             validate_plan(plan, state["source_text"])
             return {"plan": plan, "model_calls": calls}
         except ValueError as error:
-            repair_calls = calls + 1
-            try:
-                repaired_plan = self.model.repair_plan(state["source_text"], plan, str(error))
-                validate_plan(repaired_plan, state["source_text"])
-                return {"plan": repaired_plan, "model_calls": repair_calls}
-            except (ModelError, ValueError) as repair_error:
-                return self._failure(state, "plan", str(repair_error), repair_calls)
+            return self._repair_plan(state, plan, str(error), calls)
+
+    def _repair_plan(
+        self,
+        state: PhaseTwoState,
+        invalid_plan: CapturePlan | str,
+        validation_error: str,
+        calls: int,
+    ) -> PhaseTwoState:
+        repair_calls = calls + 1
+        try:
+            repaired_plan = self.model.repair_plan(
+                state["source_text"], invalid_plan, validation_error
+            )
+            validate_plan(repaired_plan, state["source_text"])
+            return {"plan": repaired_plan, "model_calls": repair_calls}
+        except (ModelError, ValueError) as repair_error:
+            return self._failure(state, "plan", str(repair_error), repair_calls)
 
     def _after_plan(self, state: PhaseTwoState) -> str:
         if state["status"] == "failed":
