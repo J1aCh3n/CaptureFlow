@@ -2,10 +2,12 @@
 
 > Status: Phases 1 and 2 are implemented and their gate evidence is recorded in
 > [`docs/phase-1-evidence.md`](docs/phase-1-evidence.md) and
-> [`docs/phase-2-evidence.md`](docs/phase-2-evidence.md). No Phase 3 or later
-> application behavior, agent, evaluation result, or deployment described below
-> should be treated as implemented until its corresponding phase gate has passed
-> with saved evidence.
+> [`docs/phase-2-evidence.md`](docs/phase-2-evidence.md). Phase 3 implementation
+> is in progress with its current evidence in
+> [`docs/phase-3-evidence.md`](docs/phase-3-evidence.md); it must not be treated
+> as gate-complete until all corresponding saved evidence exists. No Phase 4
+> behavior, evaluation result, or deployment described below should be treated
+> as implemented until its corresponding gate has passed.
 
 ## 1. Purpose
 

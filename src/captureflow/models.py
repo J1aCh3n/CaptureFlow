@@ -161,3 +161,104 @@ class CaptureRun(BaseModel):
     errors: list[RunError] = Field(default_factory=list)
     model_calls: int = Field(ge=0, le=6)
     created_at: datetime = Field(default_factory=utc_now)
+
+
+MemoryType = Literal["preference", "decision", "idea", "fact"]
+MemoryStatus = Literal["active", "superseded", "deleted"]
+MemoryWriteMode = Literal["auto", "reviewed"]
+MemoryDecisionKind = Literal["auto", "review", "blocked", "duplicate"]
+
+
+class MemoryProposal(BaseModel):
+    """Untrusted Memory Agent suggestion. It cannot write storage directly."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    memory_type: MemoryType
+    content: str = Field(min_length=1, max_length=500)
+    source_quote: str = Field(min_length=1)
+    confidence: float = Field(ge=0, le=1)
+    is_explicit: bool
+    related_memory_ids: list[str] = Field(default_factory=list)
+
+
+class MemoryAgentDraft(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    proposals: list[MemoryProposal] = Field(default_factory=list, max_length=5)
+
+
+class MemoryItem(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    workspace_id: str = DEFAULT_WORKSPACE_ID
+    memory_type: MemoryType
+    content: str = Field(min_length=1, max_length=500)
+    source_capture_id: str
+    source_quote: str = Field(min_length=1)
+    write_mode: MemoryWriteMode
+    status: MemoryStatus = "active"
+    confidence: float = Field(ge=0, le=1)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class MemoryDecision(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    proposal: MemoryProposal
+    decision: MemoryDecisionKind
+    reason: str
+    conflicting_memory_ids: list[str] = Field(default_factory=list)
+
+
+class PendingMemoryReview(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    capture_id: str
+    proposal: MemoryProposal
+    decision_reason: str
+    conflicting_memory_ids: list[str] = Field(default_factory=list)
+    status: Literal["pending", "approved", "rejected"] = "pending"
+    created_at: datetime = Field(default_factory=utc_now)
+    resolved_at: datetime | None = None
+
+
+class MemoryEvent(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    id: int
+    memory_id: str | None = None
+    action: str
+    details: dict = Field(default_factory=dict)
+    created_at: datetime
+
+
+class TaskItem(BaseModel):
+    """A committed task candidate with a stable ID for checkpoint-safe retries."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    capture_id: str
+    run_id: str
+    text: str = Field(min_length=1)
+    source_quote: str = Field(min_length=1)
+    due_expression: str | None = None
+    resolved_due_date: date | None = None
+    status: Literal["open", "completed", "deleted"] = "open"
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class WorkflowCheckpoint(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    run_id: str
+    capture_id: str
+    phase: Literal["phase_3"] = "phase_3"
+    state: Literal["prepared", "committed"]
+    payload: dict
+    updated_at: datetime = Field(default_factory=utc_now)

@@ -10,9 +10,11 @@ proposals remain Phase 3 work.
 Phases 1 and 2 are complete. Phase 2 passed 36 scripted tests and the frozen
 article, email, and idea live checks with retained SQLite traces. The evidence
 and claim boundary are in
-[docs/phase-2-evidence.md](docs/phase-2-evidence.md). Phase 3 and later are not
-implemented. In particular, a visible confirmation note cannot yet receive a
-reply, confirm, edit, or task-update action.
+[docs/phase-2-evidence.md](docs/phase-2-evidence.md). Phase 3 implementation
+is in progress; its tested memory-policy foundation and remaining gate work are
+in [docs/phase-3-evidence.md](docs/phase-3-evidence.md). In particular, a
+visible confirmation note cannot yet receive a reply, confirm, edit, or
+task-update action.
 
 Runtime source safety is separated from offline output-quality evaluation in
 [docs/gate-contract.md](docs/gate-contract.md). The fixed Phase 2 article,
