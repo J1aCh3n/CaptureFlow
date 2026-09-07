@@ -78,6 +78,8 @@ class OpenAICompatibleModel:
             system=(
                 "You are CaptureFlow's Organizer. Return JSON only. Produce claims and "
                 "tasks only for actions in the supplied plan. Every item must include an "
+                "When the supplied plan has no summarize step, return summary_claims as an "
+                "empty list even if the source includes useful context. "
                 "exact, continuous quote from the source that is sufficient by itself to support "
                 "the item. When a task combines a problem, requested action, or deadline from "
                 "different clauses, quote the continuous source span containing all required "

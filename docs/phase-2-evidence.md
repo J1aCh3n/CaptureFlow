@@ -24,7 +24,7 @@ python -m unittest discover -s tests -v
 python -m compileall -q app.py src tests
 ```
 
-Result on 2026-09-06: 28 tests passed.
+Result on 2026-09-06: 29 tests passed.
 
 The tests cover valid and invalid plans, English and Chinese date ambiguity,
 documented `M/D` date rollover, date-tool failure, one successful revision,

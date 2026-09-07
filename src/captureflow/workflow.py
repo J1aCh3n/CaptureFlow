@@ -164,8 +164,12 @@ class PhaseTwoWorkflow:
             draft = self.model.organize(
                 state["source_text"], state["plan"], state.get("revision_feedback")
             )
-            self._validate_draft_actions(draft, state["plan"])
-            return {"draft": draft, "model_calls": calls}
+            draft, warnings = self._validate_draft_actions(draft, state["plan"])
+            return {
+                "draft": draft,
+                "model_calls": calls,
+                "warnings": [*state["warnings"], *warnings],
+            }
         except (ModelError, ValueError) as error:
             return self._failure(state, "organize", str(error), calls)
 
@@ -266,12 +270,18 @@ class PhaseTwoWorkflow:
         }
 
     @staticmethod
-    def _validate_draft_actions(draft: OrganizerDraft, plan: CapturePlan) -> None:
+    def _validate_draft_actions(
+        draft: OrganizerDraft, plan: CapturePlan
+    ) -> tuple[OrganizerDraft, list[str]]:
         actions = {step.action for step in plan.steps}
-        if draft.summary_claims and "summarize" not in actions:
-            raise ValueError("Organizer returned summaries not requested by the plan")
         if draft.tasks and "extract_task" not in actions:
             raise ValueError("Organizer returned tasks not requested by the plan")
+        if draft.summary_claims and "summarize" not in actions:
+            return (
+                draft.model_copy(update={"summary_claims": []}),
+                ["Organizer returned summaries not requested by the plan; they were omitted."],
+            )
+        return draft, []
 
     @staticmethod
     def _deterministic_grounding(source_text: str, draft: OrganizerDraft) -> list[GroundingIssue]:

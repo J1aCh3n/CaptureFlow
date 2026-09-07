@@ -210,7 +210,7 @@ class PhaseTwoWorkflowTests(unittest.TestCase):
         self.assertTrue(result.plan.user_clarification_required)
         self.assertIn("cannot perform web searches", result.plan.clarification_question)
 
-    def test_task_only_plan_rejects_a_redundant_summary(self) -> None:
+    def test_task_only_plan_discards_redundant_summary_before_grounding(self) -> None:
         task_only_plan = CapturePlan(
             steps=[
                 PlanStep(
@@ -221,12 +221,32 @@ class PhaseTwoWorkflowTests(unittest.TestCase):
                 ),
             ]
         )
-        model = ScriptedModel(plans=[task_only_plan], drafts=[DRAFT], reports=[])
+        model = ScriptedModel(plans=[task_only_plan], drafts=[DRAFT], reports=[PASS])
+
+        result = self.run_workflow(model)
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.output.summary_claims, [])
+        self.assertEqual(result.output.tasks[0].text, "Ship the release.")
+        self.assertIn("summaries not requested", result.warnings[0])
+
+    def test_task_is_not_silently_accepted_when_plan_omits_extract_task(self) -> None:
+        summary_only_plan = CapturePlan(
+            steps=[
+                PlanStep(
+                    id="summary",
+                    action="summarize",
+                    source_span="The release checklist is ready.",
+                    reason="The capture states release readiness.",
+                ),
+            ]
+        )
+        model = ScriptedModel(plans=[summary_only_plan], drafts=[DRAFT], reports=[])
 
         result = self.run_workflow(model)
 
         self.assertEqual(result.status, "failed")
-        self.assertIn("summaries not requested", result.errors[0].message)
+        self.assertIn("tasks not requested", result.errors[0].message)
 
     def test_review_note_preserves_an_ambiguous_source_term(self) -> None:
         plan = CapturePlan(
