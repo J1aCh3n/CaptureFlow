@@ -29,6 +29,7 @@ class PhaseTwoState(TypedDict, total=False):
     grounding_report: GroundingReport
     revision_feedback: GroundingReport
     retries: int
+    pruned_after_revision: bool
     model_calls: int
     warnings: list[str]
     errors: list[RunError]
@@ -77,6 +78,7 @@ class PhaseTwoWorkflow:
                 "reference_date": reference_date,
                 "timezone": timezone,
                 "retries": 0,
+                "pruned_after_revision": False,
                 "model_calls": 0,
                 "warnings": [],
                 "errors": [],
@@ -103,6 +105,7 @@ class PhaseTwoWorkflow:
         graph.add_node("resolve_dates", self._resolve_dates)
         graph.add_node("ground", self._ground)
         graph.add_node("prepare_revision", self._prepare_revision)
+        graph.add_node("prune_rejected", self._prune_rejected)
         graph.add_node("complete", self._complete)
         graph.add_node("grounding_failed", self._grounding_failed)
         graph.add_edge(START, "plan")
@@ -123,11 +126,17 @@ class PhaseTwoWorkflow:
             {
                 "complete": "complete",
                 "revise": "prepare_revision",
+                "prune": "prune_rejected",
                 "grounding_failed": "grounding_failed",
                 "failed": END,
             },
         )
         graph.add_edge("prepare_revision", "organize")
+        graph.add_conditional_edges(
+            "prune_rejected",
+            self._after_prune,
+            {"ground": "ground", "grounding_failed": "grounding_failed"},
+        )
         graph.add_edge("complete", END)
         graph.add_edge("grounding_failed", END)
         return graph.compile()
@@ -187,6 +196,20 @@ class PhaseTwoWorkflow:
                     task.model_copy(update={"resolved_due_date": None, "date_status": "not_requested"})
                 )
                 continue
+            if _is_non_calendar_urgency(task.due_expression):
+                resolved_tasks.append(
+                    task.model_copy(
+                        update={
+                            "due_expression": None,
+                            "resolved_due_date": None,
+                            "date_status": "not_requested",
+                        }
+                    )
+                )
+                warnings.append(
+                    f"Urgency phrase '{task.due_expression}' was not treated as a calendar date."
+                )
+                continue
             try:
                 resolution = self.date_resolver(
                     task.due_expression, state["reference_date"], state["timezone"]
@@ -236,6 +259,8 @@ class PhaseTwoWorkflow:
             return "complete"
         if state["retries"] < 1:
             return "revise"
+        if not state["pruned_after_revision"]:
+            return "prune"
         return "grounding_failed"
 
     def _prepare_revision(self, state: PhaseTwoState) -> PhaseTwoState:
@@ -243,6 +268,47 @@ class PhaseTwoWorkflow:
             "retries": state["retries"] + 1,
             "revision_feedback": state["grounding_report"],
         }
+
+    def _prune_rejected(self, state: PhaseTwoState) -> PhaseTwoState:
+        report = state["grounding_report"]
+        rejected = {
+            kind: {issue.item_index for issue in report.feedback if issue.item_kind == kind}
+            for kind in ("summary", "task", "review")
+        }
+        draft = state["draft"]
+        pruned = draft.model_copy(
+            update={
+                "summary_claims": [
+                    item for index, item in enumerate(draft.summary_claims) if index not in rejected["summary"]
+                ],
+                "tasks": [item for index, item in enumerate(draft.tasks) if index not in rejected["task"]],
+                "review_notes": [
+                    item for index, item in enumerate(draft.review_notes) if index not in rejected["review"]
+                ],
+            }
+        )
+        omitted = [
+            f"{kind} {index + 1}"
+            for kind, indexes in rejected.items()
+            for index in sorted(index for index in indexes if index is not None)
+        ]
+        warnings = list(state["warnings"])
+        if omitted:
+            warnings.append(
+                "Critic rejected " + ", ".join(omitted) + "; those items were omitted."
+            )
+        if not (pruned.summary_claims or pruned.tasks or pruned.review_notes):
+            return {
+                "draft": pruned,
+                "pruned_after_revision": True,
+                "status": "grounding_failed",
+                "warnings": warnings,
+            }
+        return {"draft": pruned, "pruned_after_revision": True, "warnings": warnings}
+
+    @staticmethod
+    def _after_prune(state: PhaseTwoState) -> str:
+        return "grounding_failed" if state["status"] == "grounding_failed" else "ground"
 
     @staticmethod
     def _complete(state: PhaseTwoState) -> PhaseTwoState:
@@ -278,12 +344,14 @@ class PhaseTwoWorkflow:
         actions = {step.action for step in plan.steps}
         if draft.tasks and "extract_task" not in actions:
             raise ValueError("Organizer returned tasks not requested by the plan")
+        warnings: list[str] = []
         if draft.summary_claims and "summarize" not in actions:
-            return (
-                draft.model_copy(update={"summary_claims": []}),
-                ["Organizer returned summaries not requested by the plan; they were omitted."],
-            )
-        return draft, []
+            draft = draft.model_copy(update={"summary_claims": []})
+            warnings.append("Organizer returned summaries not requested by the plan; they were omitted.")
+        elif len(draft.summary_claims) > 3:
+            draft = draft.model_copy(update={"summary_claims": draft.summary_claims[:3]})
+            warnings.append("Organizer returned more than three summaries; extra items were omitted.")
+        return draft, warnings
 
     @staticmethod
     def _deterministic_grounding(source_text: str, draft: OrganizerDraft) -> list[GroundingIssue]:
@@ -358,3 +426,15 @@ def _requires_web_search(source_text: str) -> bool:
             "nearest ",
         )
     )
+
+
+def _is_non_calendar_urgency(expression: str) -> bool:
+    return _normalize(expression).casefold().strip(".!") in {
+        "as soon as possible",
+        "asap",
+        "at your earliest convenience",
+        "when you can",
+        "尽快",
+        "有空时",
+        "方便时",
+    }

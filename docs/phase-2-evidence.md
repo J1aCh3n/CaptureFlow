@@ -24,7 +24,7 @@ python -m unittest discover -s tests -v
 python -m compileall -q app.py src tests
 ```
 
-Result on 2026-09-06: 30 tests passed.
+Result on 2026-09-07: 32 tests passed.
 
 The tests cover valid and invalid plans, English and Chinese date ambiguity,
 documented `M/D` date rollover, date-tool failure, one successful revision,
@@ -48,6 +48,14 @@ checks original date expressions but not deterministic typed date resolutions.
   Critic feedback for its single permitted revision.
 - A task-only plan deterministically omits an unplanned model-generated
   summary and records a warning. An unplanned task remains a typed failure.
+- A summarize plan keeps at most three claims. After the one permitted
+  Organizer revision, if the Critic still rejects specific items, the
+  orchestrator omits only those items and asks the Critic to validate what
+  remains. This final safe-retention check can bring a run to six model calls;
+  if no items remain, the run is still `grounding_failed`.
+- Non-calendar urgency phrases such as `at your earliest convenience` and
+  `ASAP` are retained in task text but removed from `due_expression`, so they
+  do not produce a misleading date-tool warning.
 - The source-grounding Critic receives the original due expression but not the
   deterministic date-tool result; it must not demand the resolved calendar
   date or year in the source quote.

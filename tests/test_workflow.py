@@ -174,14 +174,69 @@ class PhaseTwoWorkflowTests(unittest.TestCase):
         self.assertEqual(critic_task.date_status, "not_requested")
 
     def test_grounding_exhaustion_omits_generated_items(self) -> None:
-        model = ScriptedModel(plans=[PLAN], drafts=[DRAFT, DRAFT], reports=[REVISE, REVISE])
+        model = ScriptedModel(
+            plans=[PLAN], drafts=[DRAFT, DRAFT], reports=[REVISE, REVISE, REVISE]
+        )
 
         result = self.run_workflow(model)
 
         self.assertEqual(result.status, "grounding_failed")
+        self.assertEqual(result.model_calls, 6)
         self.assertEqual(result.output.summary_claims, [])
         self.assertEqual(result.output.tasks, [])
         self.assertIn("generated items were omitted", result.warnings[-1])
+
+    def test_rejected_summary_is_omitted_and_remaining_task_is_rechecked(self) -> None:
+        model = ScriptedModel(
+            plans=[PLAN], drafts=[DRAFT, DRAFT], reports=[REVISE, REVISE, PASS]
+        )
+
+        result = self.run_workflow(model)
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.model_calls, 6)
+        self.assertEqual(result.output.summary_claims, [])
+        self.assertEqual(result.output.tasks[0].text, "Ship the release.")
+        self.assertIn("Critic rejected summary 1", result.warnings[-1])
+
+    def test_urgency_phrase_is_not_sent_to_date_tool(self) -> None:
+        source = "Please pay the $42.98 utility payment at your earliest convenience."
+        plan = CapturePlan(
+            steps=[
+                PlanStep(
+                    id="task",
+                    action="extract_task",
+                    source_span=source,
+                    reason="The capture contains a payment request.",
+                )
+            ]
+        )
+        draft = OrganizerDraft.model_validate(
+            {
+                "tasks": [
+                    {
+                        "text": "Pay the $42.98 utility payment at your earliest convenience.",
+                        "source_quote": source,
+                        "due_expression": "at your earliest convenience",
+                    }
+                ]
+            }
+        )
+        model = ScriptedModel(plans=[plan], drafts=[draft], reports=[PASS])
+
+        result = PhaseTwoWorkflow(model).run(
+            capture_id="capture-1",
+            source_text=source,
+            run_id="run-1",
+            reference_date=date(2026, 9, 6),
+            timezone="America/Vancouver",
+        )
+
+        task = result.output.tasks[0]
+        self.assertEqual(result.status, "completed")
+        self.assertIsNone(task.due_expression)
+        self.assertEqual(task.date_status, "not_requested")
+        self.assertIn("Urgency phrase", result.warnings[0])
 
     def test_date_tool_failure_is_visible_without_failing_open(self) -> None:
         model = ScriptedModel(plans=[PLAN], drafts=[DRAFT], reports=[PASS])
