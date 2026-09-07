@@ -1,7 +1,7 @@
 # Phase 3 evidence status
 
-**Status:** implementation in progress. The persistent memory-policy foundation
-is tested, but the Phase 3 gate is not complete.
+**Status:** implementation in progress. The bounded Memory Agent flow and
+Memory page are implemented and tested, but the Phase 3 gate is not complete.
 
 ## Implemented in this increment
 
@@ -16,18 +16,26 @@ is tested, but the Phase 3 gate is not complete.
   conflicts may supersede the prior active memory only after user approval.
 - Stable IDs make automatic-memory writes, pending reviews, and task commits
   idempotent across a repeated checkpointed commit attempt.
+- The Coordinator may opt in with `inspect_memory`. Only then does the
+  LangGraph Memory Agent subgraph retrieve up to five active memories, request
+  proposals, and pass them to the policy-controlled commit service. A memory
+  proposal failure records a typed omission and never writes memory.
+- The Streamlit Memory page supports active-memory search, edit, delete and
+  restore; automatic-write undo; and pending-review approval, edit, conflict
+  supersession, or rejection. These are explicit user actions rather than
+  direct model writes.
 
 ## Verification
 
-On 2026-09-07, the suite completed 42 tests successfully. The new memory
-tests cover automatic write idempotency, blocked secrets, conflict review and
-supersede, undo/delete/restore, bounded retrieval, and no duplicate task after
-a repeated checkpointed commit.
+On 2026-09-07, the suite completed 45 tests successfully. The Phase 3 tests
+cover opt-in retrieval followed by an automatic write, typed Memory Agent
+failure without a write, and the Memory page display plus automatic-write
+undo. The policy tests cover automatic-write idempotency, blocked secrets,
+conflict review and supersede, undo/delete/restore, bounded retrieval, and no
+duplicate task after a repeated checkpointed commit.
 
 ## Still required for the Phase 3 gate
 
-- Memory Agent invocation from the bounded graph, including opt-in retrieval.
-- A functional Memory page and stateful confirm/edit/reject controls.
 - Real checkpoint resume rather than only idempotent commit primitives.
 - The frozen 12 Core acceptance examples and recorded protocol.
 - Cross-conversation retrieval evidence and all remaining Phase 3 gate paths.

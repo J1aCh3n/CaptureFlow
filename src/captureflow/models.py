@@ -56,7 +56,7 @@ class PlanStep(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: str = Field(min_length=1)
-    action: Literal["summarize", "extract_task"]
+    action: Literal["summarize", "extract_task", "inspect_memory"]
     source_span: str = Field(min_length=1)
     reason: str = Field(min_length=1)
 
@@ -136,7 +136,7 @@ class GroundingReport(BaseModel):
 
 
 class RunError(BaseModel):
-    stage: Literal["plan", "organize", "date_tool", "grounding", "configuration"]
+    stage: Literal["plan", "organize", "date_tool", "grounding", "memory", "configuration"]
     message: str
 
 
@@ -159,6 +159,8 @@ class CaptureRun(BaseModel):
     grounding_report: GroundingReport | None = None
     warnings: list[str] = Field(default_factory=list)
     errors: list[RunError] = Field(default_factory=list)
+    retrieved_memory_ids: list[str] = Field(default_factory=list)
+    memory_decisions: list[dict] = Field(default_factory=list)
     model_calls: int = Field(ge=0, le=6)
     created_at: datetime = Field(default_factory=utc_now)
 

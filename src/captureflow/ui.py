@@ -6,9 +6,11 @@ import streamlit as st
 from pydantic import ValidationError
 
 from .llm import ModelError, ModelSettings, OpenAICompatibleModel
+from .memory_service import MemoryService
 from .models import Capture, CaptureRun, Conversation, MAX_CAPTURE_CHARACTERS, RunError
+from .phase_three import PhaseThreeWorkflow
 from .storage import CaptureStore
-from .workflow import PhaseTwoWorkflow, configured_reference_date
+from .workflow import configured_reference_date
 
 
 def database_path() -> Path:
@@ -26,10 +28,13 @@ def main() -> None:
     st.set_page_config(page_title="CaptureFlow", page_icon="📥")
     st.title("CaptureFlow")
     st.caption(
-        "Phase 2: bounded planning, grounded summaries and tasks, and one revision at most."
+        "Phase 3 in progress: bounded planning plus policy-controlled memory proposals."
     )
 
     store = get_store(str(database_path()))
+    if st.sidebar.radio("Page", ["Inbox", "Memory"]) == "Memory":
+        render_memory_page(store)
+        return
     conversations = store.list_conversations()
     if not conversations:
         conversation = store.save_conversation(Conversation(title="First capture"))
@@ -84,7 +89,7 @@ def main() -> None:
             st.caption(f"Saved {capture.created_at.isoformat()}")
             st.text(capture.source_text)
             if st.button("Analyze", key=f"analyze-{capture.id}"):
-                run = analyze_capture(capture)
+                run = analyze_capture(capture, store)
                 store.save_run(run)
                 st.rerun()
             render_run(store.latest_run_for_capture(capture.id))
@@ -94,13 +99,13 @@ def main() -> None:
                 st.rerun()
 
 
-def analyze_capture(capture: Capture) -> CaptureRun:
+def analyze_capture(capture: Capture, store: CaptureStore) -> CaptureRun:
     run_id = str(uuid4())
     try:
         settings = ModelSettings.from_environment()
         timezone = os.getenv("CAPTUREFLOW_TIMEZONE", "America/Vancouver")
         reference_date = configured_reference_date(timezone)
-        workflow = PhaseTwoWorkflow(OpenAICompatibleModel(settings))
+        workflow = PhaseThreeWorkflow(OpenAICompatibleModel(settings), MemoryService(store))
         return workflow.run(
             capture_id=capture.id,
             source_text=capture.source_text,
@@ -158,6 +163,64 @@ def render_run(run: CaptureRun | None) -> None:
         st.warning(warning)
     for error in run.errors:
         st.error(f"{error.stage}: {error.message}")
+
+
+def render_memory_page(store: CaptureStore) -> None:
+    """Render only explicit, reversible memory-management actions."""
+
+    st.subheader("Memory")
+    st.caption("Only policy-approved proposals appear here. Automatic writes can be undone.")
+    service = MemoryService(store)
+    query = st.text_input("Search active memory")
+    memories = store.search_memories(query) if query.strip() else store.list_memories(
+        statuses=("active", "superseded", "deleted")
+    )
+    if not memories:
+        st.info("No saved memories match this view.")
+    for memory in memories:
+        with st.container(border=True):
+            st.markdown(f"**{memory.memory_type}:** {memory.content}")
+            st.caption(
+                f"{memory.status}; {memory.write_mode}; confidence {memory.confidence:.0%}; "
+                f"source: {memory.source_quote}"
+            )
+            if memory.status == "active":
+                edited = st.text_input("Edit memory", value=memory.content, key=f"edit-{memory.id}")
+                if st.button("Save edit", key=f"save-edit-{memory.id}"):
+                    try:
+                        service.edit_memory(memory.id, edited)
+                    except ValueError as error:
+                        st.error(str(error))
+                    else:
+                        st.rerun()
+                if memory.write_mode == "auto" and st.button("Undo automatic write", key=f"undo-{memory.id}"):
+                    service.undo_auto_memory(memory.id)
+                    st.rerun()
+                if st.button("Delete memory", key=f"delete-memory-{memory.id}"):
+                    service.delete_memory(memory.id)
+                    st.rerun()
+            elif memory.status == "deleted" and st.button("Restore memory", key=f"restore-{memory.id}"):
+                service.restore_memory(memory.id)
+                st.rerun()
+
+    reviews = store.list_pending_reviews()
+    if reviews:
+        st.subheader("Memory review")
+    for review in reviews:
+        with st.container(border=True):
+            proposal = review.proposal
+            st.markdown(f"**{proposal.memory_type}:** {proposal.content}")
+            st.caption(f"Reason: {review.decision_reason}. Source: {proposal.source_quote}")
+            revised = st.text_input("Review text", value=proposal.content, key=f"review-text-{review.id}")
+            supersede = st.checkbox(
+                "Supersede conflicting active memories", key=f"supersede-{review.id}"
+            )
+            if st.button("Approve memory", key=f"approve-{review.id}"):
+                service.approve_review(review.id, revised, supersede)
+                st.rerun()
+            if st.button("Reject memory", key=f"reject-{review.id}"):
+                service.reject_review(review.id)
+                st.rerun()
 
 
 def render_run_history(runs: list[CaptureRun]) -> None:

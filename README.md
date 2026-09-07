@@ -2,8 +2,8 @@
 
 CaptureFlow is a local, single-user AI capture inbox under staged development.
 It accepts pasted plain text and routes it through a bounded plan. Phase 2
-produces source-grounded summaries and task proposals; long-term-memory
-proposals remain Phase 3 work.
+produces source-grounded summaries and task proposals; Phase 3 adds
+policy-controlled long-term-memory proposals.
 
 ## Current status
 
@@ -11,10 +11,10 @@ Phases 1 and 2 are complete. Phase 2 passed 36 scripted tests and the frozen
 article, email, and idea live checks with retained SQLite traces. The evidence
 and claim boundary are in
 [docs/phase-2-evidence.md](docs/phase-2-evidence.md). Phase 3 implementation
-is in progress; its tested memory-policy foundation and remaining gate work are
-in [docs/phase-3-evidence.md](docs/phase-3-evidence.md). In particular, a
-visible confirmation note cannot yet receive a reply, confirm, edit, or
-task-update action.
+is in progress; its tested memory work and remaining gate conditions are in
+[docs/phase-3-evidence.md](docs/phase-3-evidence.md). Memory reviews support
+approval, edit, rejection, and controlled conflict supersession; the general
+conversation reply and task-update experience remains deferred.
 
 Runtime source safety is separated from offline output-quality evaluation in
 [docs/gate-contract.md](docs/gate-contract.md). The fixed Phase 2 article,

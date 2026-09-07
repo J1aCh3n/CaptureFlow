@@ -6,7 +6,7 @@ from typing import Any, Protocol, TypeVar
 from openai import OpenAI
 from pydantic import BaseModel, ValidationError
 
-from .models import CapturePlan, GroundingReport, OrganizerDraft
+from .models import CapturePlan, GroundingReport, MemoryAgentDraft, MemoryItem, OrganizerDraft
 
 
 class ModelError(RuntimeError):
@@ -28,6 +28,16 @@ class PhaseTwoModel(Protocol):
     ) -> OrganizerDraft: ...
 
     def critique(self, source_text: str, draft: OrganizerDraft) -> GroundingReport: ...
+
+
+class MemoryAgentModel(Protocol):
+    def propose_memories(
+        self, source_text: str, retrieved_memories: list[MemoryItem]
+    ) -> MemoryAgentDraft: ...
+
+
+class PhaseThreeModel(PhaseTwoModel, MemoryAgentModel, Protocol):
+    """The bounded Phase 2 and Phase 3 model surface."""
 
 
 @dataclass(frozen=True)
@@ -60,7 +70,7 @@ class OpenAICompatibleModel:
             CapturePlan,
             system=(
                 "You are CaptureFlow's Coordinator. Return JSON only. Plan only the "
-                "implemented actions summarize and extract_task; do not emit dependencies or "
+                "implemented actions summarize, extract_task, and inspect_memory; do not emit dependencies or "
                 "conditions. Each source_span must be copied verbatim from the source, apart "
                 "from whitespace normalization. For a message with one explicit request, choose "
                 "extract_task only; explanatory context does not by itself need a summary. "
@@ -71,6 +81,25 @@ class OpenAICompatibleModel:
                 "save it as a manual research task instead."
             ),
             payload={"source_text": source_text},
+        )
+
+    def propose_memories(
+        self, source_text: str, retrieved_memories: list[MemoryItem]
+    ) -> MemoryAgentDraft:
+        return self._complete(
+            MemoryAgentDraft,
+            system=(
+                "You are CaptureFlow's Memory Agent. Return JSON only. Propose at most five "
+                "compact long-term memories only when the source contains durable user-specific "
+                "information. Every proposal needs an exact source quote. Mark is_explicit false "
+                "for any inference. Use related_memory_ids only from the provided retrieved set "
+                "when a proposal conflicts with it. Never include secrets, credentials, or full "
+                "captures. Return an empty proposal list when memory is not useful."
+            ),
+            payload={
+                "source_text": source_text,
+                "retrieved_memories": [item.model_dump(mode="json") for item in retrieved_memories],
+            },
         )
 
     def repair_plan(
@@ -178,11 +207,13 @@ class ScriptedModel:
         drafts: list[OrganizerDraft | dict[str, Any]],
         reports: list[GroundingReport | dict[str, Any]],
         repair_plans: list[CapturePlan | dict[str, Any]] | None = None,
+        memory_drafts: list[MemoryAgentDraft | dict[str, Any]] | None = None,
     ) -> None:
         self.plans = plans
         self.drafts = drafts
         self.reports = reports
         self.repair_plans = repair_plans or []
+        self.memory_drafts = memory_drafts or []
         self.calls: list[str] = []
         self.critique_drafts: list[OrganizerDraft] = []
 
@@ -209,6 +240,12 @@ class ScriptedModel:
         self.calls.append("critique")
         self.critique_drafts.append(draft)
         return GroundingReport.model_validate(self._next(self.reports, "critique"))
+
+    def propose_memories(
+        self, source_text: str, retrieved_memories: list[MemoryItem]
+    ) -> MemoryAgentDraft:
+        self.calls.append("memory")
+        return MemoryAgentDraft.model_validate(self._next(self.memory_drafts, "memory"))
 
     @staticmethod
     def _next(values: list[Schema | dict[str, Any]], stage: str) -> Schema | dict[str, Any]:

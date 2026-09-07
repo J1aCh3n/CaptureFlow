@@ -177,7 +177,9 @@ class PhaseTwoWorkflow:
     def _after_plan(self, state: PhaseTwoState) -> str:
         if state["status"] == "failed":
             return "end"
-        if state["plan"].user_clarification_required:
+        if state["plan"].user_clarification_required or not any(
+            step.action in {"summarize", "extract_task"} for step in state["plan"].steps
+        ):
             return "complete"
         return "organize"
 

@@ -5,6 +5,9 @@ from pathlib import Path
 
 from streamlit.testing.v1 import AppTest
 
+from captureflow.models import Capture, Conversation, MemoryItem
+from captureflow.storage import CaptureStore
+
 
 class UiTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -37,12 +40,44 @@ class UiTests(unittest.TestCase):
                 os.environ[key] = value
         self.temporary_directory.cleanup()
 
-    def test_phase_two_shell_renders_without_automatic_model_behavior(self) -> None:
+    def test_phase_three_shell_renders_without_automatic_model_behavior(self) -> None:
         app = AppTest.from_file("app.py").run()
 
         self.assertEqual(app.exception, [])
         self.assertEqual(app.title[0].value, "CaptureFlow")
-        self.assertIn("Phase 2", app.caption[0].value)
+        self.assertIn("Phase 3", app.caption[0].value)
+
+    def test_memory_page_displays_and_undoes_an_automatic_memory(self) -> None:
+        app = AppTest.from_file("app.py").run()
+        store = CaptureStore(os.environ["CAPTUREFLOW_DATABASE_PATH"])
+        store.initialize()
+        conversation = store.save_conversation(Conversation(id="conversation-memory", title="Memory"))
+        capture = store.save_capture(
+            Capture(
+                id="capture-memory",
+                conversation_id=conversation.id,
+                source_text="I prefer concise notes.",
+            )
+        )
+        memory = store.save_memory(
+            MemoryItem(
+                id="memory-auto",
+                memory_type="preference",
+                content="Prefers concise notes.",
+                source_capture_id=capture.id,
+                source_quote="I prefer concise notes.",
+                write_mode="auto",
+                confidence=0.95,
+            ),
+            event_action="created_auto",
+        )
+
+        app.sidebar.radio[0].set_value("Memory").run()
+
+        self.assertEqual(app.exception, [])
+        self.assertTrue(any(memory.content in element.value for element in app.markdown))
+        next(button for button in app.button if button.key == f"undo-{memory.id}").click().run()
+        self.assertEqual(store.get_memory(memory.id).status, "deleted")
 
     def test_manual_capture_can_be_saved_and_deleted_from_shell(self) -> None:
         source_text = "Keep this hand-authored capture unchanged."
