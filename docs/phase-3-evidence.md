@@ -20,6 +20,11 @@ Memory page are implemented and tested, but the Phase 3 gate is not complete.
   LangGraph Memory Agent subgraph retrieve up to five active memories, request
   proposals, and pass them to the policy-controlled commit service. A memory
   proposal failure records a typed omission and never writes memory.
+- The Coordinator routing contract distinguishes durable user-specific
+  preferences, decisions, facts, and ideas from actionable requests. Durable
+  statements select `inspect_memory`; `extract_task` is reserved for requested,
+  assigned, promised, or otherwise actionable next steps. Both actions are
+  selected only when the source independently contains both kinds of content.
 - The Streamlit Memory page supports active-memory search, edit, delete and
   restore; automatic-write undo; and pending-review approval, edit, conflict
   supersession, or rejection. These are explicit user actions rather than
@@ -27,12 +32,13 @@ Memory page are implemented and tested, but the Phase 3 gate is not complete.
 
 ## Verification
 
-On 2026-09-07, the suite completed 45 tests successfully. The Phase 3 tests
+On 2026-09-07, the suite completed 46 tests successfully. The Phase 3 tests
 cover opt-in retrieval followed by an automatic write, typed Memory Agent
 failure without a write, and the Memory page display plus automatic-write
-undo. The policy tests cover automatic-write idempotency, blocked secrets,
-conflict review and supersede, undo/delete/restore, bounded retrieval, and no
-duplicate task after a repeated checkpointed commit.
+undo. A Coordinator prompt-contract test preserves the memory-versus-task
+routing boundary. The policy tests cover automatic-write idempotency, blocked
+secrets, conflict review and supersede, undo/delete/restore, bounded retrieval,
+and no duplicate task after a repeated checkpointed commit.
 
 ## Still required for the Phase 3 gate
 

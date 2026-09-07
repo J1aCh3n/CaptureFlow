@@ -38,6 +38,26 @@ class OpenAICompatibleModelTests(unittest.TestCase):
         self.assertEqual(plan.steps[0].action, "extract_task")
         self.assertNotIn("temperature", completions.kwargs)
 
+    def test_coordinator_prompt_distinguishes_memory_from_tasks(self) -> None:
+        completions = RecordingCompletions(
+            '{"steps":[{"id":"memory","action":"inspect_memory",'
+            '"source_span":"I decided to use PostgreSQL.",'
+            '"reason":"A durable user decision."}]}'
+        )
+        model = OpenAICompatibleModel.__new__(OpenAICompatibleModel)
+        model.settings = ModelSettings(api_key="test-key", model="gpt-5.6-terra")
+        model.client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+
+        plan = model.plan("I decided to use PostgreSQL.")
+
+        system_prompt = completions.kwargs["messages"][0]["content"]
+        self.assertEqual(plan.steps[0].action, "inspect_memory")
+        self.assertIn(
+            "durable user-specific preferences, decisions, facts, or ideas", system_prompt
+        )
+        self.assertIn("is not by itself a task", system_prompt)
+        self.assertIn("Select both actions only", system_prompt)
+
     def test_critic_does_not_treat_summary_usefulness_as_grounding(self) -> None:
         completions = RecordingCompletions('{"verdict":"pass","feedback":[]}')
         model = OpenAICompatibleModel.__new__(OpenAICompatibleModel)
