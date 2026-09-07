@@ -29,10 +29,17 @@ Memory page are implemented and tested, but the Phase 3 gate is not complete.
   restore; automatic-write undo; and pending-review approval, edit, conflict
   supersession, or rejection. These are explicit user actions rather than
   direct model writes.
+- The default Memory view shows active items and pending reviews. Superseded
+  and deleted versions are kept in a collapsed history view rather than mixed
+  into the working set. Unchanged edits are no-ops; real edits preserve
+  replacement lineage in the event log.
+- Conflict approval resolves any edit lineage created while the review was
+  pending before superseding the current active version. Legacy edits without
+  lineage metadata fall back to matching the original source provenance.
 
 ## Verification
 
-On 2026-09-07, the suite completed 48 tests successfully. The Phase 3 tests
+On 2026-09-07, the suite completed 51 tests successfully. The Phase 3 tests
 cover opt-in retrieval followed by an automatic write, typed Memory Agent
 failure without a write, and the Memory page display plus automatic-write
 undo. A Coordinator prompt-contract test preserves the memory-versus-task
@@ -43,6 +50,9 @@ and no duplicate task after a repeated checkpointed commit.
 Schema-invalid Coordinator responses, including an empty executable plan, now
 use the same single bounded plan-repair pass as source-span validation errors.
 The plan schema remains strict; no empty plan or fabricated fallback is accepted.
+
+Memory lifecycle tests also cover unchanged-edit no-op behavior and approval of
+a conflict whose original target was edited while the review remained pending.
 
 ## Still required for the Phase 3 gate
 

@@ -5,7 +5,13 @@ from pathlib import Path
 
 from streamlit.testing.v1 import AppTest
 
-from captureflow.models import Capture, Conversation, MemoryItem
+from captureflow.models import (
+    Capture,
+    Conversation,
+    MemoryItem,
+    MemoryProposal,
+    PendingMemoryReview,
+)
 from captureflow.storage import CaptureStore
 
 
@@ -71,11 +77,61 @@ class UiTests(unittest.TestCase):
             ),
             event_action="created_auto",
         )
+        historical = store.save_memory(
+            MemoryItem(
+                id="memory-history",
+                memory_type="preference",
+                content="An older note preference.",
+                source_capture_id=capture.id,
+                source_quote="I prefer concise notes.",
+                write_mode="reviewed",
+                status="superseded",
+                confidence=0.95,
+            ),
+            event_action="created_reviewed",
+        )
+        proposal = MemoryProposal(
+            memory_type="decision",
+            content="Use PostgreSQL.",
+            source_quote="I prefer concise notes.",
+            confidence=1,
+            is_explicit=True,
+        )
+        no_conflict_review = store.save_pending_review(
+            PendingMemoryReview(
+                id="review-no-conflict",
+                capture_id=capture.id,
+                proposal=proposal,
+                decision_reason="Decision requires review.",
+            )
+        )
+        conflict_review = store.save_pending_review(
+            PendingMemoryReview(
+                id="review-conflict",
+                capture_id=capture.id,
+                proposal=proposal,
+                decision_reason="Conflict requires review.",
+                conflicting_memory_ids=[memory.id],
+            )
+        )
 
         app.sidebar.radio[0].set_value("Memory").run()
 
         self.assertEqual(app.exception, [])
         self.assertTrue(any(memory.content in element.value for element in app.markdown))
+        self.assertTrue(any(expander.label == "Memory history (1)" for expander in app.expander))
+        self.assertFalse(
+            any(
+                button.key == f"save-edit-{historical.id}"
+                for button in app.button
+            )
+        )
+        self.assertFalse(
+            any(checkbox.key == f"supersede-{no_conflict_review.id}" for checkbox in app.checkbox)
+        )
+        self.assertTrue(
+            any(checkbox.key == f"supersede-{conflict_review.id}" for checkbox in app.checkbox)
+        )
         next(button for button in app.button if button.key == f"undo-{memory.id}").click().run()
         self.assertEqual(store.get_memory(memory.id).status, "deleted")
 

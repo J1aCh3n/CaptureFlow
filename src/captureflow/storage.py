@@ -320,7 +320,12 @@ class CaptureStore:
             ).fetchall()
         return [TaskItem(**dict(row)) for row in rows]
 
-    def save_memory(self, item: MemoryItem, event_action: str) -> MemoryItem:
+    def save_memory(
+        self,
+        item: MemoryItem,
+        event_action: str,
+        event_details: dict | None = None,
+    ) -> MemoryItem:
         with self._connect() as connection:
             cursor = connection.execute(
                 """
@@ -345,7 +350,7 @@ class CaptureStore:
             )
             inserted = cursor.rowcount == 1
             if inserted:
-                self._record_event(connection, item.id, event_action, {})
+                self._record_event(connection, item.id, event_action, event_details or {})
         if not inserted:
             existing = self.get_memory(item.id)
             if _without_timestamps(existing) != _without_timestamps(item):
@@ -390,7 +395,13 @@ class CaptureStore:
         ]
         return [item for score, item in sorted(ranked, key=lambda pair: pair[0], reverse=True) if score][:limit]
 
-    def set_memory_status(self, memory_id: str, status: str, action: str) -> MemoryItem:
+    def set_memory_status(
+        self,
+        memory_id: str,
+        status: str,
+        action: str,
+        event_details: dict | None = None,
+    ) -> MemoryItem:
         if status not in {"active", "superseded", "deleted"}:
             raise ValueError("invalid memory status")
         item = self.get_memory(memory_id)
@@ -400,7 +411,8 @@ class CaptureStore:
                 "UPDATE memory_items SET status = ?, updated_at = ? WHERE id = ?",
                 (updated.status, updated.updated_at.isoformat(), updated.id),
             )
-            self._record_event(connection, memory_id, action, {"previous_status": item.status})
+            details = {"previous_status": item.status, **(event_details or {})}
+            self._record_event(connection, memory_id, action, details)
         return updated
 
     def save_pending_review(self, review: PendingMemoryReview) -> PendingMemoryReview:

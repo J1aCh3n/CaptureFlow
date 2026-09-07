@@ -126,6 +126,100 @@ class MemoryServiceTests(unittest.TestCase):
         self.assertEqual(restored.status, "active")
         self.assertEqual(deleted.status, "deleted")
 
+    def test_unchanged_edit_does_not_create_a_replacement(self) -> None:
+        original = self.store.save_memory(
+            MemoryItem(
+                id="memory-unchanged",
+                memory_type="preference",
+                content="Prefers concise meeting notes.",
+                source_capture_id=self.capture.id,
+                source_quote=self.capture.source_text,
+                write_mode="reviewed",
+                confidence=1,
+            ),
+            event_action="created_reviewed",
+        )
+
+        result = self.service.edit_memory(original.id, original.content)
+
+        self.assertEqual(result.id, original.id)
+        self.assertEqual(self.store.get_memory(original.id).status, "active")
+        self.assertEqual(len(self.store.list_memories(statuses=("active", "superseded"))), 1)
+        self.assertEqual(len(self.store.list_memory_events(original.id)), 1)
+
+    def test_conflict_approval_supersedes_memory_edited_while_review_was_pending(self) -> None:
+        original = self.store.save_memory(
+            MemoryItem(
+                id="memory-before-review",
+                memory_type="preference",
+                content="Prefers concise meeting notes.",
+                source_capture_id=self.capture.id,
+                source_quote=self.capture.source_text,
+                write_mode="reviewed",
+                confidence=1,
+            ),
+            event_action="created_reviewed",
+        )
+        proposal = self.proposal(
+            content="Prefers detailed meeting notes.", related_memory_ids=[original.id]
+        )
+        self.service.apply_draft(
+            self.run.id,
+            self.capture.id,
+            self.capture.source_text,
+            MemoryAgentDraft(proposals=[proposal]),
+            [original],
+        )
+        review = self.store.list_pending_reviews()[0]
+        edited = self.service.edit_memory(original.id, "Prefers very concise meeting notes.")
+
+        approved = self.service.approve_review(review.id, supersede_conflicts=True)
+
+        self.assertEqual(self.store.get_memory(original.id).status, "superseded")
+        self.assertEqual(self.store.get_memory(edited.id).status, "superseded")
+        self.assertEqual(approved.status, "active")
+        old_event = self.store.list_memory_events(original.id)[0]
+        new_event = self.store.list_memory_events(edited.id)[-1]
+        self.assertEqual(old_event.details["replacement_memory_id"], edited.id)
+        self.assertEqual(new_event.details["replaces_memory_id"], original.id)
+
+    def test_conflict_approval_finds_legacy_edit_by_source_provenance(self) -> None:
+        original = self.store.save_memory(
+            MemoryItem(
+                id="legacy-original",
+                memory_type="preference",
+                content="Prefers concise meeting notes.",
+                source_capture_id=self.capture.id,
+                source_quote=self.capture.source_text,
+                write_mode="reviewed",
+                confidence=1,
+            ),
+            event_action="created_reviewed",
+        )
+        proposal = self.proposal(
+            content="Prefers detailed meeting notes.", related_memory_ids=[original.id]
+        )
+        self.service.apply_draft(
+            self.run.id,
+            self.capture.id,
+            self.capture.source_text,
+            MemoryAgentDraft(proposals=[proposal]),
+            [original],
+        )
+        review = self.store.list_pending_reviews()[0]
+        legacy_successor = self.store.save_memory(
+            original.model_copy(
+                update={"id": "legacy-successor", "content": "Prefers brief meeting notes."}
+            ),
+            event_action="edited_replacement",
+        )
+        self.store.set_memory_status(original.id, "superseded", "superseded_by_edit")
+
+        approved = self.service.approve_review(review.id, supersede_conflicts=True)
+
+        self.assertEqual(self.store.get_memory(legacy_successor.id).status, "superseded")
+        self.assertEqual(approved.status, "active")
+
     def test_lexical_retrieval_is_bounded_and_excludes_deleted_memories(self) -> None:
         for index in range(6):
             self.store.save_memory(

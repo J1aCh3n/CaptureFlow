@@ -172,11 +172,13 @@ def render_memory_page(store: CaptureStore) -> None:
     st.caption("Only policy-approved proposals appear here. Automatic writes can be undone.")
     service = MemoryService(store)
     query = st.text_input("Search active memory")
-    memories = store.search_memories(query) if query.strip() else store.list_memories(
-        statuses=("active", "superseded", "deleted")
+    memories = (
+        store.search_memories(query)
+        if query.strip()
+        else store.list_memories(statuses=("active",))
     )
     if not memories:
-        st.info("No saved memories match this view.")
+        st.info("No active memories match this view.")
     for memory in memories:
         with st.container(border=True):
             st.markdown(f"**{memory.memory_type}:** {memory.content}")
@@ -184,24 +186,43 @@ def render_memory_page(store: CaptureStore) -> None:
                 f"{memory.status}; {memory.write_mode}; confidence {memory.confidence:.0%}; "
                 f"source: {memory.source_quote}"
             )
-            if memory.status == "active":
-                edited = st.text_input("Edit memory", value=memory.content, key=f"edit-{memory.id}")
-                if st.button("Save edit", key=f"save-edit-{memory.id}"):
-                    try:
-                        service.edit_memory(memory.id, edited)
-                    except ValueError as error:
-                        st.error(str(error))
-                    else:
-                        st.rerun()
-                if memory.write_mode == "auto" and st.button("Undo automatic write", key=f"undo-{memory.id}"):
-                    service.undo_auto_memory(memory.id)
+            lineage = _memory_lineage(store, memory.id)
+            if lineage:
+                st.caption(lineage)
+            edited = st.text_input("Edit memory", value=memory.content, key=f"edit-{memory.id}")
+            if st.button("Save edit", key=f"save-edit-{memory.id}"):
+                try:
+                    service.edit_memory(memory.id, edited)
+                except ValueError as error:
+                    st.error(str(error))
+                else:
                     st.rerun()
-                if st.button("Delete memory", key=f"delete-memory-{memory.id}"):
-                    service.delete_memory(memory.id)
-                    st.rerun()
-            elif memory.status == "deleted" and st.button("Restore memory", key=f"restore-{memory.id}"):
-                service.restore_memory(memory.id)
+            if memory.write_mode == "auto" and st.button(
+                "Undo automatic write", key=f"undo-{memory.id}"
+            ):
+                service.undo_auto_memory(memory.id)
                 st.rerun()
+            if st.button("Delete memory", key=f"delete-memory-{memory.id}"):
+                service.delete_memory(memory.id)
+                st.rerun()
+
+    history = store.list_memories(statuses=("superseded", "deleted"))
+    if history:
+        with st.expander(f"Memory history ({len(history)})"):
+            for memory in history:
+                with st.container(border=True):
+                    st.markdown(f"**{memory.memory_type}:** {memory.content}")
+                    st.caption(
+                        f"{memory.status}; {memory.write_mode}; source: {memory.source_quote}"
+                    )
+                    lineage = _memory_lineage(store, memory.id)
+                    if lineage:
+                        st.caption(lineage)
+                    if memory.status == "deleted" and st.button(
+                        "Restore memory", key=f"restore-{memory.id}"
+                    ):
+                        service.restore_memory(memory.id)
+                        st.rerun()
 
     reviews = store.list_pending_reviews()
     if reviews:
@@ -212,15 +233,26 @@ def render_memory_page(store: CaptureStore) -> None:
             st.markdown(f"**{proposal.memory_type}:** {proposal.content}")
             st.caption(f"Reason: {review.decision_reason}. Source: {proposal.source_quote}")
             revised = st.text_input("Review text", value=proposal.content, key=f"review-text-{review.id}")
-            supersede = st.checkbox(
-                "Supersede conflicting active memories", key=f"supersede-{review.id}"
-            )
+            supersede = False
+            if review.conflicting_memory_ids:
+                supersede = st.checkbox(
+                    "Supersede conflicting active memories", key=f"supersede-{review.id}"
+                )
             if st.button("Approve memory", key=f"approve-{review.id}"):
                 service.approve_review(review.id, revised, supersede)
                 st.rerun()
             if st.button("Reject memory", key=f"reject-{review.id}"):
                 service.reject_review(review.id)
                 st.rerun()
+
+
+def _memory_lineage(store: CaptureStore, memory_id: str) -> str | None:
+    for event in store.list_memory_events(memory_id):
+        if replaced := event.details.get("replacement_memory_id"):
+            return f"Replaced by memory {replaced}."
+        if previous := event.details.get("replaces_memory_id"):
+            return f"Replaces memory {previous}."
+    return None
 
 
 def render_run_history(runs: list[CaptureRun]) -> None:

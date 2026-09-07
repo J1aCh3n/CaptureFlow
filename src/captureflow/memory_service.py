@@ -89,6 +89,11 @@ class MemoryService:
         review = self.store.get_review(review_id)
         if review.status != "pending":
             raise ValueError("only a pending review can be approved")
+        conflict_ids = (
+            self._current_conflict_ids(review.conflicting_memory_ids)
+            if supersede_conflicts
+            else []
+        )
         proposal = review.proposal.model_copy(update={"content": content or review.proposal.content})
         item = self.store.save_memory(
             MemoryItem(
@@ -102,11 +107,8 @@ class MemoryService:
             ),
             event_action="created_reviewed",
         )
-        if supersede_conflicts:
-            for memory_id in review.conflicting_memory_ids:
-                active = self.store.get_memory(memory_id)
-                if active.status == "active":
-                    self.store.set_memory_status(memory_id, "superseded", "superseded_by_review")
+        for memory_id in conflict_ids:
+            self.store.set_memory_status(memory_id, "superseded", "superseded_by_review")
         self.store.resolve_review(review_id, "approved")
         return item
 
@@ -138,6 +140,8 @@ class MemoryService:
         item = self.store.get_memory(memory_id)
         if item.status != "active":
             raise ValueError("only an active memory can be edited")
+        if content == item.content:
+            return item
         replacement = self.store.save_memory(
             MemoryItem(
                 id=_stable_id(memory_id, "edit", 0),
@@ -152,9 +156,53 @@ class MemoryService:
                 updated_at=utc_now(),
             ),
             event_action="edited_replacement",
+            event_details={"replaces_memory_id": memory_id},
         )
-        self.store.set_memory_status(memory_id, "superseded", "superseded_by_edit")
+        self.store.set_memory_status(
+            memory_id,
+            "superseded",
+            "superseded_by_edit",
+            event_details={"replacement_memory_id": replacement.id},
+        )
         return replacement
+
+    def _current_conflict_ids(self, stored_ids: list[str]) -> list[str]:
+        """Resolve reviewed conflicts through any edits made while review was pending."""
+
+        active = {item.id: item for item in self.store.list_memories(statuses=("active",))}
+        resolved: set[str] = set()
+        for stored_id in stored_ids:
+            current_id = stored_id
+            seen: set[str] = set()
+            while current_id not in seen:
+                seen.add(current_id)
+                if current_id in active:
+                    resolved.add(current_id)
+                    break
+                events = self.store.list_memory_events(current_id)
+                replacement_id = next(
+                    (
+                        event.details.get("replacement_memory_id")
+                        for event in events
+                        if event.details.get("replacement_memory_id")
+                    ),
+                    None,
+                )
+                if replacement_id is None:
+                    break
+                current_id = replacement_id
+
+            if resolved.intersection(seen):
+                continue
+            original = self.store.get_memory(stored_id)
+            for candidate in active.values():
+                if (
+                    candidate.memory_type == original.memory_type
+                    and candidate.source_capture_id == original.source_capture_id
+                    and candidate.source_quote == original.source_quote
+                ):
+                    resolved.add(candidate.id)
+        return sorted(resolved)
 
 
 def _stable_id(scope: str, kind: str, index: int) -> str:
