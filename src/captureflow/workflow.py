@@ -1,5 +1,6 @@
 from collections.abc import Callable
 from datetime import date, datetime
+import re
 from typing import Literal, TypedDict
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -7,12 +8,14 @@ from langgraph.graph import END, START, StateGraph
 
 from .date_tool import DateResolution, resolve_relative_date
 from .llm import InvalidStructuredOutput, ModelError, PhaseTwoModel
+from .memory import contains_credential_disclosure
 from .models import (
     CapturePlan,
     CaptureRun,
     GroundingIssue,
     GroundingReport,
     OrganizerDraft,
+    PlanStep,
     RunError,
     TaskCandidate,
 )
@@ -157,6 +160,19 @@ class PhaseTwoWorkflow:
                     ),
                 )
             }
+        if contains_credential_disclosure(state["source_text"]):
+            return {
+                "plan": CapturePlan(
+                    steps=[
+                        PlanStep(
+                            id="sensitive-memory-1",
+                            action="inspect_memory",
+                            source_span=state["source_text"],
+                            reason="The capture appears to disclose a credential and must not create a task or durable memory.",
+                        )
+                    ]
+                )
+            }
         calls = state["model_calls"] + 1
         try:
             plan = self.model.plan(state["source_text"])
@@ -166,7 +182,12 @@ class PhaseTwoWorkflow:
             return self._failure(state, "plan", str(error), calls)
         try:
             validate_plan(plan, state["source_text"])
-            return {"plan": plan, "model_calls": calls}
+            plan, ownership_warnings = _remove_explicit_external_task_steps(plan)
+            return {
+                "plan": plan,
+                "model_calls": calls,
+                "warnings": [*state["warnings"], *ownership_warnings],
+            }
         except ValueError as error:
             return self._repair_plan(state, plan, str(error), calls)
 
@@ -183,7 +204,14 @@ class PhaseTwoWorkflow:
                 state["source_text"], invalid_plan, validation_error
             )
             validate_plan(repaired_plan, state["source_text"])
-            return {"plan": repaired_plan, "model_calls": repair_calls}
+            repaired_plan, ownership_warnings = _remove_explicit_external_task_steps(
+                repaired_plan
+            )
+            return {
+                "plan": repaired_plan,
+                "model_calls": repair_calls,
+                "warnings": [*state["warnings"], *ownership_warnings],
+            }
         except (ModelError, ValueError) as repair_error:
             return self._failure(state, "plan", str(repair_error), repair_calls)
 
@@ -510,6 +538,60 @@ def configured_reference_date(timezone: str) -> date:
 
 def _normalize(value: str) -> str:
     return " ".join(value.split())
+
+
+_EXPLICIT_EXTERNAL_OBLIGATION = re.compile(
+    r"(?:^|[.!?]\s+)(?:the|a|an)\s+(?:[a-z][\w'-]*\s+){0,6}?"
+    r"(?:must|should|needs?\s+to|is\s+required\s+to|will)\b",
+    re.IGNORECASE,
+)
+
+
+def _remove_explicit_external_task_steps(plan: CapturePlan) -> tuple[CapturePlan, list[str]]:
+    """Keep reported third-party obligations out of this personal task list.
+
+    A bare definite-noun obligation (for example, "The transportation office must …")
+    does not identify the user or their team as the owner. This Core workflow has no
+    assignee field, so it conservatively summarizes such a report instead of persisting
+    it as a user task. Direct requests, first-person commitments, and explicit TODOs
+    do not match this narrow English safeguard.
+    """
+
+    external_steps = [
+        step
+        for step in plan.steps
+        if step.action == "extract_task" and _EXPLICIT_EXTERNAL_OBLIGATION.search(step.source_span)
+    ]
+    if not external_steps:
+        return plan, []
+
+    has_summary = any(step.action == "summarize" for step in plan.steps)
+    replacement_added = False
+    filtered_steps: list[PlanStep] = []
+    for step in plan.steps:
+        if step not in external_steps:
+            filtered_steps.append(step)
+            continue
+        if not has_summary and not replacement_added:
+            filtered_steps.append(
+                step.model_copy(
+                    update={
+                        "action": "summarize",
+                        "reason": (
+                            "The source reports a third-party obligation, which is context "
+                            "rather than a user-owned task."
+                        ),
+                    }
+                )
+            )
+            replacement_added = True
+
+    return (
+        plan.model_copy(update={"steps": filtered_steps}),
+        [
+            "Reported third-party obligations were omitted from the personal task list."
+        ],
+    )
 
 
 def _requires_web_search(source_text: str) -> bool:

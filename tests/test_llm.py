@@ -57,6 +57,8 @@ class OpenAICompatibleModelTests(unittest.TestCase):
         )
         self.assertIn("is not by itself a task", system_prompt)
         self.assertIn("Select both actions only", system_prompt)
+        self.assertIn("third party in a news article, report, quote", system_prompt)
+        self.assertIn("not a user task", system_prompt)
         self.assertIn("Duplicate checking happens downstream", system_prompt)
         self.assertIn("Never return an empty step list", system_prompt)
 

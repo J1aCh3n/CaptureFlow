@@ -25,6 +25,11 @@ artifacts/
 .test-tmp/
 *.egg-info/
 
+# Local acceptance notes and interaction-test records
+docs/phase-3-acceptance-examples.md
+docs/phase-3-acceptance-protocol.md
+docs/captureflow-interaction-revision.md
+
 # Secrets and local configuration
 .env
 .env.*

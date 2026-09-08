@@ -27,6 +27,8 @@ def resolve_relative_date(expression: str, reference_date: date, timezone: str) 
     """Resolve a small, explicit v0 vocabulary without guessing bare weekdays."""
 
     normalized = " ".join(expression.lower().split())
+    if normalized.startswith("by "):
+        normalized = normalized[3:]
     base = dict(expression=expression, reference_date=reference_date, timezone=timezone)
     if normalized == "today":
         return DateResolution(

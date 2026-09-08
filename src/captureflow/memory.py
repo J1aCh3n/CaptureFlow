@@ -9,6 +9,11 @@ _SENSITIVE_PATTERN = re.compile(
     r"\b(?:api[ _-]?key|password|secret|access[ _-]?token|credential|private[ _-]?key)\b",
     re.IGNORECASE,
 )
+_CREDENTIAL_DISCLOSURE_PATTERN = re.compile(
+    r"\b(?:api[ _-]?key|password|secret|access[ _-]?token|credential|private[ _-]?key)\b"
+    r"\s*(?:is|=|:)\s*\S+",
+    re.IGNORECASE,
+)
 _FIRST_PERSON_PATTERN = re.compile(r"\b(?:i|i'm|i’m|my|mine)\b", re.IGNORECASE)
 
 
@@ -99,3 +104,9 @@ def _tokens(value: str) -> list[str]:
 
 def _normalize(value: str) -> str:
     return " ".join(value.split())
+
+
+def contains_credential_disclosure(value: str) -> bool:
+    """Return whether a capture appears to disclose a credential value."""
+
+    return bool(_CREDENTIAL_DISCLOSURE_PATTERN.search(value))

@@ -10,6 +10,7 @@ from captureflow.models import (
     MemoryAgentDraft,
     MemoryItem,
     MemoryProposal,
+    PendingMemoryReview,
     TaskItem,
     WorkflowCheckpoint,
 )
@@ -107,6 +108,72 @@ class MemoryServiceTests(unittest.TestCase):
         self.assertEqual(self.store.get_review(review.id).status, "approved")
         self.assertEqual(replacement.write_mode, "reviewed")
         self.assertEqual(self.store.get_memory(existing.id).status, "superseded")
+
+    def test_equivalent_pending_review_is_deduplicated_across_runs(self) -> None:
+        existing = self.store.save_memory(
+            MemoryItem(
+                id="memory-existing",
+                memory_type="preference",
+                content="Prefers detailed meeting notes.",
+                source_capture_id=self.capture.id,
+                source_quote=self.capture.source_text,
+                write_mode="reviewed",
+                confidence=1,
+            ),
+            event_action="created_reviewed",
+        )
+        draft = MemoryAgentDraft(
+            proposals=[self.proposal(related_memory_ids=[existing.id])]
+        )
+
+        first = self.service.apply_draft(
+            "run-first", self.capture.id, self.capture.source_text, draft, [existing]
+        )
+        replayed = self.service.apply_draft(
+            "run-first", self.capture.id, self.capture.source_text, draft, [existing]
+        )
+        second = self.service.apply_draft(
+            "run-second", self.capture.id, self.capture.source_text, draft, [existing]
+        )
+
+        self.assertEqual(first[0].decision, "review")
+        self.assertEqual(replayed[0].decision, "review")
+        self.assertEqual(second[0].decision, "duplicate")
+        self.assertEqual(len(self.store.list_pending_reviews()), 1)
+
+    def test_approval_resolves_equivalent_pending_reviews_without_duplicate_memory(self) -> None:
+        proposal = self.proposal(memory_type="idea")
+        for review_id in ("review-first", "review-second"):
+            self.store.save_pending_review(
+                PendingMemoryReview(
+                    id=review_id,
+                    capture_id=self.capture.id,
+                    proposal=proposal,
+                    decision_reason="Ideas require review.",
+                )
+            )
+
+        approved = self.service.approve_review("review-first")
+
+        self.assertEqual(self.store.list_pending_reviews(), [])
+        self.assertEqual(self.store.get_review("review-first").status, "approved")
+        self.assertEqual(self.store.get_review("review-second").status, "approved")
+        active = self.store.list_memories()
+        self.assertEqual(len(active), 1)
+        self.assertEqual(active[0].id, approved.id)
+
+        self.store.save_pending_review(
+            PendingMemoryReview(
+                id="review-after-active",
+                capture_id=self.capture.id,
+                proposal=proposal,
+                decision_reason="Legacy duplicate review.",
+            )
+        )
+        repeated = self.service.approve_review("review-after-active")
+
+        self.assertEqual(repeated.id, approved.id)
+        self.assertEqual(len(self.store.list_memories()), 1)
 
     def test_auto_memory_can_be_undone_deleted_and_restored(self) -> None:
         self.service.apply_draft(

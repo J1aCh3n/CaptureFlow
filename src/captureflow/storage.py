@@ -155,6 +155,31 @@ class CaptureStore:
             raise KeyError(f"conversation not found: {conversation_id}")
         return Conversation(**dict(row))
 
+    def delete_conversation(self, conversation_id: str) -> bool:
+        """Delete one conversation and all state derived from its captures."""
+
+        with self._connect() as connection:
+            memory_rows = connection.execute(
+                """
+                SELECT memory_items.id
+                FROM memory_items
+                JOIN captures ON captures.id = memory_items.source_capture_id
+                WHERE captures.conversation_id = ?
+                """,
+                (conversation_id,),
+            ).fetchall()
+            memory_ids = [row["id"] for row in memory_rows]
+            if memory_ids:
+                placeholders = ", ".join("?" for _ in memory_ids)
+                connection.execute(
+                    f"DELETE FROM memory_events WHERE memory_id IN ({placeholders})",
+                    memory_ids,
+                )
+            cursor = connection.execute(
+                "DELETE FROM conversations WHERE id = ?", (conversation_id,)
+            )
+        return cursor.rowcount == 1
+
     def list_conversations(self) -> list[Conversation]:
         with self._connect() as connection:
             rows = connection.execute(
@@ -532,6 +557,36 @@ class CaptureStore:
         if row is None:
             raise KeyError(f"checkpoint not found: {run_id}")
         return WorkflowCheckpoint.model_validate_json(row["payload_json"])
+
+    def commit_checkpoint(self, run_id: str, payload: dict) -> WorkflowCheckpoint:
+        """Advance one prepared checkpoint to committed without allowing rewrites."""
+
+        existing = self.get_checkpoint(run_id)
+        if existing.state == "committed":
+            if existing.payload != payload:
+                raise ValueError("committed checkpoint payload cannot change")
+            return existing
+        committed = existing.model_copy(
+            update={"state": "committed", "payload": payload, "updated_at": utc_now()}
+        )
+        serialized = committed.model_dump(mode="json")
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE workflow_checkpoints
+                SET state = ?, payload_json = ?, updated_at = ?
+                WHERE run_id = ? AND state = 'prepared'
+                """,
+                (
+                    committed.state,
+                    json.dumps(serialized, sort_keys=True),
+                    committed.updated_at.isoformat(),
+                    committed.run_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("checkpoint was not in the prepared state")
+        return self.get_checkpoint(run_id)
 
     @staticmethod
     def _record_event(

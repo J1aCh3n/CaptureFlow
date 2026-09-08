@@ -7,6 +7,7 @@ from streamlit.testing.v1 import AppTest
 
 from captureflow.models import (
     Capture,
+    CaptureRun,
     Conversation,
     MemoryItem,
     MemoryProposal,
@@ -135,12 +136,59 @@ class UiTests(unittest.TestCase):
         next(button for button in app.button if button.key == f"undo-{memory.id}").click().run()
         self.assertEqual(store.get_memory(memory.id).status, "deleted")
 
+    def test_inbox_displays_retrieved_memory_and_policy_decision_trace(self) -> None:
+        app = AppTest.from_file("app.py").run()
+        store = CaptureStore(os.environ["CAPTUREFLOW_DATABASE_PATH"])
+        store.initialize()
+        conversation = store.list_conversations()[0]
+        capture = store.save_capture(
+            Capture(
+                id="capture-trace",
+                conversation_id=conversation.id,
+                source_text="I prefer concise meeting notes.",
+            )
+        )
+        memory = store.save_memory(
+            MemoryItem(
+                id="memory-trace",
+                memory_type="preference",
+                content="Prefers concise meeting notes.",
+                source_capture_id=capture.id,
+                source_quote=capture.source_text,
+                write_mode="auto",
+                confidence=1,
+            ),
+            event_action="created_auto",
+        )
+        store.save_run(
+            CaptureRun(
+                id="run-trace",
+                capture_id=capture.id,
+                status="completed",
+                retrieved_memory_ids=[memory.id],
+                memory_decisions=[
+                    {
+                        "decision": "duplicate",
+                        "reason": "An active retrieved memory already has the same content.",
+                        "proposal": {"content": memory.content},
+                    }
+                ],
+                model_calls=2,
+            )
+        )
+
+        app.run()
+
+        self.assertTrue(any(expander.label == "Memory trace" for expander in app.expander))
+        self.assertTrue(any(memory.content in element.value for element in app.markdown))
+        self.assertTrue(any("Decision — duplicate" in element.value for element in app.markdown))
+
     def test_manual_capture_can_be_saved_and_deleted_from_shell(self) -> None:
         source_text = "Keep this hand-authored capture unchanged."
         app = AppTest.from_file("app.py").run()
 
         app.text_area[0].input(source_text).run()
-        app.button[1].click().run()
+        next(button for button in app.button if button.label == "Save capture").click().run()
 
         self.assertEqual(app.exception, [])
         self.assertIn(source_text, [element.value for element in app.text])
@@ -152,6 +200,61 @@ class UiTests(unittest.TestCase):
 
         self.assertEqual(app.exception, [])
         self.assertNotIn(source_text, [element.value for element in app.text])
+
+    def test_duplicate_titles_select_the_new_conversation_and_keep_histories_separate(self) -> None:
+        app = AppTest.from_file("app.py").run()
+        store = CaptureStore(os.environ["CAPTUREFLOW_DATABASE_PATH"])
+        store.initialize()
+
+        app.text_input[0].input("Repeated title").run()
+        next(button for button in app.button if button.label == "Create conversation").click().run()
+        first = next(
+            conversation
+            for conversation in store.list_conversations()
+            if conversation.title == "Repeated title"
+        )
+        app.text_area[0].input("Capture belonging only to the first conversation.").run()
+        next(button for button in app.button if button.label == "Save capture").click().run()
+
+        app.text_input[0].input("Repeated title").run()
+        next(button for button in app.button if button.label == "Create conversation").click().run()
+        matches = [
+            conversation
+            for conversation in store.list_conversations()
+            if conversation.title == "Repeated title"
+        ]
+        newest = matches[0]
+
+        self.assertEqual(len(matches), 2)
+        self.assertNotEqual(first.id, newest.id)
+        self.assertEqual(app.selectbox[0].value, newest.id)
+        self.assertEqual(len(store.list_captures(first.id)), 1)
+        self.assertEqual(store.list_captures(newest.id), [])
+        self.assertEqual(len(app.selectbox[0].options), len(set(app.selectbox[0].options)))
+
+    def test_confirmed_conversation_delete_removes_only_the_selected_conversation(self) -> None:
+        app = AppTest.from_file("app.py").run()
+        store = CaptureStore(os.environ["CAPTUREFLOW_DATABASE_PATH"])
+        store.initialize()
+        retained_id = store.list_conversations()[0].id
+
+        app.text_input[0].input("Delete this conversation").run()
+        next(button for button in app.button if button.label == "Create conversation").click().run()
+        deleted_id = app.selectbox[0].value
+        app.text_area[0].input("This capture should be deleted with its conversation.").run()
+        next(button for button in app.button if button.label == "Save capture").click().run()
+
+        next(
+            checkbox
+            for checkbox in app.checkbox
+            if checkbox.label == "I understand this deletes the conversation and its derived data."
+        ).check().run()
+        next(button for button in app.button if button.label == "Delete conversation").click().run()
+
+        with self.assertRaises(KeyError):
+            store.get_conversation(deleted_id)
+        self.assertEqual(app.selectbox[0].value, retained_id)
+        self.assertEqual(store.get_conversation(retained_id).id, retained_id)
 
     def test_analyze_without_model_settings_saves_a_visible_configuration_failure(self) -> None:
         app = AppTest.from_file("app.py").run()

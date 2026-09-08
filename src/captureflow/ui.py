@@ -40,16 +40,6 @@ def main() -> None:
         conversation = store.save_conversation(Conversation(title="First capture"))
         conversations = [conversation]
 
-    selected_id = st.selectbox(
-        "Conversation",
-        options=[conversation.id for conversation in conversations],
-        format_func=lambda conversation_id: next(
-            conversation.title
-            for conversation in conversations
-            if conversation.id == conversation_id
-        ),
-    )
-
     with st.expander("New conversation"):
         title = st.text_input("Title", key="new_conversation_title")
         if st.button("Create conversation"):
@@ -58,8 +48,48 @@ def main() -> None:
             except ValidationError as error:
                 st.error(error.errors()[0]["msg"])
             else:
+                st.session_state["selected_conversation_id"] = created.id
                 st.success(f"Created {created.title}.")
                 st.rerun()
+
+    conversation_by_id = {conversation.id: conversation for conversation in conversations}
+    title_counts = {
+        conversation.title: sum(item.title == conversation.title for item in conversations)
+        for conversation in conversations
+    }
+    conversation_ids = list(conversation_by_id)
+    if st.session_state.get("selected_conversation_id") not in conversation_by_id:
+        st.session_state["selected_conversation_id"] = conversation_ids[0]
+
+    def conversation_label(conversation_id: str) -> str:
+        conversation = conversation_by_id[conversation_id]
+        if title_counts[conversation.title] == 1:
+            return conversation.title
+        return f"{conversation.title} · {conversation.id[:8]}"
+
+    selected_id = st.selectbox(
+        "Conversation",
+        options=conversation_ids,
+        format_func=conversation_label,
+        key="selected_conversation_id",
+    )
+
+    with st.expander("Conversation settings"):
+        st.warning(
+            "Deleting this conversation also deletes its captures, runs, tasks, reviews, "
+            "checkpoints, and memories derived from those captures."
+        )
+        confirmed = st.checkbox(
+            "I understand this deletes the conversation and its derived data.",
+            key=f"confirm-delete-conversation-{selected_id}",
+        )
+        if st.button(
+            "Delete conversation",
+            key=f"delete-conversation-{selected_id}",
+            disabled=not confirmed,
+        ):
+            store.delete_conversation(selected_id)
+            st.rerun()
 
     st.subheader("Capture")
     source_text = st.text_area(
@@ -92,7 +122,7 @@ def main() -> None:
                 run = analyze_capture(capture, store)
                 store.save_run(run)
                 st.rerun()
-            render_run(store.latest_run_for_capture(capture.id))
+            render_run(store.latest_run_for_capture(capture.id), store)
             render_run_history(store.list_runs_for_capture(capture.id))
             if st.button("Delete", key=f"delete-{capture.id}"):
                 store.delete_capture(capture.id)
@@ -123,7 +153,7 @@ def analyze_capture(capture: Capture, store: CaptureStore) -> CaptureRun:
         )
 
 
-def render_run(run: CaptureRun | None) -> None:
+def render_run(run: CaptureRun | None, store: CaptureStore) -> None:
     if run is None:
         st.caption("Not analyzed yet.")
         return
@@ -134,6 +164,26 @@ def render_run(run: CaptureRun | None) -> None:
         with st.expander("Validated plan"):
             for step in run.plan.steps:
                 st.write(f"{step.action}: {step.reason}")
+    if run.retrieved_memory_ids or run.memory_decisions:
+        with st.expander("Memory trace"):
+            for memory_id in run.retrieved_memory_ids:
+                try:
+                    memory = store.get_memory(memory_id)
+                except KeyError:
+                    st.caption(f"Retrieved {memory_id}: memory is no longer available.")
+                else:
+                    st.markdown(
+                        f"**Retrieved {memory.id[:8]}:** {memory.memory_type} — {memory.content}"
+                    )
+                    st.caption(f"Status: {memory.status}; full ID: {memory.id}")
+            if not run.retrieved_memory_ids:
+                st.caption("Retrieved: none")
+            for decision in run.memory_decisions:
+                proposal = decision.get("proposal", {})
+                content = proposal.get("content", "No proposal content")
+                st.markdown(f"**Decision — {decision.get('decision', 'unknown')}:** {content}")
+                if reason := decision.get("reason"):
+                    st.caption(f"Reason: {reason}")
     if run.status in {"completed", "completed_with_omissions", "needs_review"} and run.output:
         if run.status == "needs_review":
             st.info("This run has grounded output that needs user confirmation.")

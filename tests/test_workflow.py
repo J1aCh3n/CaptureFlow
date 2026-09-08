@@ -222,6 +222,96 @@ class PhaseTwoWorkflowTests(unittest.TestCase):
         self.assertEqual(result.output.tasks[0].resolved_due_date, date(2026, 9, 8))
         self.assertIn("接口延迟阻塞联调", result.output.tasks[0].source_quote)
 
+    def test_reported_third_party_obligation_is_not_a_user_task(self) -> None:
+        source = (
+            "Policy Watch — The Riverview council approved a one-year pilot allowing restaurants "
+            "to use shared curbside pickup zones after 6 p.m. The transportation office must "
+            "publish a quarterly report on loading conflicts before the council considers "
+            "extending the pilot."
+        )
+        plan = CapturePlan(
+            steps=[
+                PlanStep(
+                    id="summary",
+                    action="summarize",
+                    source_span=source,
+                    reason="The capture reports a policy decision and its condition.",
+                ),
+                PlanStep(
+                    id="reported-obligation",
+                    action="extract_task",
+                    source_span=(
+                        "The transportation office must publish a quarterly report on loading "
+                        "conflicts before the council considers extending the pilot."
+                    ),
+                    reason="The source states an obligation.",
+                ),
+            ]
+        )
+        draft = OrganizerDraft.model_validate(
+            {
+                "summary_claims": [
+                    {
+                        "text": (
+                            "The council approved a one-year evening pickup-zone pilot whose "
+                            "extension depends on quarterly conflict reporting."
+                        ),
+                        "source_quote": source,
+                    }
+                ]
+            }
+        )
+        model = ScriptedModel(plans=[plan], drafts=[draft], reports=[PASS])
+
+        result = PhaseTwoWorkflow(model).run(
+            capture_id="capture-1",
+            source_text=source,
+            run_id="run-1",
+            reference_date=date(2026, 9, 6),
+            timezone="America/Vancouver",
+        )
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual({step.action for step in result.plan.steps}, {"summarize"})
+        self.assertEqual(result.output.tasks, [])
+        self.assertEqual(model.calls, ["plan", "organize", "critique"])
+        self.assertIn("third-party obligations", result.warnings[0])
+
+    def test_task_only_third_party_obligation_becomes_a_summary(self) -> None:
+        source = "The transportation office must publish a quarterly report on loading conflicts."
+        plan = CapturePlan(
+            steps=[
+                PlanStep(
+                    id="reported-obligation",
+                    action="extract_task",
+                    source_span=source,
+                    reason="The source states an obligation.",
+                )
+            ]
+        )
+        draft = OrganizerDraft.model_validate(
+            {
+                "summary_claims": [
+                    {
+                        "text": "The transportation office is required to publish a report.",
+                        "source_quote": source,
+                    }
+                ]
+            }
+        )
+        model = ScriptedModel(plans=[plan], drafts=[draft], reports=[PASS])
+
+        result = PhaseTwoWorkflow(model).run(
+            capture_id="capture-1",
+            source_text=source,
+            run_id="run-1",
+            reference_date=date(2026, 9, 6),
+            timezone="America/Vancouver",
+        )
+
+        self.assertEqual({step.action for step in result.plan.steps}, {"summarize"})
+        self.assertEqual(result.output.tasks, [])
+
     def test_critic_receives_due_expression_but_not_typed_date_resolution(self) -> None:
         model = ScriptedModel(plans=[PLAN], drafts=[DRAFT], reports=[PASS])
 

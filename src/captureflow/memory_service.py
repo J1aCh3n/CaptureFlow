@@ -6,6 +6,7 @@ from .models import (
     MemoryAgentDraft,
     MemoryDecision,
     MemoryItem,
+    MemoryProposal,
     PendingMemoryReview,
     TaskItem,
     utc_now,
@@ -36,7 +37,6 @@ class MemoryService:
         decisions: list[MemoryDecision] = []
         for index, proposal in enumerate(draft.proposals):
             decision = self.policy.decide(proposal, source_text, retrieved_memories)
-            decisions.append(decision)
             if decision.decision == "auto":
                 self.store.save_memory(
                     MemoryItem(
@@ -51,15 +51,40 @@ class MemoryService:
                     event_action="created_auto",
                 )
             elif decision.decision == "review":
-                self.store.save_pending_review(
-                    PendingMemoryReview(
-                        id=_stable_id(run_id, "review", index),
-                        capture_id=capture_id,
-                        proposal=proposal,
-                        decision_reason=decision.reason,
-                        conflicting_memory_ids=decision.conflicting_memory_ids,
-                    )
+                review_id = _stable_id(run_id, "review", index)
+                try:
+                    replayed_review = self.store.get_review(review_id)
+                except KeyError:
+                    replayed_review = None
+                existing_review = replayed_review or next(
+                    (
+                        review
+                        for review in self.store.list_pending_reviews()
+                        if _equivalent_proposals(review.proposal, proposal)
+                    ),
+                    None,
                 )
+                if replayed_review is not None and replayed_review.proposal != proposal:
+                    raise ValueError("stable memory review ID has different content")
+                if existing_review is not None and replayed_review is None:
+                    decision = decision.model_copy(
+                        update={
+                            "decision": "duplicate",
+                            "reason": "An equivalent memory review is already pending.",
+                            "conflicting_memory_ids": [],
+                        }
+                    )
+                elif existing_review is None:
+                    self.store.save_pending_review(
+                        PendingMemoryReview(
+                            id=review_id,
+                            capture_id=capture_id,
+                            proposal=proposal,
+                            decision_reason=decision.reason,
+                            conflicting_memory_ids=decision.conflicting_memory_ids,
+                        )
+                    )
+            decisions.append(decision)
         return decisions
 
     def commit_tasks(self, run_id: str, capture_id: str, tasks: list[TaskItem]) -> list[TaskItem]:
@@ -89,13 +114,21 @@ class MemoryService:
         review = self.store.get_review(review_id)
         if review.status != "pending":
             raise ValueError("only a pending review can be approved")
-        conflict_ids = (
-            self._current_conflict_ids(review.conflicting_memory_ids)
-            if supersede_conflicts
-            else []
-        )
         proposal = review.proposal.model_copy(update={"content": content or review.proposal.content})
-        item = self.store.save_memory(
+        equivalent_reviews = [
+            candidate
+            for candidate in self.store.list_pending_reviews()
+            if candidate.id == review.id or _equivalent_proposals(candidate.proposal, proposal)
+        ]
+        existing_item = next(
+            (
+                item
+                for item in self.store.list_memories(statuses=("active",))
+                if _equivalent_memory(item, proposal)
+            ),
+            None,
+        )
+        item = existing_item or self.store.save_memory(
             MemoryItem(
                 id=_stable_id(review.id, "approved-memory", 0),
                 memory_type=proposal.memory_type,
@@ -107,9 +140,19 @@ class MemoryService:
             ),
             event_action="created_reviewed",
         )
+        conflict_ids: list[str] = []
+        if supersede_conflicts:
+            stored_ids = {
+                memory_id
+                for candidate in equivalent_reviews
+                for memory_id in candidate.conflicting_memory_ids
+            }
+            conflict_ids = self._current_conflict_ids(sorted(stored_ids))
         for memory_id in conflict_ids:
-            self.store.set_memory_status(memory_id, "superseded", "superseded_by_review")
-        self.store.resolve_review(review_id, "approved")
+            if memory_id != item.id:
+                self.store.set_memory_status(memory_id, "superseded", "superseded_by_review")
+        for candidate in equivalent_reviews:
+            self.store.resolve_review(candidate.id, "approved")
         return item
 
     def reject_review(self, review_id: str) -> None:
@@ -194,7 +237,10 @@ class MemoryService:
 
             if resolved.intersection(seen):
                 continue
-            original = self.store.get_memory(stored_id)
+            try:
+                original = self.store.get_memory(stored_id)
+            except KeyError:
+                continue
             for candidate in active.values():
                 if (
                     candidate.memory_type == original.memory_type
@@ -207,3 +253,21 @@ class MemoryService:
 
 def _stable_id(scope: str, kind: str, index: int) -> str:
     return str(uuid5(NAMESPACE_URL, f"captureflow:{scope}:{kind}:{index}"))
+
+
+def _equivalent_proposals(left: MemoryProposal, right: MemoryProposal) -> bool:
+    return (
+        left.memory_type == right.memory_type
+        and _normalized_content(left.content) == _normalized_content(right.content)
+    )
+
+
+def _equivalent_memory(item: MemoryItem, proposal: MemoryProposal) -> bool:
+    return (
+        item.memory_type == proposal.memory_type
+        and _normalized_content(item.content) == _normalized_content(proposal.content)
+    )
+
+
+def _normalized_content(value: str) -> str:
+    return " ".join(value.split()).casefold()

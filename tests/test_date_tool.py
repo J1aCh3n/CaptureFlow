@@ -5,6 +5,15 @@ from captureflow.date_tool import resolve_relative_date
 
 
 class DateToolTests(unittest.TestCase):
+    def test_iso_date_with_leading_by_is_resolved_and_preserves_expression(self) -> None:
+        result = resolve_relative_date(
+            "by 2026-10-16", date(2026, 9, 8), "America/Vancouver"
+        )
+
+        self.assertEqual(result.status, "resolved")
+        self.assertEqual(result.resolved_date, date(2026, 10, 16))
+        self.assertEqual(result.expression, "by 2026-10-16")
+
     def test_next_weekday_uses_explicit_reference_date(self) -> None:
         result = resolve_relative_date("next Wednesday", date(2026, 9, 6), "America/Vancouver")
 
