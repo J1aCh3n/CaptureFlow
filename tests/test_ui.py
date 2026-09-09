@@ -56,6 +56,13 @@ class UiTests(unittest.TestCase):
         app.sidebar.radio[0].set_value(page).run()
         return app
 
+    @staticmethod
+    def open_project(app: AppTest, project_id: str) -> AppTest:
+        next(
+            field for field in app.selectbox if field.key == "sidebar_project_id"
+        ).set_value(project_id).run()
+        return app
+
     def test_current_chat_shell_renders_without_a_configured_model(self) -> None:
         app = AppTest.from_file("app.py").run()
 
@@ -73,6 +80,54 @@ class UiTests(unittest.TestCase):
             list(app.sidebar.radio[0].options),
             ["Chat", "Tracker", "Calendar", "Ideas & Notes"],
         )
+        self.assertEqual(
+            next(field for field in app.selectbox if field.key == "sidebar_project_id").label,
+            "Project",
+        )
+        self.assertEqual(
+            next(
+                field for field in app.sidebar.radio if field.key == "selected_conversation_id"
+            ).label,
+            "Conversations",
+        )
+
+    def test_project_can_be_renamed_and_deleted_from_tracker(self) -> None:
+        app = AppTest.from_file("app.py").run()
+        store = CaptureStore(os.environ["CAPTUREFLOW_DATABASE_PATH"])
+        store.initialize()
+        conversation = store.list_conversations()[0]
+        project = store.save_project(Project(id="ui-manage-project", name="Before rename"))
+        store.assign_conversation_project(conversation.id, project.id)
+
+        self.open_project(app.run(), project.id)
+        self.open_page(app, "Tracker")
+        next(
+            field
+            for field in app.text_input
+            if field.key == f"tracker-project-name-{project.id}"
+        ).set_value("After rename").run()
+        next(
+            button
+            for button in app.button
+            if button.key == f"tracker-save-project-{project.id}"
+        ).click().run()
+
+        self.assertEqual(store.get_project(project.id).name, "After rename")
+        next(
+            checkbox
+            for checkbox in app.checkbox
+            if checkbox.key == f"tracker-confirm-delete-project-{project.id}"
+        ).check().run()
+        next(
+            button
+            for button in app.button
+            if button.key == f"tracker-delete-project-{project.id}"
+        ).click().run()
+
+        with self.assertRaises(KeyError):
+            store.get_project(project.id)
+        self.assertEqual(store.get_conversation(conversation.id), conversation)
+        self.assertIsNone(store.get_conversation_project(conversation.id))
 
     def test_chat_workspace_shows_cross_conversation_project_snapshot(self) -> None:
         app = AppTest.from_file("app.py").run()
@@ -145,7 +200,7 @@ class UiTests(unittest.TestCase):
             )
         )
 
-        app.run()
+        self.open_project(app.run(), project.id)
 
         self.assertEqual(app.exception, [])
         self.assertTrue(any(item.value == "Project snapshot" for item in app.subheader))
@@ -248,6 +303,7 @@ class UiTests(unittest.TestCase):
             )
         )
 
+        self.open_project(app.run(), project.id)
         self.open_page(app, "Tracker")
 
         self.assertEqual(app.exception, [])
@@ -265,6 +321,7 @@ class UiTests(unittest.TestCase):
         project = store.save_project(Project(id="ui-project-context", name="CaptureFlow"))
         store.assign_conversation_project(conversation.id, project.id)
 
+        self.open_project(app.run(), project.id)
         app.chat_input[0].set_value("Continue the project discussion.").run()
 
         messages = store.list_messages(conversation.id)
@@ -313,7 +370,7 @@ class UiTests(unittest.TestCase):
             )
         )
 
-        app.run()
+        self.open_project(app.run(), project.id)
 
         self.assertTrue(
             any(button.key == f"approve-project-change-{operation.id}" for button in app.button)
@@ -360,7 +417,7 @@ class UiTests(unittest.TestCase):
         )
         store.save_project_answer_sources(answer.id, [record.id])
 
-        app.run()
+        self.open_project(app.run(), project.id)
 
         self.assertTrue(any("Project answer sources" in caption.value for caption in app.caption))
         self.assertTrue(any(record.content in markdown.value for markdown in app.markdown))
@@ -390,7 +447,9 @@ class UiTests(unittest.TestCase):
 
         self.assertEqual(len(matches), 2)
         self.assertNotEqual(first.id, newest.id)
-        conversation_selector = next(field for field in app.selectbox if field.key == "selected_conversation_id")
+        conversation_selector = next(
+            field for field in app.sidebar.radio if field.key == "selected_conversation_id"
+        )
         self.assertEqual(conversation_selector.value, newest.id)
         self.assertEqual(
             [item.conversation_id for item in store.list_saved_items()], [first.id]
@@ -405,7 +464,9 @@ class UiTests(unittest.TestCase):
 
         app.text_input[0].input("Delete this conversation").run()
         next(button for button in app.button if button.label == "Create conversation").click().run()
-        conversation_selector = next(field for field in app.selectbox if field.key == "selected_conversation_id")
+        conversation_selector = next(
+            field for field in app.sidebar.radio if field.key == "selected_conversation_id"
+        )
         deleted_id = conversation_selector.value
         app.chat_input[0].set_value("/note This note should be deleted with its conversation.").run()
 
@@ -418,7 +479,9 @@ class UiTests(unittest.TestCase):
 
         with self.assertRaises(KeyError):
             store.get_conversation(deleted_id)
-        conversation_selector = next(field for field in app.selectbox if field.key == "selected_conversation_id")
+        conversation_selector = next(
+            field for field in app.sidebar.radio if field.key == "selected_conversation_id"
+        )
         self.assertEqual(conversation_selector.value, retained_id)
         self.assertEqual(store.get_conversation(retained_id).id, retained_id)
 
@@ -474,9 +537,9 @@ class UiTests(unittest.TestCase):
         )
 
         app.run()
-        next(field for field in app.selectbox if field.key == "selected_conversation_id").set_value(
-            later_conversation.id
-        ).run()
+        next(
+            field for field in app.sidebar.radio if field.key == "selected_conversation_id"
+        ).set_value(later_conversation.id).run()
         app.chat_input[0].set_value("我明天的会议要做什么？").run()
 
         answer = store.get_assistant_reply(store.list_messages(later_conversation.id)[0].id)
@@ -495,7 +558,7 @@ class UiTests(unittest.TestCase):
         project = store.save_project(Project(id="ui-new-conversation-project", name="CaptureFlow"))
 
         app.run()
-        next(field for field in app.selectbox if field.key == "new-conversation-project").set_value(
+        next(field for field in app.selectbox if field.key == "sidebar_project_id").set_value(
             project.id
         ).run()
         next(field for field in app.text_input if field.key == "new_conversation_title").set_value(

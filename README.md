@@ -7,7 +7,10 @@ local SQLite. Calendar events and explicit ideas/notes remain available as
 deterministic local capture tools. The default workspace keeps chat beside a
 read-only project snapshot that aggregates records from the project's assigned
 conversations; Calendar, Tracker, and Ideas & Notes remain available as full
-management views.
+management views. The sidebar scopes its conversation list to the selected
+project. Project deletion removes project tracker state and audit links, but
+retains its conversations, messages, calendar events, ideas, and notes as
+unassigned local records.
 
 It is deliberately not a general chatbot. The configured model can propose a
 small, typed tracker change, but Python validates the source quote, project,

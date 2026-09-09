@@ -175,6 +175,57 @@ class CaptureStore:
             ).fetchall()
         return [Project(**dict(row)) for row in rows]
 
+    def update_project(
+        self, project_id: str, *, name: str, description: str | None
+    ) -> Project:
+        existing = self.get_project(project_id)
+        updated = Project(
+            **{
+                **existing.model_dump(),
+                "name": name,
+                "description": description,
+                "updated_at": utc_now(),
+            }
+        )
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE projects SET name = ?, description = ?, updated_at = ? WHERE id = ?",
+                (
+                    updated.name,
+                    updated.description,
+                    updated.updated_at.isoformat(),
+                    project_id,
+                ),
+            )
+        return self.get_project(project_id)
+
+    def delete_project(self, project_id: str) -> bool:
+        """Delete project-only state while retaining its conversations and local captures."""
+
+        self.get_project(project_id)
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM project_change_operations WHERE project_id = ?",
+                (project_id,),
+            )
+            connection.execute(
+                "DELETE FROM project_conversation_state WHERE project_id = ?",
+                (project_id,),
+            )
+            connection.execute(
+                "DELETE FROM conversation_projects WHERE project_id = ?",
+                (project_id,),
+            )
+            connection.execute(
+                "DELETE FROM project_records WHERE project_id = ?",
+                (project_id,),
+            )
+            cursor = connection.execute(
+                "DELETE FROM projects WHERE id = ?",
+                (project_id,),
+            )
+        return cursor.rowcount == 1
+
     def set_project_status(self, project_id: str, status: str) -> Project:
         if status not in {"active", "archived"}:
             raise ValueError("invalid project status")

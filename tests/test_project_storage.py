@@ -173,3 +173,40 @@ class ProjectStorageTests(unittest.TestCase):
             self.store.get_project_record(record.id)
         self.assertEqual(self.store.get_project(self.project.id), self.project)
         self.assertIsNone(self.store.get_conversation_project(self.conversation.id))
+
+    def test_project_can_be_renamed_and_deleted_without_deleting_its_conversation(self) -> None:
+        renamed = self.store.update_project(
+            self.project.id,
+            name="CaptureFlow workspace",
+            description="A local project assistant.",
+        )
+        record = self.store.save_project_record(
+            ProjectRecord(
+                id="record-before-project-delete",
+                project_id=self.project.id,
+                conversation_id=self.conversation.id,
+                kind="task",
+                content="Keep the conversation after deleting the project.",
+                state="active",
+                source_message_id=self.message.id,
+                source_quote="multi-turn context remains an open question",
+            )
+        )
+        self.store.begin_project_conversation(self.conversation.id)
+
+        self.assertEqual(renamed.name, "CaptureFlow workspace")
+        self.assertEqual(renamed.description, "A local project assistant.")
+        self.assertTrue(self.store.delete_project(self.project.id))
+
+        with self.assertRaises(KeyError):
+            self.store.get_project(self.project.id)
+        with self.assertRaises(KeyError):
+            self.store.get_project_record(record.id)
+        self.assertEqual(self.store.get_conversation(self.conversation.id), self.conversation)
+        self.assertEqual(self.store.get_message(self.message.id), self.message)
+        self.assertIsNone(self.store.get_conversation_project(self.conversation.id))
+        replacement = self.store.save_project(Project(id="replacement-project", name="Replacement"))
+        self.assertEqual(
+            self.store.assign_conversation_project(self.conversation.id, replacement.id),
+            replacement,
+        )

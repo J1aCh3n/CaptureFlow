@@ -65,6 +65,11 @@ def _inject_app_styles() -> None:
         [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p {
             color: var(--cf-text-muted);
         }
+        [data-testid="stSidebar"] [role="radiogroup"][aria-label="Conversations"] {
+            border-left: 1px solid var(--cf-border);
+            margin-left: 0.55rem;
+            padding-left: 0.8rem;
+        }
         div[data-testid="stVerticalBlockBorderWrapper"] {
             background: var(--cf-surface);
             border-color: var(--cf-border);
@@ -81,6 +86,27 @@ def _inject_app_styles() -> None:
             border-color: #cbd5e1;
             border-radius: 12px;
             background: var(--cf-surface);
+            box-shadow: 0 8px 26px rgba(15, 23, 42, 0.12);
+        }
+        [data-baseweb="input"] > div,
+        [data-baseweb="textarea"] > div,
+        [data-baseweb="select"] > div {
+            background: #ffffff;
+            border: 1px solid #cbd5e1;
+        }
+        [data-testid="stTextInputRootElement"],
+        [data-testid="stTextAreaRootElement"] {
+            background: #ffffff;
+            border: 1px solid #cbd5e1 !important;
+            border-radius: 8px;
+        }
+        [data-baseweb="input"] > div:focus-within,
+        [data-baseweb="textarea"] > div:focus-within,
+        [data-baseweb="select"] > div:focus-within,
+        [data-testid="stTextInputRootElement"]:focus-within,
+        [data-testid="stTextAreaRootElement"]:focus-within {
+            border-color: var(--cf-primary);
+            box-shadow: 0 0 0 1px var(--cf-primary);
         }
         div[data-testid="stMetric"] {
             background: #f8fafc;
@@ -261,42 +287,91 @@ def main() -> None:
 
 
 def select_conversation(store: CaptureStore, *, show_project_assignment: bool = True) -> str:
+    if "next_sidebar_project_id" in st.session_state:
+        st.session_state["sidebar_project_id"] = st.session_state.pop(
+            "next_sidebar_project_id"
+        )
     conversations = store.list_conversations()
     if not conversations:
         conversation = store.save_conversation(Conversation(title="First capture"))
         conversations = [conversation]
 
+    projects = store.list_projects(statuses=("active", "archived"))
+    project_by_id = {project.id: project for project in projects}
+    conversation_project_ids = {
+        conversation.id: (
+            project.id
+            if (project := store.get_conversation_project(conversation.id)) is not None
+            else None
+        )
+        for conversation in conversations
+    }
+    conversation_by_id = {conversation.id: conversation for conversation in conversations}
+    current_conversation_id = st.session_state.get("selected_conversation_id")
+    if current_conversation_id not in conversation_by_id:
+        current_conversation_id = conversations[0].id
+    project_options = [None, *project_by_id]
+    if (
+        "sidebar_project_id" not in st.session_state
+        or st.session_state["sidebar_project_id"] not in project_options
+    ):
+        st.session_state["sidebar_project_id"] = conversation_project_ids[current_conversation_id]
+    selected_project_id = st.selectbox(
+        "Project",
+        options=project_options,
+        format_func=lambda project_id: (
+            "Unassigned"
+            if project_id is None
+            else (
+                f"📁 {project_by_id[project_id].name} · archived"
+                if project_by_id[project_id].status == "archived"
+                else f"📁 {project_by_id[project_id].name}"
+            )
+        ),
+        key="sidebar_project_id",
+    )
+
     with st.expander("New conversation"):
         title = st.text_input("Title", key="new_conversation_title")
-        projects = store.list_projects(statuses=("active",))
-        new_project_id = st.selectbox(
-            "Project (optional)",
-            options=[None, *[project.id for project in projects]],
-            format_func=lambda project_id: (
-                "Unassigned" if project_id is None else next(project.name for project in projects if project.id == project_id)
-            ),
-            key="new-conversation-project",
+        selected_project = (
+            project_by_id.get(selected_project_id) if selected_project_id is not None else None
         )
-        if st.button("Create conversation"):
+        can_create = selected_project is None or selected_project.status == "active"
+        st.caption(
+            "The new conversation will be unassigned."
+            if selected_project is None
+            else f"The new conversation will belong to {selected_project.name}."
+        )
+        if not can_create:
+            st.caption("Restore this project before adding conversations.")
+        if st.button("Create conversation", disabled=not can_create):
             try:
                 created = store.save_conversation(Conversation(title=title))
             except ValidationError as error:
                 st.error(error.errors()[0]["msg"])
             else:
-                if new_project_id is not None:
-                    store.assign_conversation_project(created.id, new_project_id)
+                if selected_project_id is not None:
+                    store.assign_conversation_project(created.id, selected_project_id)
                 st.session_state["selected_conversation_id"] = created.id
                 st.success(f"Created {created.title}.")
                 st.rerun()
 
-    conversation_by_id = {conversation.id: conversation for conversation in conversations}
-    title_counts = {
-        conversation.title: sum(item.title == conversation.title for item in conversations)
+    visible_conversations = [
+        conversation
         for conversation in conversations
+        if conversation_project_ids[conversation.id] == selected_project_id
+    ]
+    if not visible_conversations:
+        st.info("No conversations in this project yet.")
+        st.stop()
+
+    title_counts = {
+        conversation.title: sum(item.title == conversation.title for item in visible_conversations)
+        for conversation in visible_conversations
     }
-    conversation_ids = list(conversation_by_id)
-    if st.session_state.get("selected_conversation_id") not in conversation_by_id:
-        st.session_state["selected_conversation_id"] = conversation_ids[0]
+    visible_ids = [conversation.id for conversation in visible_conversations]
+    if st.session_state.get("selected_conversation_id") not in visible_ids:
+        st.session_state["selected_conversation_id"] = visible_ids[0]
 
     def conversation_label(conversation_id: str) -> str:
         conversation = conversation_by_id[conversation_id]
@@ -304,9 +379,9 @@ def select_conversation(store: CaptureStore, *, show_project_assignment: bool = 
             return conversation.title
         return f"{conversation.title} · {conversation.id[:8]}"
 
-    selected_id = st.selectbox(
-        "Conversation",
-        options=conversation_ids,
+    selected_id = st.radio(
+        "Conversations",
+        options=visible_ids,
         format_func=conversation_label,
         key="selected_conversation_id",
     )
@@ -336,14 +411,19 @@ def select_conversation(store: CaptureStore, *, show_project_assignment: bool = 
                 if selected_project_id is not None and selected_project_id != (current_project.id if current_project else None):
                     if st.button("Assign project", key=f"assign-conversation-project-{selected_id}"):
                         store.assign_conversation_project(selected_id, selected_project_id)
+                        st.session_state["next_sidebar_project_id"] = selected_project_id
                         st.rerun()
             else:
                 st.caption("Project assignment is locked after the first project turn or tracker record.")
 
+        current_project = store.get_conversation_project(selected_id)
+        if current_project is not None:
+            _render_project_settings(store, current_project, key_prefix="sidebar")
+
     with st.expander("Conversation settings"):
         st.warning(
-            "Deleting this conversation also deletes its captures, runs, tasks, reviews, "
-            "checkpoints, and memories derived from those captures."
+            "Deleting this conversation also deletes its messages, local events, saved items, "
+            "tracker records, operations, and answer sources."
         )
         confirmed = st.checkbox(
             "I understand this deletes the conversation and its derived data.",
@@ -357,6 +437,46 @@ def select_conversation(store: CaptureStore, *, show_project_assignment: bool = 
             store.delete_conversation(selected_id)
             st.rerun()
     return selected_id
+
+
+def _render_project_settings(
+    store: CaptureStore, project: Project, *, key_prefix: str
+) -> None:
+    with st.expander("Project settings"):
+        name = st.text_input(
+            "Project name",
+            value=project.name,
+            key=f"{key_prefix}-project-name-{project.id}",
+        )
+        description = st.text_area(
+            "Project description",
+            value=project.description or "",
+            key=f"{key_prefix}-project-description-{project.id}",
+        )
+        if st.button("Save project", key=f"{key_prefix}-save-project-{project.id}"):
+            try:
+                store.update_project(project.id, name=name, description=description or None)
+            except ValidationError as error:
+                st.error(_validation_message(error))
+            else:
+                st.rerun()
+
+        st.warning(
+            "Deleting this project removes its tracker records and project audit history. "
+            "Conversations, messages, calendar events, ideas, and notes are retained as unassigned."
+        )
+        confirmed = st.checkbox(
+            "I understand what project deletion removes.",
+            key=f"{key_prefix}-confirm-delete-project-{project.id}",
+        )
+        if st.button(
+            "Delete project",
+            key=f"{key_prefix}-delete-project-{project.id}",
+            disabled=not confirmed,
+        ):
+            store.delete_project(project.id)
+            st.session_state["next_sidebar_project_id"] = None
+            st.rerun()
 
 
 def render_chat_workspace(
@@ -384,6 +504,7 @@ def render_chat_workspace(
         render_chat_page(store, conversation_id, diagnostics_enabled)
     with snapshot_column:
         render_project_snapshot(store, conversation_id)
+    render_chat_input(store, conversation_id, diagnostics_enabled)
 
 
 def render_project_snapshot(store: CaptureStore, conversation_id: str) -> None:
@@ -532,6 +653,13 @@ def render_chat_page(
             store.resolve_pending_clarification(pending.id, "cancelled")
             st.rerun()
 
+
+def render_chat_input(
+    store: CaptureStore, conversation_id: str, diagnostics_enabled: bool = False
+) -> None:
+    local_service = DeterministicChatService(
+        store, os.getenv("CAPTUREFLOW_TIMEZONE", "America/Vancouver")
+    )
     if prompt := st.chat_input("Message CaptureFlow"):
         started = perf_counter()
         if prompt.strip().startswith("/"):
@@ -794,6 +922,7 @@ def render_tracker_page(store: CaptureStore, conversation_id: str) -> None:
             except ValueError as error:
                 st.error(str(error))
             else:
+                st.session_state["next_sidebar_project_id"] = current_project.id
                 st.success(f"Conversation assigned to {current_project.name}.")
                 st.rerun()
 
@@ -805,6 +934,7 @@ def render_tracker_page(store: CaptureStore, conversation_id: str) -> None:
     if current_project.description:
         st.caption(current_project.description)
     st.caption(f"Project status: {current_project.status}")
+    _render_project_settings(store, current_project, key_prefix="tracker")
     if current_project.status == "active":
         if st.button("Archive project", key=f"archive-project-{current_project.id}"):
             store.set_project_status(current_project.id, "archived")
