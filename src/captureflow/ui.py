@@ -48,9 +48,9 @@ def get_store(path: str) -> CaptureStore:
 
 
 def main() -> None:
-    st.set_page_config(page_title="CaptureFlow", page_icon="📥")
+    st.set_page_config(page_title="CaptureFlow", page_icon="🗂️")
     st.title("CaptureFlow")
-    st.caption("V2 Phase 9.1: bounded project conversation and grounded local recall.")
+    st.caption("A local project continuity assistant for conversations, tasks, calendar, and notes.")
 
     store = get_store(str(database_path()))
     diagnostics_enabled = st.sidebar.toggle(
@@ -59,7 +59,7 @@ def main() -> None:
         help="Show timing for turns submitted while this switch is enabled.",
     )
     page = st.sidebar.radio(
-        "Page", ["Chat", "Tracker", "Calendar", "Ideas & Notes", "Memory", "Legacy capture"]
+        "Page", ["Chat", "Tracker", "Calendar", "Ideas & Notes"]
     )
     if page == "Calendar":
         render_calendar_page(store)
@@ -67,17 +67,12 @@ def main() -> None:
     if page == "Ideas & Notes":
         render_saved_items_page(store)
         return
-    if page == "Memory":
-        render_memory_page(store)
-        return
     selected_id = select_conversation(store, show_project_assignment=page != "Tracker")
     if page == "Tracker":
         render_tracker_page(store, selected_id)
         return
     if page == "Chat":
         render_chat_page(store, selected_id, diagnostics_enabled)
-        return
-    render_legacy_capture_page(store, selected_id)
 
 
 def select_conversation(store: CaptureStore, *, show_project_assignment: bool = True) -> str:
@@ -435,12 +430,11 @@ def _render_local_context_answer_sources(store: CaptureStore, assistant_message_
 
 
 def render_tracker_page(store: CaptureStore, conversation_id: str) -> None:
-    """Manage Phase 4 project state without a model-driven tracker write."""
+    """Manage persisted project state and source-grounded records."""
 
     st.subheader("Project Tracker")
     st.caption(
-        "Phase 4 is deterministic: records are created from an explicit chat source and "
-        "every lifecycle change is retained in local SQLite history."
+        "Records are grounded in chat messages, and every lifecycle change is retained locally."
     )
     current_project = store.get_conversation_project(conversation_id)
     projects = store.list_projects(statuses=("active", "archived"))
@@ -504,7 +498,7 @@ def render_tracker_page(store: CaptureStore, conversation_id: str) -> None:
     if current_project.status == "active":
         with st.expander("Add source-grounded record"):
             if not user_messages:
-                st.info("Send a chat message first; Phase 4 records require an explicit user source.")
+                st.info("Send a chat message first; tracker records require an explicit user source.")
             else:
                 source_id = st.selectbox(
                     "Source user message",
@@ -549,7 +543,7 @@ def render_tracker_page(store: CaptureStore, conversation_id: str) -> None:
     )
     active_records = [record for record in records if record.state != "deleted"]
     if not active_records:
-        st.info("No active project records yet.")
+        st.info("No project records yet.")
     for record in active_records:
         _render_project_record(store, record)
 

@@ -20,9 +20,9 @@ SQLite traces. Its evidence and claim boundary are in
 [docs/phase-2-evidence.md](docs/phase-2-evidence.md). A locally retained Phase 3
 acceptance run recorded 12/12; those local acceptance records are not committed
 to the repository. Memory reviews support approval, edit, rejection, and
-controlled conflict supersession. The original capture-oriented shell remains
-available as **Legacy capture** for regression checks; it is not the default V2
-workflow.
+controlled conflict supersession. The original capture workflow and Memory
+tooling remain in the codebase for regression checks, but are not exposed in
+the default interface.
 
 V2 Phase 1 adds versioned, additive SQLite migrations plus typed persistence
 for messages, local calendar events, explicit ideas/notes, tool operations, and
@@ -168,9 +168,8 @@ python -m unittest discover -s tests -v
 
 ## Model configuration
 
-The V2 router and the optional Legacy capture **Analyze** action both use a
-configured OpenAI-compatible chat-completions endpoint. Set these environment
-variables in the shell that starts Streamlit:
+The V2 router uses a configured OpenAI-compatible chat-completions endpoint.
+Set these environment variables in the shell that starts Streamlit:
 
 ```powershell
 $env:CAPTUREFLOW_API_KEY = "..."
@@ -185,6 +184,5 @@ streamlit run app.py
 ```
 
 The configured endpoint must support chat-completions JSON-object responses.
-Without the required key and model variables, the V2 Chat and Legacy Analyze
-paths save and display a typed configuration failure; neither fabricates a
-result.
+Without the required key and model variables, Chat saves and displays a typed
+configuration failure; it does not fabricate a result.
