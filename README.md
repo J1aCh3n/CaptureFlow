@@ -45,7 +45,7 @@ questions may use superseded records and event history. Answer source cards are
 persisted locally. The frozen scripted retrieval fixture reports Recall@6 1.0;
 it is not evidence of general semantic retrieval or live-model answer quality.
 
-The local deterministic/scripted suite passes 144 tests. This verifies the
+The local deterministic/scripted suite passes 151 tests. This verifies the
 database, retrieval, and model-write boundaries. A frozen live Phase 8 run
 against `gpt-5.6-terra` passed its 12 runner assertions on 2026-09-08; its
 reproducibility metadata and limitations are recorded in
@@ -68,8 +68,9 @@ Phases 1–9 are implemented; Phases 1–7 remain regression requirements, and
 Phase 8 has both frozen scripted coverage and one recorded live acceptance
 demonstration. Phase 9 adds deterministic, source-backed recall of
 CaptureFlow's own active local Calendar and Ideas & Notes records across
-conversations. It runs before model routing, requires no API configuration,
-and creates no new local record.
+conversations. Phase 9.1 optionally synthesizes a bounded answer from those
+selected records when a model is configured, while preserving the Phase 9
+deterministic reply when it is not. Neither path creates a local target record.
 
 ## V2 local chat behavior
 
@@ -81,13 +82,16 @@ sees only the bounded recent message window and a finite project-scoped
 candidate-record list. Python validates the proposal and performs SQLite
 writes. The model never writes the database directly.
 
-Before model routing, a narrow local-context query such as `我明天的会议要做什么？`
-or `When is the calendar meeting?` searches only active Calendar and Note/Idea
-records in the local workspace. The response displays its sources. It reports
-stored facts and explicitly says when no personal preparation task was saved;
-it does not infer a task. This lookup works in an unassigned conversation.
-Calendar/Note recall is not external-calendar access, general chat memory, or
-semantic search.
+Before ordinary model routing, a narrow local-context query such as
+`我明天的会议要做什么？` or `When is the calendar meeting?` searches only active
+Calendar and Note/Idea records in the local workspace. With model configuration,
+one bounded Chat Completions call may summarize only those selected records;
+Python validates cited IDs and renders exact event date/time from SQLite.
+Any preparation suggestion is visibly labeled as an inference, never a stored
+task. If configuration, the model request, or output validation fails, the
+deterministic Phase 9 source listing remains available. This lookup works in an
+unassigned conversation. Calendar/Note recall is not external-calendar access,
+general chat memory, or semantic search.
 
 ## Phase 8 acceptance and demo
 

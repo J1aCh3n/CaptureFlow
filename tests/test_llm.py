@@ -128,6 +128,37 @@ class OpenAICompatibleModelTests(unittest.TestCase):
         self.assertIn("do not treat a superseded record as current", system_prompt)
         self.assertEqual(payload["retrieved_records"][0]["id"], "record-1")
 
+    def test_local_context_responder_receives_only_selected_local_evidence(self) -> None:
+        completions = RecordingCompletions(
+            '{"outcome":"answer","selected_event_ids":["event-1"],'
+            '"selected_item_ids":["note-1"],"summary_points":[{"text":"Use voting.",'
+            '"source_ids":["note-1"]}],"preparation_suggestions":[],'
+            '"missing_information":["preparation"],"clarification_question":null}'
+        )
+        model = OpenAICompatibleModel.__new__(OpenAICompatibleModel)
+        model.settings = ModelSettings(api_key="test-key", model="gpt-5.6-terra")
+        model.client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+
+        response = model.answer_local_context(
+            "What time is my meeting tomorrow?",
+            {
+                "reference_date": "2026-09-08",
+                "timezone": "America/Vancouver",
+                "target_date": "2026-09-09",
+            },
+            [{"source_id": "event-1", "title": "Workflow meeting", "start_at": "2026-09-09"}],
+            [{"source_id": "note-1", "kind": "note", "content": "Use voting."}],
+        )
+
+        system_prompt = completions.kwargs["messages"][0]["content"]
+        payload = json.loads(completions.kwargs["messages"][1]["content"])["input"]
+        self.assertEqual(response.selected_event_ids, ["event-1"])
+        self.assertIn("cannot access an external calendar", system_prompt)
+        self.assertIn("must not create or change", system_prompt)
+        self.assertEqual(payload["runtime_context"]["target_date"], "2026-09-09")
+        self.assertEqual(payload["events"][0]["source_id"], "event-1")
+        self.assertEqual(payload["saved_items"][0]["source_id"], "note-1")
+
     def test_coordinator_prompt_distinguishes_memory_from_tasks(self) -> None:
         completions = RecordingCompletions(
             '{"steps":[{"id":"memory","action":"inspect_memory",'

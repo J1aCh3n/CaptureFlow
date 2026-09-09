@@ -655,6 +655,109 @@ class LocalContextSource(BaseModel):
     source_quote: str
 
 
+class SupportedPoint(BaseModel):
+    """One answer statement that must identify its local supporting records."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(min_length=1, max_length=600)
+    source_ids: list[str] = Field(min_length=1, max_length=6)
+
+    @field_validator("text")
+    @classmethod
+    def text_is_not_whitespace(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("supported point text must not be blank")
+        return value
+
+    @field_validator("source_ids")
+    @classmethod
+    def source_ids_are_unique(cls, value: list[str]) -> list[str]:
+        if len(set(value)) != len(value):
+            raise ValueError("supported point source IDs must be unique")
+        return value
+
+
+class PreparationSuggestion(BaseModel):
+    """A clearly labeled inference, never a persisted task or requirement."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(min_length=1, max_length=400)
+    based_on_source_ids: list[str] = Field(min_length=1, max_length=6)
+
+    @field_validator("text")
+    @classmethod
+    def text_is_not_whitespace(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("preparation suggestion text must not be blank")
+        return value
+
+    @field_validator("based_on_source_ids")
+    @classmethod
+    def source_ids_are_unique(cls, value: list[str]) -> list[str]:
+        if len(set(value)) != len(value):
+            raise ValueError("preparation suggestion source IDs must be unique")
+        return value
+
+
+class LocalContextAnswerDecision(BaseModel):
+    """A bounded model synthesis over selected Phase 9 local records."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    outcome: Literal["answer", "insufficient_context", "clarify"]
+    selected_event_ids: list[str] = Field(default_factory=list, max_length=3)
+    selected_item_ids: list[str] = Field(default_factory=list, max_length=3)
+    summary_points: list[SupportedPoint] = Field(default_factory=list, max_length=3)
+    preparation_suggestions: list[PreparationSuggestion] = Field(default_factory=list, max_length=3)
+    missing_information: list[Literal["meeting", "time", "agenda", "preparation"]] = Field(
+        default_factory=list, max_length=4
+    )
+    clarification_question: str | None = Field(default=None, max_length=300)
+
+    @field_validator("selected_event_ids", "selected_item_ids", "missing_information")
+    @classmethod
+    def list_values_are_unique(cls, value: list[str]) -> list[str]:
+        if len(set(value)) != len(value):
+            raise ValueError("local-context decision list values must be unique")
+        return value
+
+    @field_validator("clarification_question")
+    @classmethod
+    def clarification_is_not_whitespace(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        return value or None
+
+    @model_validator(mode="after")
+    def fields_match_outcome(self) -> "LocalContextAnswerDecision":
+        selected_ids = [*self.selected_event_ids, *self.selected_item_ids]
+        if len(set(selected_ids)) != len(selected_ids):
+            raise ValueError("a local source cannot be selected as both an event and item")
+        if self.outcome == "answer":
+            if not selected_ids:
+                raise ValueError("an answer needs at least one selected local source")
+            if not self.summary_points:
+                raise ValueError("an answer needs at least one supported point")
+            if self.clarification_question is not None:
+                raise ValueError("an answer cannot include a clarification question")
+        elif self.outcome == "clarify":
+            if not self.clarification_question:
+                raise ValueError("a clarification needs a question")
+            if selected_ids or self.summary_points or self.preparation_suggestions:
+                raise ValueError("a clarification cannot select sources or include answer content")
+        else:
+            if self.clarification_question is not None:
+                raise ValueError("only a clarification may include a clarification question")
+            if selected_ids or self.summary_points or self.preparation_suggestions:
+                raise ValueError("an insufficient-context result cannot cite answer content")
+        return self
+
+
 class ProjectChangeOperation(BaseModel):
     """Restart-safe audit record for one validated Phase 6 tracker proposal."""
 

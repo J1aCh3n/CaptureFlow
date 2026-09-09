@@ -91,6 +91,34 @@ class BoundedChatServiceTests(unittest.TestCase):
         self.assertFalse(saved.all_day)
         self.assertEqual(saved.start_at, datetime(2026, 9, 9, 15, 30, tzinfo=saved.start_at.tzinfo))
 
+    def test_supported_explicit_chinese_times_create_timed_events(self) -> None:
+        cases = [
+            ("明天下午两点开会。", "下午两点", 14, 0),
+            ("明天上午九点半开会。", "上午九点半", 9, 30),
+            ("明天晚上八点开会。", "晚上八点", 20, 0),
+        ]
+        for index, (text, expression, hour, minute) in enumerate(cases):
+            router = ScriptedTurnRouter(
+                [TurnDecision(route="execute", actions=[event("Meeting", text, "明天", expression)])]
+            )
+
+            turn = self.service(router).submit(self.conversation.id, text, f"chinese-time-{index}")
+            saved = self.store.get_calendar_event(turn.operations[0].result["event_id"])
+
+            self.assertFalse(saved.all_day)
+            self.assertEqual((saved.start_at.hour, saved.start_at.minute), (hour, minute))
+
+    def test_ambiguous_chinese_time_does_not_create_an_event(self) -> None:
+        text = "明天两点开会。"
+        router = ScriptedTurnRouter(
+            [TurnDecision(route="execute", actions=[event("Meeting", text, "明天", "两点")])]
+        )
+
+        turn = self.service(router).submit(self.conversation.id, text, "ambiguous-chinese-time")
+
+        self.assertEqual(self.store.list_calendar_events(), [])
+        self.assertIn("Which exact time", turn.assistant_message.content)
+
     def test_idea_note_and_two_independent_actions_commit(self) -> None:
         text = "Idea: use a migration smoke test. Note: keep SQLite additive."
         router = ScriptedTurnRouter(

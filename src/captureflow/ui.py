@@ -45,7 +45,7 @@ def get_store(path: str) -> CaptureStore:
 def main() -> None:
     st.set_page_config(page_title="CaptureFlow", page_icon="📥")
     st.title("CaptureFlow")
-    st.caption("V2 Phase 9: bounded project conversation and source-backed local recall.")
+    st.caption("V2 Phase 9.1: bounded project conversation and grounded local recall.")
 
     store = get_store(str(database_path()))
     diagnostics_enabled = st.sidebar.toggle(
@@ -230,19 +230,30 @@ def render_chat_page(
             try:
                 timezone = os.getenv("CAPTUREFLOW_TIMEZONE", "America/Vancouver")
                 if is_local_context_query(prompt):
+                    try:
+                        local_context_model = OpenAICompatibleModel(ModelSettings.from_environment())
+                    except ModelError:
+                        local_context_model = None
                     turn = LocalContextService(
-                        store, configured_reference_date(timezone), timezone
+                        store,
+                        configured_reference_date(timezone),
+                        timezone,
+                        model=local_context_model,
                     ).submit(conversation_id, prompt)
                     if diagnostics_enabled:
                         _remember_turn_diagnostics(
                             turn.user_message.id,
-                            mode="local_context",
+                            mode=(
+                                "local_context_model"
+                                if turn.model_calls and not turn.fallback_used
+                                else "local_context_fallback"
+                            ),
                             outcome=turn.outcome,
-                            model_calls=0,
-                            model_seconds=0,
-                            local_seconds=perf_counter() - started,
+                            model_calls=turn.model_calls,
+                            model_seconds=turn.model_seconds,
+                            local_seconds=max(0, perf_counter() - started - turn.model_seconds),
                             total_seconds=perf_counter() - started,
-                            repair_used=False,
+                            repair_used=turn.model_calls > 1,
                         )
                 else:
                     settings = ModelSettings.from_environment()

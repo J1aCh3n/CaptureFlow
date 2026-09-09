@@ -9,6 +9,7 @@ from pydantic import BaseModel, ValidationError
 from .models import (
     CapturePlan,
     GroundingReport,
+    LocalContextAnswerDecision,
     MemoryAgentDraft,
     MemoryItem,
     OrganizerDraft,
@@ -109,6 +110,26 @@ class ProjectRetrievalModel(Protocol):
     ) -> ProjectAnswerDecision: ...
 
 
+class LocalContextModel(Protocol):
+    def answer_local_context(
+        self,
+        user_message: str,
+        runtime_context: dict[str, str | None],
+        events: list[dict],
+        saved_items: list[dict],
+    ) -> LocalContextAnswerDecision: ...
+
+    def repair_local_context_answer(
+        self,
+        user_message: str,
+        runtime_context: dict[str, str | None],
+        events: list[dict],
+        saved_items: list[dict],
+        invalid_decision: LocalContextAnswerDecision | str,
+        validation_error: str,
+    ) -> LocalContextAnswerDecision: ...
+
+
 @dataclass(frozen=True)
 class ModelSettings:
     api_key: str
@@ -200,8 +221,9 @@ class OpenAICompatibleModel:
                 "and keep the reply short. An execute action needs content and an exact, "
                 "continuous source_quote copied from the user message except normalized "
                 "whitespace. create_event also needs an explicit date_expression copied "
-                "from the message; optional time_expression must be an explicit HH:MM or "
-                "H:MM AM/PM phrase. An event lacking a date must choose clarify with no "
+                "from the message; optional time_expression must be an explicit HH:MM, "
+                "H:MM AM/PM, or supported Chinese phrase such as 下午两点, 上午九点半, "
+                "or 晚上八点. An event lacking a date must choose clarify with no "
                 "actions, one concise clarification_question, and pending_action describing "
                 "the event with no date_expression. save_idea and save_note never include "
                 "date_expression or time_expression. Do not make more than three independent "
@@ -347,6 +369,70 @@ class OpenAICompatibleModel:
                 "retrieved_records": retrieved_records,
                 "answer_kind": answer_kind,
                 "context_truncated": context_truncated,
+            },
+        )
+
+    def answer_local_context(
+        self,
+        user_message: str,
+        runtime_context: dict[str, str | None],
+        events: list[dict],
+        saved_items: list[dict],
+    ) -> LocalContextAnswerDecision:
+        return self._complete(
+            LocalContextAnswerDecision,
+            system=(
+                "You are CaptureFlow's Phase 9.1 local-context responder. Return JSON only. "
+                "Answer only from the supplied local Calendar events and saved Notes/Ideas. "
+                "This is not a general chatbot: you cannot access an external calendar, hidden "
+                "conversation history, tools, or other records, and you must not create or change "
+                "any local record. Select IDs only from the supplied records. Every summary point "
+                "and every preparation suggestion must cite one or more selected source IDs. "
+                "Preparation suggestions are optional inferences, not stored tasks or confirmed "
+                "requirements; do not invent an explicit preparation task. Do not state a date or "
+                "time in a summary point: CaptureFlow renders exact Calendar time locally after "
+                "validation. If local evidence does not establish the requested fact, use "
+                "insufficient_context and identify the missing information. If multiple Calendar "
+                "events plausibly match a singular question, use clarify with one concise question "
+                "instead of arbitrarily selecting one."
+            ),
+            payload={
+                "user_message": user_message,
+                "runtime_context": runtime_context,
+                "events": events,
+                "saved_items": saved_items,
+            },
+        )
+
+    def repair_local_context_answer(
+        self,
+        user_message: str,
+        runtime_context: dict[str, str | None],
+        events: list[dict],
+        saved_items: list[dict],
+        invalid_decision: LocalContextAnswerDecision | str,
+        validation_error: str,
+    ) -> LocalContextAnswerDecision:
+        invalid_payload = (
+            invalid_decision.model_dump(mode="json")
+            if isinstance(invalid_decision, LocalContextAnswerDecision)
+            else invalid_decision
+        )
+        return self._complete(
+            LocalContextAnswerDecision,
+            system=(
+                "You are CaptureFlow's Phase 9.1 local-context repair pass. Return corrected "
+                "JSON only. Use only supplied source IDs. Every answer point and suggestion must "
+                "cite selected source IDs, never invent a time or an unrecorded preparation task, "
+                "and use clarify rather than arbitrarily selecting among multiple plausible events."
+            ),
+            payload={
+                "user_message": user_message,
+                "runtime_context": runtime_context,
+                "events": events,
+                "saved_items": saved_items,
+                "invalid_decision": invalid_payload,
+                "validation_error": validation_error,
             },
         )
 

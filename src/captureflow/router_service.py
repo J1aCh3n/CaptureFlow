@@ -544,7 +544,49 @@ def _parse_time(expression: str) -> time | None:
             return datetime.strptime(value, pattern).time()
         except ValueError:
             pass
-    return None
+    return _parse_chinese_time(value)
+
+
+def _parse_chinese_time(value: str) -> time | None:
+    match = re.fullmatch(
+        r"(上午|下午|晚上)([0-9]{1,2}|[一二三四五六七八九十两]+)点(?:(半)|([0-9]{1,2})分?)?",
+        value.replace(" ", ""),
+    )
+    if match is None:
+        return None
+    period, hour_text, half, minute_text = match.groups()
+    hour = _chinese_clock_hour(hour_text)
+    minute = 30 if half else int(minute_text or "0")
+    if hour is None or minute > 59:
+        return None
+    if period == "上午":
+        hour = 0 if hour == 12 else hour
+    else:
+        hour = 12 if hour == 12 else hour + 12
+    return time(hour, minute)
+
+
+def _chinese_clock_hour(value: str) -> int | None:
+    if value.isdigit():
+        hour = int(value)
+    else:
+        hours = {
+            "一": 1,
+            "二": 2,
+            "两": 2,
+            "三": 3,
+            "四": 4,
+            "五": 5,
+            "六": 6,
+            "七": 7,
+            "八": 8,
+            "九": 9,
+            "十": 10,
+            "十一": 11,
+            "十二": 12,
+        }
+        hour = hours.get(value)
+    return hour if hour is not None and 1 <= hour <= 12 else None
 
 
 def _parse_start_at(value: str) -> date | datetime:
