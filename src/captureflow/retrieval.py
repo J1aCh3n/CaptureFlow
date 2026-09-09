@@ -11,6 +11,33 @@ from .storage import CaptureStore
 
 RetrievalMode = Literal["current", "history"]
 MAX_RETRIEVED_PROJECT_RECORDS = 6
+_ENGLISH_STOP_WORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "did",
+    "do",
+    "does",
+    "for",
+    "how",
+    "i",
+    "in",
+    "is",
+    "me",
+    "my",
+    "of",
+    "on",
+    "the",
+    "to",
+    "was",
+    "we",
+    "what",
+    "when",
+    "where",
+    "which",
+    "why",
+}
 
 
 @dataclass(frozen=True)
@@ -109,17 +136,20 @@ def retrieve_project_records(
             for record in records
             if record.state == "active" or (record.kind == "milestone" and record.state == "completed")
         ]
+    scored = [(_lexical_score(query, record), record) for record in records]
+    if not _is_project_overview_query(query, mode):
+        scored = [(score, record) for score, record in scored if score > 0]
     ranked = sorted(
-        records,
-        key=lambda record: (
-            _lexical_score(query, record),
-            _state_priority(record, mode),
-            record.updated_at.isoformat(),
-            record.id,
+        scored,
+        key=lambda item: (
+            item[0],
+            _state_priority(item[1], mode),
+            item[1].updated_at.isoformat(),
+            item[1].id,
         ),
         reverse=True,
     )
-    return ranked[:limit]
+    return [record for _, record in ranked[:limit]]
 
 
 def evaluate_retrieval(
@@ -173,5 +203,31 @@ def _state_priority(record: ProjectRecord, mode: RetrievalMode) -> int:
     }[record.kind]
 
 
+def _is_project_overview_query(query: str, mode: RetrievalMode) -> bool:
+    """Allow zero-overlap records only for explicit whole-project overview questions."""
+
+    normalized = re.sub(r"[^\w\u4e00-\u9fff]+", " ", query.casefold()).strip()
+    if mode == "history":
+        return bool(
+            re.fullmatch(r"(?:show me |what is |tell me )?(?:the )?project history", normalized)
+            or re.fullmatch(r"(?:项目)?(?:的)?历史(?:是什么|如何|怎么样)?", normalized)
+        )
+    return bool(
+        re.fullmatch(
+            r"(?:what is |show me |tell me )?(?:the )?(?:project )?(?:current )?(?:status|progress)",
+            normalized,
+        )
+        or re.fullmatch(r"where are we(?: now)?", normalized)
+        or re.fullmatch(r"what remains(?: to be done)?", normalized)
+        or re.fullmatch(r"(?:项目)?(?:现在|目前)?(?:的)?(?:进度|状态)(?:是什么|如何|怎么样|怎样)?", normalized)
+        or re.fullmatch(r"(?:现在|目前)?做到哪里了?", normalized)
+        or re.fullmatch(r"还有什么(?:要做|没做|未完成)?", normalized)
+    )
+
+
 def _tokens(value: str) -> list[str]:
-    return re.findall(r"[\w'-]+", value.casefold())
+    return [
+        token
+        for token in re.findall(r"[\w'-]+", value.casefold())
+        if token not in _ENGLISH_STOP_WORDS
+    ]

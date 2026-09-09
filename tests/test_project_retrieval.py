@@ -84,10 +84,35 @@ class ProjectRetrievalTests(unittest.TestCase):
         current = retrieve_project_records(self.store, self.project.id, "SQLite status?", "current")
         history = retrieve_project_records(self.store, self.project.id, "old database decision", "history")
 
-        self.assertIn("decision-sqlite", [record.id for record in current])
+        self.assertEqual([record.id for record in current], ["decision-sqlite"])
         self.assertNotIn("decision-old-database", [record.id for record in current])
         self.assertNotIn(other_record.id, [record.id for record in current])
         self.assertIn("decision-old-database", [record.id for record in history])
+
+    def test_specific_query_rejects_zero_relevance_project_records(self) -> None:
+        records = retrieve_project_records(
+            self.store,
+            self.project.id,
+            "What is the status of the NVIDIA Isaac Sim meeting?",
+            "current",
+        )
+
+        self.assertEqual(records, [])
+
+    def test_irrelevant_project_records_return_unknown_without_a_model_call(self) -> None:
+        model = ScriptedRetrievalModel()
+
+        turn = ProjectRetrievalService(self.store, model).submit(
+            self.later_conversation.id,
+            "What is the status of the NVIDIA Isaac Sim meeting?",
+            "current",
+            "irrelevant-evidence",
+        )
+
+        self.assertEqual(turn.outcome, "insufficient_context")
+        self.assertEqual(turn.model_calls, 0)
+        self.assertEqual(model.calls, [])
+        self.assertEqual(turn.records, ())
 
     def test_query_classification_is_read_only_and_deterministic(self) -> None:
         self.assertEqual(classify_project_query("现在做到哪里了？"), "current")
