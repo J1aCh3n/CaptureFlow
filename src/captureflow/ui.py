@@ -7,7 +7,11 @@ import streamlit as st
 from pydantic import ValidationError
 
 from .chat_service import DeterministicChatService
-from .local_context_service import LocalContextService, is_local_context_query
+from .local_context_service import (
+    LocalContextService,
+    is_local_context_query,
+    is_local_write_request,
+)
 from .llm import ModelError, ModelSettings, OpenAICompatibleModel
 from .memory_service import MemoryService
 from .models import (
@@ -229,7 +233,26 @@ def render_chat_page(
         else:
             try:
                 timezone = os.getenv("CAPTUREFLOW_TIMEZONE", "America/Vancouver")
-                if is_local_context_query(prompt):
+                if is_local_write_request(prompt):
+                    settings = ModelSettings.from_environment()
+                    turn = BoundedChatService(
+                        store,
+                        OpenAICompatibleModel(settings),
+                        configured_reference_date(timezone),
+                        timezone,
+                    ).submit(conversation_id, prompt)
+                    if diagnostics_enabled:
+                        _remember_turn_diagnostics(
+                            turn.user_message.id,
+                            mode="model_router",
+                            outcome=turn.diagnostics.outcome,
+                            model_calls=turn.model_calls,
+                            model_seconds=turn.diagnostics.model_seconds,
+                            local_seconds=turn.diagnostics.local_seconds,
+                            total_seconds=perf_counter() - started,
+                            repair_used=turn.diagnostics.repair_used,
+                        )
+                elif is_local_context_query(prompt):
                     try:
                         local_context_model = OpenAICompatibleModel(ModelSettings.from_environment())
                     except ModelError:

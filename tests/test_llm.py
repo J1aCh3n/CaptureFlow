@@ -148,6 +148,14 @@ class OpenAICompatibleModelTests(unittest.TestCase):
             },
             [{"source_id": "event-1", "title": "Workflow meeting", "start_at": "2026-09-09"}],
             [{"source_id": "note-1", "kind": "note", "content": "Use voting."}],
+            [
+                {
+                    "source_id": "record-1",
+                    "kind": "decision",
+                    "content": "Use voting and idea merging.",
+                    "state": "active",
+                }
+            ],
         )
 
         system_prompt = completions.kwargs["messages"][0]["content"]
@@ -158,6 +166,8 @@ class OpenAICompatibleModelTests(unittest.TestCase):
         self.assertEqual(payload["runtime_context"]["target_date"], "2026-09-09")
         self.assertEqual(payload["events"][0]["source_id"], "event-1")
         self.assertEqual(payload["saved_items"][0]["source_id"], "note-1")
+        self.assertEqual(payload["project_records"][0]["source_id"], "record-1")
+        self.assertIn("Only a Calendar event establishes", system_prompt)
 
     def test_coordinator_prompt_distinguishes_memory_from_tasks(self) -> None:
         completions = RecordingCompletions(

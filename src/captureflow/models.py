@@ -711,6 +711,7 @@ class LocalContextAnswerDecision(BaseModel):
     outcome: Literal["answer", "insufficient_context", "clarify"]
     selected_event_ids: list[str] = Field(default_factory=list, max_length=3)
     selected_item_ids: list[str] = Field(default_factory=list, max_length=3)
+    selected_project_record_ids: list[str] = Field(default_factory=list, max_length=3)
     summary_points: list[SupportedPoint] = Field(default_factory=list, max_length=3)
     preparation_suggestions: list[PreparationSuggestion] = Field(default_factory=list, max_length=3)
     missing_information: list[Literal["meeting", "time", "agenda", "preparation"]] = Field(
@@ -718,7 +719,12 @@ class LocalContextAnswerDecision(BaseModel):
     )
     clarification_question: str | None = Field(default=None, max_length=300)
 
-    @field_validator("selected_event_ids", "selected_item_ids", "missing_information")
+    @field_validator(
+        "selected_event_ids",
+        "selected_item_ids",
+        "selected_project_record_ids",
+        "missing_information",
+    )
     @classmethod
     def list_values_are_unique(cls, value: list[str]) -> list[str]:
         if len(set(value)) != len(value):
@@ -735,9 +741,13 @@ class LocalContextAnswerDecision(BaseModel):
 
     @model_validator(mode="after")
     def fields_match_outcome(self) -> "LocalContextAnswerDecision":
-        selected_ids = [*self.selected_event_ids, *self.selected_item_ids]
+        selected_ids = [
+            *self.selected_event_ids,
+            *self.selected_item_ids,
+            *self.selected_project_record_ids,
+        ]
         if len(set(selected_ids)) != len(selected_ids):
-            raise ValueError("a local source cannot be selected as both an event and item")
+            raise ValueError("a local source ID cannot be selected under multiple source types")
         if self.outcome == "answer":
             if not selected_ids:
                 raise ValueError("an answer needs at least one selected local source")

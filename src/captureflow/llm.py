@@ -117,6 +117,7 @@ class LocalContextModel(Protocol):
         runtime_context: dict[str, str | None],
         events: list[dict],
         saved_items: list[dict],
+        project_records: list[dict],
     ) -> LocalContextAnswerDecision: ...
 
     def repair_local_context_answer(
@@ -125,6 +126,7 @@ class LocalContextModel(Protocol):
         runtime_context: dict[str, str | None],
         events: list[dict],
         saved_items: list[dict],
+        project_records: list[dict],
         invalid_decision: LocalContextAnswerDecision | str,
         validation_error: str,
     ) -> LocalContextAnswerDecision: ...
@@ -378,16 +380,21 @@ class OpenAICompatibleModel:
         runtime_context: dict[str, str | None],
         events: list[dict],
         saved_items: list[dict],
+        project_records: list[dict],
     ) -> LocalContextAnswerDecision:
         return self._complete(
             LocalContextAnswerDecision,
             system=(
                 "You are CaptureFlow's Phase 9.1 local-context responder. Return JSON only. "
-                "Answer only from the supplied local Calendar events and saved Notes/Ideas. "
+                "Answer only from the supplied local Calendar events, same-project tracker records, "
+                "and saved Notes/Ideas. "
                 "This is not a general chatbot: you cannot access an external calendar, hidden "
                 "conversation history, tools, or other records, and you must not create or change "
                 "any local record. Select IDs only from the supplied records. Every summary point "
                 "and every preparation suggestion must cite one or more selected source IDs. "
+                "Only a Calendar event establishes that an activity is scheduled or establishes "
+                "its date or time. A project task requesting creation of a calendar event does not "
+                "mean that event exists. Project decisions may establish meeting purpose or agenda. "
                 "Preparation suggestions are optional inferences, not stored tasks or confirmed "
                 "requirements; do not invent an explicit preparation task. Do not state a date or "
                 "time in a summary point: CaptureFlow renders exact Calendar time locally after "
@@ -406,6 +413,7 @@ class OpenAICompatibleModel:
                 "runtime_context": runtime_context,
                 "events": events,
                 "saved_items": saved_items,
+                "project_records": project_records,
             },
         )
 
@@ -415,6 +423,7 @@ class OpenAICompatibleModel:
         runtime_context: dict[str, str | None],
         events: list[dict],
         saved_items: list[dict],
+        project_records: list[dict],
         invalid_decision: LocalContextAnswerDecision | str,
         validation_error: str,
     ) -> LocalContextAnswerDecision:
@@ -431,7 +440,9 @@ class OpenAICompatibleModel:
                 "cite selected source IDs. When any supplied record supports part of the question, "
                 "return answer with that supported part and list only the remaining gaps in "
                 "missing_information; do not discard selected evidence as insufficient_context. "
-                "Never invent a time or an unrecorded preparation task, and use clarify rather "
+                "Only Calendar events establish scheduled activities, dates, or times; a project "
+                "task to create an event is not an event. Never invent a time or an unrecorded "
+                "preparation task, and use clarify rather "
                 "than arbitrarily selecting among multiple plausible events."
             ),
             payload={
@@ -439,6 +450,7 @@ class OpenAICompatibleModel:
                 "runtime_context": runtime_context,
                 "events": events,
                 "saved_items": saved_items,
+                "project_records": project_records,
                 "invalid_decision": invalid_payload,
                 "validation_error": validation_error,
             },

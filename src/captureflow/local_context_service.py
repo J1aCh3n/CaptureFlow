@@ -15,6 +15,7 @@ from .models import (
     LocalContextAnswerDecision,
     LocalContextSourceRef,
     Message,
+    ProjectRecord,
     SavedItem,
     utc_now,
 )
@@ -27,7 +28,7 @@ MAX_LOCAL_CONTEXT_SOURCES = 6
 class LocalContextTurn:
     user_message: Message
     assistant_message: Message
-    sources: tuple[CalendarEvent | SavedItem, ...]
+    sources: tuple[CalendarEvent | SavedItem | ProjectRecord, ...]
     outcome: str
     decision: LocalContextAnswerDecision | None = None
     model_calls: int = 0
@@ -35,29 +36,73 @@ class LocalContextTurn:
     fallback_used: bool = False
 
 
+LOCAL_WRITE_MARKERS = (
+    "create",
+    "add to",
+    "save",
+    "schedule a",
+    "schedule an",
+    "schedule the",
+    "schedule my",
+    "set up",
+    "remind me",
+    "创建",
+    "新建",
+    "新增",
+    "添加",
+    "加入日历",
+    "记到日历",
+    "提醒我",
+    "帮我安排",
+    "请安排",
+    "保存",
+)
+LOCAL_WRITE_TARGETS = (
+    "calendar",
+    "event",
+    "meeting",
+    "idea",
+    "note",
+    "日历",
+    "日程",
+    "会议",
+    "想法",
+    "笔记",
+    "备忘",
+)
+
+
+def is_local_write_request(query: str) -> bool:
+    """Recognize an explicit request for one of V2's bounded local writes."""
+
+    normalized = query.casefold()
+    return any(marker in normalized for marker in LOCAL_WRITE_MARKERS) and any(
+        marker in normalized for marker in LOCAL_WRITE_TARGETS
+    )
+
+
 def is_local_context_query(query: str) -> bool:
     """Recognize a small read-only Calendar/Note query vocabulary before model routing."""
 
     normalized = query.casefold()
-    write_markers = (
-        "create",
-        "add to",
-        "schedule",
-        "set up",
-        "remind me",
-        "创建",
-        "新建",
-        "新增",
-        "添加",
-        "加入日历",
-        "记到日历",
-        "提醒我",
-        "帮我安排",
-        "请安排",
-    )
-    if any(marker in normalized for marker in write_markers):
+    if is_local_write_request(query):
         return False
-    topic_markers = ("calendar", "event", "meeting", "日历", "日程", "会议", "议程")
+    topic_markers = (
+        "calendar",
+        "event",
+        "meeting",
+        "activity",
+        "activities",
+        "appointment",
+        "schedule",
+        "日历",
+        "日程",
+        "会议",
+        "议程",
+        "活动",
+        "安排",
+        "行程",
+    )
     question_markers = (
         "?",
         "？",
@@ -115,26 +160,43 @@ class LocalContextService:
             return LocalContextTurn(
                 user_message, existing_reply, (), "reloaded"
             )
-        sources = self._select_sources(content)
+        sources = self._select_sources(conversation_id, content)
         if not sources:
             return LocalContextTurn(
                 user_message,
-                self._reply(user_message, "I do not have matching local Calendar or Note context for that yet."),
+                self._reply(
+                    user_message,
+                    "I do not have matching local Calendar, Note/Idea, or same-project tracker "
+                    "context for that yet.",
+                ),
                 (),
                 "insufficient_context",
             )
         if self.model is None:
             return self._fallback_turn(user_message, content, sources)
 
+        runtime_context = self._runtime_context(content)
+        model_events = [
+            self._event_for_model(source) for source in sources if isinstance(source, CalendarEvent)
+        ]
+        model_items = [
+            self._item_for_model(source) for source in sources if isinstance(source, SavedItem)
+        ]
+        model_project_records = [
+            self._project_record_for_model(source)
+            for source in sources
+            if isinstance(source, ProjectRecord)
+        ]
         started = perf_counter()
         model_calls = 1
         candidate: LocalContextAnswerDecision | object | None = None
         try:
             candidate = self.model.answer_local_context(
                 content,
-                self._runtime_context(content),
-                [self._event_for_model(source) for source in sources if isinstance(source, CalendarEvent)],
-                [self._item_for_model(source) for source in sources if isinstance(source, SavedItem)],
+                runtime_context,
+                model_events,
+                model_items,
+                model_project_records,
             )
             decision = self._validate_decision(candidate, content, sources)
         except InvalidStructuredOutput as error:
@@ -142,9 +204,10 @@ class LocalContextService:
             try:
                 repaired = self.model.repair_local_context_answer(
                     content,
-                    self._runtime_context(content),
-                    [self._event_for_model(source) for source in sources if isinstance(source, CalendarEvent)],
-                    [self._item_for_model(source) for source in sources if isinstance(source, SavedItem)],
+                    runtime_context,
+                    model_events,
+                    model_items,
+                    model_project_records,
                     invalid_decision,
                     str(error),
                 )
@@ -163,9 +226,10 @@ class LocalContextService:
             try:
                 repaired = self.model.repair_local_context_answer(
                     content,
-                    self._runtime_context(content),
-                    [self._event_for_model(source) for source in sources if isinstance(source, CalendarEvent)],
-                    [self._item_for_model(source) for source in sources if isinstance(source, SavedItem)],
+                    runtime_context,
+                    model_events,
+                    model_items,
+                    model_project_records,
                     invalid_decision,
                     str(error),
                 )
@@ -190,7 +254,9 @@ class LocalContextService:
 
         model_seconds = perf_counter() - started
         selected_sources = self._sources_for_decision(decision, sources)
-        assistant = self._reply(user_message, _format_model_reply(decision, selected_sources))
+        assistant = self._reply(
+            user_message, _format_model_reply(content, decision, selected_sources)
+        )
         if selected_sources:
             self._save_sources(assistant, selected_sources)
         return LocalContextTurn(
@@ -207,7 +273,7 @@ class LocalContextService:
         self,
         user_message: Message,
         query: str,
-        sources: list[CalendarEvent | SavedItem],
+        sources: list[CalendarEvent | SavedItem | ProjectRecord],
         *,
         model_calls: int = 0,
         model_seconds: float = 0,
@@ -225,32 +291,53 @@ class LocalContextService:
         )
 
     def _save_sources(
-        self, assistant: Message, sources: list[CalendarEvent | SavedItem]
+        self, assistant: Message, sources: list[CalendarEvent | SavedItem | ProjectRecord]
     ) -> None:
-        self.store.save_local_context_answer_sources(
-            assistant.id,
-            [
-                LocalContextSourceRef(
-                    source_type="calendar_event" if isinstance(source, CalendarEvent) else "saved_item",
-                    source_id=source.id,
-                )
-                for source in sources
-            ],
-        )
+        local_references = [
+            LocalContextSourceRef(
+                source_type="calendar_event" if isinstance(source, CalendarEvent) else "saved_item",
+                source_id=source.id,
+            )
+            for source in sources
+            if isinstance(source, (CalendarEvent, SavedItem))
+        ]
+        if local_references:
+            self.store.save_local_context_answer_sources(assistant.id, local_references)
+        project_record_ids = [source.id for source in sources if isinstance(source, ProjectRecord)]
+        if project_record_ids:
+            self.store.save_project_answer_sources(assistant.id, project_record_ids)
 
-    def _select_sources(self, query: str) -> list[CalendarEvent | SavedItem]:
+    def _select_sources(
+        self, conversation_id: str, query: str
+    ) -> list[CalendarEvent | SavedItem | ProjectRecord]:
         target_date = _query_date(query, self.reference_date, self.timezone)
         events = self.store.list_calendar_events()
         if target_date is not None:
             events = [event for event in events if _event_date(event) == target_date]
         else:
             events = _rank(query, events, lambda event: f"{event.title} {event.source_quote}")
+
+        project = self.store.get_conversation_project(conversation_id)
+        project_records: list[ProjectRecord] = []
+        saved_items = self.store.list_saved_items(kinds=("note", "idea"))
+        if project is not None:
+            project_records = _rank(
+                query,
+                self.store.list_project_records(project.id, states=("active",)),
+                lambda record: f"{record.content} {record.rationale or ''} {record.source_quote}",
+            )
+            saved_items = [
+                item
+                for item in saved_items
+                if (assigned := self.store.get_conversation_project(item.conversation_id)) is not None
+                and assigned.id == project.id
+            ]
         notes = _rank(
             query,
-            self.store.list_saved_items(kinds=("note", "idea")),
+            saved_items,
             lambda item: f"{item.content} {item.source_quote}",
         )
-        return [*events[:3], *notes[:3]][:MAX_LOCAL_CONTEXT_SOURCES]
+        return [*events[:3], *project_records[:3], *notes[:3]][:MAX_LOCAL_CONTEXT_SOURCES]
 
     def _runtime_context(self, query: str) -> dict[str, str | None]:
         target_date = _query_date(query, self.reference_date, self.timezone)
@@ -280,20 +367,44 @@ class LocalContextService:
             "source_quote": item.source_quote,
         }
 
+    @staticmethod
+    def _project_record_for_model(record: ProjectRecord) -> dict:
+        return {
+            "source_id": record.id,
+            "kind": record.kind,
+            "content": record.content,
+            "state": record.state,
+            "source_quote": record.source_quote,
+        }
+
     def _validate_decision(
         self,
         candidate: LocalContextAnswerDecision | object,
         query: str,
-        sources: list[CalendarEvent | SavedItem],
+        sources: list[CalendarEvent | SavedItem | ProjectRecord],
     ) -> LocalContextAnswerDecision:
         decision = LocalContextAnswerDecision.model_validate(candidate)
         events = {source.id: source for source in sources if isinstance(source, CalendarEvent)}
         items = {source.id: source for source in sources if isinstance(source, SavedItem)}
-        selected_ids = {*decision.selected_event_ids, *decision.selected_item_ids}
+        project_records = {
+            source.id: source for source in sources if isinstance(source, ProjectRecord)
+        }
+        selected_ids = {
+            *decision.selected_event_ids,
+            *decision.selected_item_ids,
+            *decision.selected_project_record_ids,
+        }
         if any(source_id not in events for source_id in decision.selected_event_ids):
             raise ValueError("local-context answer selected an event outside the supplied candidates")
         if any(source_id not in items for source_id in decision.selected_item_ids):
             raise ValueError("local-context answer selected an item outside the supplied candidates")
+        if any(
+            source_id not in project_records
+            for source_id in decision.selected_project_record_ids
+        ):
+            raise ValueError(
+                "local-context answer selected a project record outside the supplied candidates"
+            )
         if any(
             source_id not in selected_ids
             for point in decision.summary_points
@@ -323,8 +434,11 @@ class LocalContextService:
             raise ValueError("local-context answer selected an event outside the requested date")
         if len(events) > 1 and decision.outcome == "answer" and set(decision.selected_event_ids) != set(events):
             raise ValueError("multiple local calendar events require every candidate or clarification")
-        if _asks_for_event_time(query) and events and not decision.selected_event_ids:
-            raise ValueError("a local time answer must select a supplied Calendar event")
+        if _asks_for_event_time(query) and not decision.selected_event_ids:
+            if "time" not in decision.missing_information:
+                raise ValueError(
+                    "a local time answer without a selected Calendar event must mark time missing"
+                )
         return decision
 
     @staticmethod
@@ -340,11 +454,15 @@ class LocalContextService:
     @staticmethod
     def _sources_for_decision(
         decision: LocalContextAnswerDecision,
-        sources: list[CalendarEvent | SavedItem],
-    ) -> list[CalendarEvent | SavedItem]:
+        sources: list[CalendarEvent | SavedItem | ProjectRecord],
+    ) -> list[CalendarEvent | SavedItem | ProjectRecord]:
         if decision.outcome == "clarify":
             return sources
-        selected_ids = {*decision.selected_event_ids, *decision.selected_item_ids}
+        selected_ids = {
+            *decision.selected_event_ids,
+            *decision.selected_item_ids,
+            *decision.selected_project_record_ids,
+        }
         return [source for source in sources if source.id in selected_ids]
 
     def _user_message(self, conversation_id: str, content: str, message_id: str | None) -> Message:
@@ -416,6 +534,25 @@ def _asks_for_event_time(query: str) -> bool:
     )
 
 
+def _asks_for_calendar_fact(query: str) -> bool:
+    normalized = query.casefold()
+    return _asks_for_event_time(query) or any(
+        marker in normalized
+        for marker in (
+            "calendar",
+            "event",
+            "activity",
+            "activities",
+            "appointment",
+            "日历",
+            "日程",
+            "活动",
+            "安排",
+            "行程",
+        )
+    )
+
+
 def _contains_calendar_time_or_date(value: str) -> bool:
     return bool(
         re.search(
@@ -431,7 +568,9 @@ def _contains_calendar_time_or_date(value: str) -> bool:
 
 
 def _format_model_reply(
-    decision: LocalContextAnswerDecision, sources: list[CalendarEvent | SavedItem]
+    query: str,
+    decision: LocalContextAnswerDecision,
+    sources: list[CalendarEvent | SavedItem | ProjectRecord],
 ) -> str:
     events = [source for source in sources if isinstance(source, CalendarEvent)]
     if decision.outcome == "clarify":
@@ -443,6 +582,8 @@ def _format_model_reply(
         return f"The selected local records do not establish {missing}."
 
     lines: list[str] = []
+    if _asks_for_calendar_fact(query) and not events:
+        lines.append("No matching Calendar event is stored for the requested date or description.")
     if events:
         lines.append("Saved local calendar:")
         lines.extend(f"- {event.start_at.isoformat()} — {event.title}" for event in events)
@@ -456,10 +597,15 @@ def _format_model_reply(
     return "\n".join(lines)
 
 
-def _format_reply(query: str, sources: list[CalendarEvent | SavedItem]) -> str:
+def _format_reply(
+    query: str, sources: list[CalendarEvent | SavedItem | ProjectRecord]
+) -> str:
     events = [source for source in sources if isinstance(source, CalendarEvent)]
     notes = [source for source in sources if isinstance(source, SavedItem)]
+    project_records = [source for source in sources if isinstance(source, ProjectRecord)]
     lines: list[str] = []
+    if _asks_for_calendar_fact(query) and not events:
+        lines.append("No matching Calendar event is stored for the requested date or description.")
     if events:
         heading = "I found these local calendar events:" if len(events) > 1 else "I found this local calendar event:"
         lines.append(heading)
@@ -467,6 +613,11 @@ def _format_reply(query: str, sources: list[CalendarEvent | SavedItem]) -> str:
     if notes:
         lines.append("Saved local note/idea context:")
         lines.extend(f"- {item.kind.title()}: {item.content}" for item in notes)
+    if project_records:
+        lines.append("Same-project tracker context (not Calendar events):")
+        lines.extend(
+            f"- {record.kind.title()}: {record.content}" for record in project_records
+        )
     if any(marker in query.casefold() for marker in ("prepare", "准备", "要做什么")):
         lines.append("No explicit personal preparation task is stored in the selected local records.")
     if len(events) > 1 or len(notes) > 1:
