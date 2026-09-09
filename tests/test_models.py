@@ -6,7 +6,10 @@ from pydantic import ValidationError
 from captureflow.models import (
     CalendarEvent,
     Capture,
+    ContextualAction,
+    ConversationDecision,
     Conversation,
+    EvidenceReference,
     MAX_CAPTURE_CHARACTERS,
     Message,
     PendingClarification,
@@ -99,3 +102,74 @@ class ModelTests(unittest.TestCase):
                 original_action={"title": "Submit report"},
                 status="resolved",
             )
+
+    def test_contextual_calendar_update_accepts_two_message_evidence(self) -> None:
+        decision = ConversationDecision(
+            intent="calendar_update",
+            action=ContextualAction(
+                action="update_event",
+                date_expression="周四",
+                time_expression="14:00",
+                end_time_expression="15:00",
+                target_event_id="algorithm-review-event",
+                evidence=[
+                    EvidenceReference(
+                        message_id="meeting-message",
+                        source_quote="我这周四下午四点到五点有算法优化与代码审查会议。",
+                    ),
+                    EvidenceReference(
+                        message_id="correction-message",
+                        source_quote="这个会议在周四 14:00 - 15:00",
+                    ),
+                ],
+            ),
+        )
+
+        self.assertEqual(decision.action.target_event_id, "algorithm-review-event")
+        self.assertEqual(len(decision.action.evidence), 2)
+
+    def test_contextual_calendar_update_requires_candidate_target(self) -> None:
+        with self.assertRaises(ValidationError):
+            ConversationDecision(
+                intent="calendar_update",
+                action=ContextualAction(
+                    action="update_event",
+                    time_expression="14:00",
+                    evidence=[
+                        EvidenceReference(
+                            message_id="correction-message",
+                            source_quote="这个会议改到下午两点。",
+                        )
+                    ],
+                ),
+            )
+
+    def test_contextual_action_rejects_duplicate_message_evidence(self) -> None:
+        with self.assertRaises(ValidationError):
+            ContextualAction(
+                action="create_event",
+                content="代码审查",
+                date_expression="这周四",
+                evidence=[
+                    EvidenceReference(message_id="message-1", source_quote="代码审查"),
+                    EvidenceReference(message_id="message-1", source_quote="这周四"),
+                ],
+            )
+
+    def test_contextual_clarification_retains_an_unresolved_calendar_update(self) -> None:
+        decision = ConversationDecision(
+            intent="clarify",
+            clarification_question="Which existing meeting should I update?",
+            pending_action=ContextualAction(
+                action="update_event",
+                time_expression="14:00",
+                evidence=[
+                    EvidenceReference(
+                        message_id="correction-message",
+                        source_quote="这个会议改到下午两点。",
+                    )
+                ],
+            ),
+        )
+
+        self.assertEqual(decision.pending_action.action, "update_event")

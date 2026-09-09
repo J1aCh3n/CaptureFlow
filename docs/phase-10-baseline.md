@@ -67,6 +67,15 @@ successfully with 168 tests in 25.825 seconds:
 After adding the two Phase 10 baseline tests, the same command completed with
 170 tests in 25.513 seconds.
 
+The environment's editable CaptureFlow install points at the main workspace.
+Every worktree verification must therefore prepend this PowerShell assignment,
+then confirm `captureflow.__file__` points at this worktree before running
+tests:
+
+```powershell
+$env:PYTHONPATH = (Join-Path (Get-Location) 'src')
+```
+
 No API call is part of this phase. A live acceptance fixture may use the same
 case file only after the deterministic Phase 10 gates pass and API use is
 explicitly authorized for that run.

@@ -843,3 +843,147 @@ class TurnDecision(BaseModel):
         elif self.actions or self.clarification_question or self.pending_action:
             raise ValueError("reply_only cannot contain an action or clarification")
         return self
+
+
+ConversationIntent = Literal[
+    "calendar_create",
+    "calendar_update",
+    "save_idea",
+    "save_note",
+    "tracker_change",
+    "local_answer",
+    "project_answer",
+    "clarify",
+    "reply_only",
+]
+
+
+class EvidenceReference(BaseModel):
+    """One exact quote from a persisted conversation message."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    message_id: str = Field(min_length=1)
+    source_quote: str = Field(min_length=1, max_length=MAX_MESSAGE_CHARACTERS)
+
+    @field_validator("message_id", "source_quote")
+    @classmethod
+    def evidence_text_is_not_whitespace(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("evidence fields must not be blank")
+        return value
+
+
+class ContextualAction(BaseModel):
+    """One untrusted local action with one or more persisted-message citations."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["create_event", "update_event", "save_idea", "save_note"]
+    content: str | None = Field(default=None, max_length=4_000)
+    description: str | None = Field(default=None, max_length=4_000)
+    date_expression: str | None = Field(default=None, max_length=100)
+    time_expression: str | None = Field(default=None, max_length=20)
+    end_time_expression: str | None = Field(default=None, max_length=20)
+    target_event_id: str | None = Field(default=None, min_length=1)
+    evidence: list[EvidenceReference] = Field(min_length=1, max_length=3)
+
+    @field_validator(
+        "content",
+        "description",
+        "date_expression",
+        "time_expression",
+        "end_time_expression",
+    )
+    @classmethod
+    def optional_text_is_not_whitespace(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        return value or None
+
+    @field_validator("evidence")
+    @classmethod
+    def evidence_messages_are_unique(cls, value: list[EvidenceReference]) -> list[EvidenceReference]:
+        message_ids = [reference.message_id for reference in value]
+        if len(message_ids) != len(set(message_ids)):
+            raise ValueError("an action cannot cite the same message more than once")
+        return value
+
+    @model_validator(mode="after")
+    def action_fields_match_kind(self) -> "ContextualAction":
+        event_fields = (
+            self.description,
+            self.date_expression,
+            self.time_expression,
+            self.end_time_expression,
+        )
+        if self.action == "create_event":
+            if self.content is None or self.date_expression is None:
+                raise ValueError("an event creation requires title content and a date expression")
+            if self.target_event_id is not None:
+                raise ValueError("an event creation cannot target an existing event")
+        elif self.action == "update_event":
+            if not any((self.content, *event_fields)):
+                raise ValueError("an event update requires at least one replacement field")
+        else:
+            if self.content is None:
+                raise ValueError("a saved item requires content")
+            if any(value is not None for value in (*event_fields, self.target_event_id)):
+                raise ValueError("a saved item cannot include calendar fields or an event target")
+        return self
+
+
+class ConversationDecision(BaseModel):
+    """The future one-call contextual routing contract; it does not write storage itself."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    intent: ConversationIntent
+    action: ContextualAction | None = None
+    project_changes: list[ProjectChange] = Field(default_factory=list, max_length=3)
+    clarification_question: str | None = Field(default=None, max_length=300)
+    pending_action: ContextualAction | None = None
+    reply: str | None = Field(default=None, max_length=1_000)
+
+    @field_validator("clarification_question", "reply")
+    @classmethod
+    def optional_reply_text_is_not_whitespace(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        return value or None
+
+    @model_validator(mode="after")
+    def intent_matches_payload(self) -> "ConversationDecision":
+        action_for_intent = {
+            "calendar_create": "create_event",
+            "calendar_update": "update_event",
+            "save_idea": "save_idea",
+            "save_note": "save_note",
+        }
+        expected_action = action_for_intent.get(self.intent)
+        if expected_action is not None:
+            if self.action is None or self.action.action != expected_action:
+                raise ValueError(f"{self.intent} requires a {expected_action} action")
+            if self.intent == "calendar_update" and self.action.target_event_id is None:
+                raise ValueError("a calendar update requires a candidate event target")
+            if self.project_changes or self.clarification_question or self.pending_action:
+                raise ValueError("a local write cannot include tracker or clarification payload")
+        elif self.intent == "tracker_change":
+            if self.action or not self.project_changes or self.clarification_question or self.pending_action:
+                raise ValueError("a tracker change requires project changes only")
+        elif self.intent == "clarify":
+            if self.action or self.project_changes or not self.clarification_question:
+                raise ValueError("a clarification cannot include a committed action or tracker change")
+            if self.pending_action is None or self.pending_action.action not in {
+                "create_event",
+                "update_event",
+            }:
+                raise ValueError("a clarification requires one pending calendar action")
+        else:
+            if self.action or self.project_changes or self.clarification_question or self.pending_action:
+                raise ValueError("a read-only decision cannot include a write or clarification payload")
+            if not self.reply:
+                raise ValueError("a read-only decision requires a reply")
+        return self

@@ -25,12 +25,12 @@ the implementation begins.
 
 ### 1. Add contextual decision and provenance types
 
-- Extend `models.py` with a top-level conversation intent, structured
-  multi-message `EvidenceReference`, and calendar-update fields including a
-  candidate `target_event_id`.
-- Keep existing `TurnDecision` and explicit `/event`, `/idea`, `/note`
-  contracts compatible while introducing the new contract beside them.
-- Add schema tests for invalid intent/action combinations and invalid evidence.
+- Complete. `ConversationDecision` and `ContextualAction` add top-level intent,
+  multi-message `EvidenceReference`, and a candidate `target_event_id`.
+- Existing `TurnDecision` and explicit `/event`, `/idea`, `/note` contracts
+  remain unchanged; `ToolOperation` changes wait for Phase 4's migration.
+- Schema tests cover valid cross-message updates, missing targets, duplicate
+  evidence messages, and unresolved update clarification.
 
 Exit gate: typed schema rejects an update without one validated candidate target
 or evidence that names a source message.
