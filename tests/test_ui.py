@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+from datetime import timedelta
 from pathlib import Path
 
 from streamlit.testing.v1 import AppTest
@@ -8,12 +9,20 @@ from streamlit.testing.v1 import AppTest
 from captureflow.models import (
     Capture,
     CaptureRun,
+    CalendarEvent,
     Conversation,
     MemoryItem,
     MemoryProposal,
     PendingMemoryReview,
+    Message,
+    PendingClarification,
+    Project,
+    ProjectChangeOperation,
+    ProjectRecord,
+    SavedItem,
 )
 from captureflow.storage import CaptureStore
+from captureflow.workflow import configured_reference_date
 
 
 class UiTests(unittest.TestCase):
@@ -47,12 +56,225 @@ class UiTests(unittest.TestCase):
                 os.environ[key] = value
         self.temporary_directory.cleanup()
 
-    def test_phase_three_shell_renders_without_automatic_model_behavior(self) -> None:
+    @staticmethod
+    def open_page(app: AppTest, page: str) -> AppTest:
+        app.sidebar.radio[0].set_value(page).run()
+        return app
+
+    def test_phase_three_chat_shell_renders_without_a_configured_model(self) -> None:
         app = AppTest.from_file("app.py").run()
 
         self.assertEqual(app.exception, [])
         self.assertEqual(app.title[0].value, "CaptureFlow")
-        self.assertIn("Phase 3", app.caption[0].value)
+        self.assertIn("V2 Phase 9", app.caption[0].value)
+        self.assertEqual(len(app.chat_input), 1)
+        self.assertEqual(app.sidebar.toggle[0].label, "Diagnostics")
+        self.assertFalse(app.sidebar.toggle[0].value)
+
+    def test_diagnostics_switch_shows_session_only_turn_timing(self) -> None:
+        app = AppTest.from_file("app.py").run()
+        self.assertFalse(any(expander.label.startswith("Diagnostics ·") for expander in app.expander))
+
+        app.sidebar.toggle[0].set_value(True).run()
+        app.chat_input[0].set_value("/idea Measure model latency.").run()
+
+        self.assertTrue(any(expander.label.startswith("Diagnostics ·") for expander in app.expander))
+        self.assertTrue(any("Model calls: 0" in caption.value for caption in app.caption))
+        self.assertTrue(any("Session-only timing" in caption.value for caption in app.caption))
+
+    def test_unconfigured_router_persists_a_visible_no_write_reply(self) -> None:
+        app = AppTest.from_file("app.py").run()
+        app.chat_input[0].set_value("My report is due tomorrow.").run()
+        store = CaptureStore(os.environ["CAPTUREFLOW_DATABASE_PATH"])
+        store.initialize()
+
+        self.assertEqual(len(store.list_calendar_events()), 0)
+        self.assertTrue(any("CAPTUREFLOW_API_KEY" in element.value for element in app.markdown))
+
+    def test_pending_clarification_has_a_visible_cancel_control(self) -> None:
+        app = AppTest.from_file("app.py").run()
+        store = CaptureStore(os.environ["CAPTUREFLOW_DATABASE_PATH"])
+        store.initialize()
+        conversation = store.list_conversations()[0]
+        user_message = store.save_message(
+            Message(
+                id="clarification-user",
+                conversation_id=conversation.id,
+                role="user",
+                content="My report is due Tuesday.",
+            )
+        )
+        assistant_message = store.save_message(
+            Message(
+                id="clarification-assistant",
+                conversation_id=conversation.id,
+                role="assistant",
+                content="Which exact date should I use?",
+                reply_to_message_id=user_message.id,
+            )
+        )
+        clarification = store.save_pending_clarification(
+            PendingClarification(
+                id="pending-date",
+                conversation_id=conversation.id,
+                source_message_id=user_message.id,
+                assistant_message_id=assistant_message.id,
+                original_action={"action": "create_event", "content": "Submit report"},
+            )
+        )
+
+        app.run()
+        next(
+            button
+            for button in app.button
+            if button.key == f"cancel-clarification-{clarification.id}"
+        ).click().run()
+        self.assertIsNone(store.get_pending_clarification(conversation.id))
+
+    def test_tracker_page_renders_a_source_grounded_project_record(self) -> None:
+        app = AppTest.from_file("app.py").run()
+        store = CaptureStore(os.environ["CAPTUREFLOW_DATABASE_PATH"])
+        store.initialize()
+        conversation = store.list_conversations()[0]
+        message = store.save_message(
+            Message(
+                id="tracker-user-message",
+                conversation_id=conversation.id,
+                role="user",
+                content="Phase 4 needs a deterministic tracker foundation.",
+            )
+        )
+        project = store.save_project(Project(id="tracker-project", name="CaptureFlow"))
+        store.assign_conversation_project(conversation.id, project.id)
+        record = store.save_project_record(
+            ProjectRecord(
+                id="tracker-record",
+                project_id=project.id,
+                conversation_id=conversation.id,
+                kind="task",
+                content="Implement the tracker foundation.",
+                state="active",
+                source_message_id=message.id,
+                source_quote="Phase 4 needs a deterministic tracker foundation.",
+            )
+        )
+
+        self.open_page(app, "Tracker")
+
+        self.assertEqual(app.exception, [])
+        self.assertTrue(any(project.name in element.value for element in app.markdown))
+        self.assertTrue(any(field.value == record.content for field in app.text_area))
+        self.assertTrue(
+            any(button.key == f"transition-project-record-{record.id}" for button in app.button)
+        )
+
+    def test_unconfigured_project_chat_persists_a_no_write_contextual_turn(self) -> None:
+        app = AppTest.from_file("app.py").run()
+        store = CaptureStore(os.environ["CAPTUREFLOW_DATABASE_PATH"])
+        store.initialize()
+        conversation = store.list_conversations()[0]
+        project = store.save_project(Project(id="ui-project-context", name="CaptureFlow"))
+        store.assign_conversation_project(conversation.id, project.id)
+
+        app.chat_input[0].set_value("Continue the project discussion.").run()
+
+        messages = store.list_messages(conversation.id)
+        self.assertEqual([message.role for message in messages], ["user", "assistant"])
+        self.assertTrue(store.conversation_has_project_turn(conversation.id))
+        self.assertEqual(store.list_project_records(project.id), [])
+        self.assertIn("CAPTUREFLOW_API_KEY", messages[-1].content)
+
+    def test_project_change_review_card_is_visible_in_the_chat_timeline(self) -> None:
+        app = AppTest.from_file("app.py").run()
+        store = CaptureStore(os.environ["CAPTUREFLOW_DATABASE_PATH"])
+        store.initialize()
+        conversation = store.list_conversations()[0]
+        project = store.save_project(Project(id="ui-project-change", name="CaptureFlow"))
+        store.assign_conversation_project(conversation.id, project.id)
+        source = store.save_message(
+            Message(
+                id="ui-project-change-source",
+                conversation_id=conversation.id,
+                role="user",
+                content="Replace the tracker decision with SQLite and FTS5.",
+            )
+        )
+        store.save_message(
+            Message(
+                id="ui-project-change-reply",
+                conversation_id=conversation.id,
+                role="assistant",
+                content="This needs review.",
+                reply_to_message_id=source.id,
+            )
+        )
+        operation = store.save_project_change_operation(
+            ProjectChangeOperation(
+                id="ui-project-change-operation",
+                source_message_id=source.id,
+                project_id=project.id,
+                change_index=0,
+                change={
+                    "action": "create_record",
+                    "kind": "decision",
+                    "content": "Use SQLite and FTS5.",
+                    "source_quote": "Replace the tracker decision with SQLite and FTS5.",
+                },
+                status="review",
+            )
+        )
+
+        app.run()
+
+        self.assertTrue(
+            any(button.key == f"approve-project-change-{operation.id}" for button in app.button)
+        )
+        self.assertTrue(
+            any(button.key == f"reject-project-change-{operation.id}" for button in app.button)
+        )
+
+    def test_project_answer_sources_are_visible_in_the_chat_timeline(self) -> None:
+        app = AppTest.from_file("app.py").run()
+        store = CaptureStore(os.environ["CAPTUREFLOW_DATABASE_PATH"])
+        store.initialize()
+        conversation = store.list_conversations()[0]
+        project = store.save_project(Project(id="ui-project-answer", name="CaptureFlow"))
+        store.assign_conversation_project(conversation.id, project.id)
+        source = store.save_message(
+            Message(
+                id="ui-project-answer-source",
+                conversation_id=conversation.id,
+                role="user",
+                content="Use SQLite for the local project.",
+            )
+        )
+        record = store.save_project_record(
+            ProjectRecord(
+                id="ui-project-answer-record",
+                project_id=project.id,
+                conversation_id=conversation.id,
+                kind="decision",
+                content="Use SQLite for the local project.",
+                state="active",
+                source_message_id=source.id,
+                source_quote=source.content,
+            )
+        )
+        answer = store.save_message(
+            Message(
+                id="ui-project-answer-reply",
+                conversation_id=conversation.id,
+                role="assistant",
+                content="SQLite is the local decision.",
+                reply_to_message_id=source.id,
+            )
+        )
+        store.save_project_answer_sources(answer.id, [record.id])
+
+        app.run()
+
+        self.assertTrue(any("Project answer sources" in caption.value for caption in app.caption))
+        self.assertTrue(any(record.content in markdown.value for markdown in app.markdown))
 
     def test_memory_page_displays_and_undoes_an_automatic_memory(self) -> None:
         app = AppTest.from_file("app.py").run()
@@ -177,7 +399,7 @@ class UiTests(unittest.TestCase):
             )
         )
 
-        app.run()
+        self.open_page(app, "Legacy capture")
 
         self.assertTrue(any(expander.label == "Memory trace" for expander in app.expander))
         self.assertTrue(any(memory.content in element.value for element in app.markdown))
@@ -186,6 +408,7 @@ class UiTests(unittest.TestCase):
     def test_manual_capture_can_be_saved_and_deleted_from_shell(self) -> None:
         source_text = "Keep this hand-authored capture unchanged."
         app = AppTest.from_file("app.py").run()
+        self.open_page(app, "Legacy capture")
 
         app.text_area[0].input(source_text).run()
         next(button for button in app.button if button.label == "Save capture").click().run()
@@ -203,6 +426,7 @@ class UiTests(unittest.TestCase):
 
     def test_duplicate_titles_select_the_new_conversation_and_keep_histories_separate(self) -> None:
         app = AppTest.from_file("app.py").run()
+        self.open_page(app, "Legacy capture")
         store = CaptureStore(os.environ["CAPTUREFLOW_DATABASE_PATH"])
         store.initialize()
 
@@ -227,20 +451,23 @@ class UiTests(unittest.TestCase):
 
         self.assertEqual(len(matches), 2)
         self.assertNotEqual(first.id, newest.id)
-        self.assertEqual(app.selectbox[0].value, newest.id)
+        conversation_selector = next(field for field in app.selectbox if field.key == "selected_conversation_id")
+        self.assertEqual(conversation_selector.value, newest.id)
         self.assertEqual(len(store.list_captures(first.id)), 1)
         self.assertEqual(store.list_captures(newest.id), [])
-        self.assertEqual(len(app.selectbox[0].options), len(set(app.selectbox[0].options)))
+        self.assertEqual(len(conversation_selector.options), len(set(conversation_selector.options)))
 
     def test_confirmed_conversation_delete_removes_only_the_selected_conversation(self) -> None:
         app = AppTest.from_file("app.py").run()
+        self.open_page(app, "Legacy capture")
         store = CaptureStore(os.environ["CAPTUREFLOW_DATABASE_PATH"])
         store.initialize()
         retained_id = store.list_conversations()[0].id
 
         app.text_input[0].input("Delete this conversation").run()
         next(button for button in app.button if button.label == "Create conversation").click().run()
-        deleted_id = app.selectbox[0].value
+        conversation_selector = next(field for field in app.selectbox if field.key == "selected_conversation_id")
+        deleted_id = conversation_selector.value
         app.text_area[0].input("This capture should be deleted with its conversation.").run()
         next(button for button in app.button if button.label == "Save capture").click().run()
 
@@ -253,11 +480,13 @@ class UiTests(unittest.TestCase):
 
         with self.assertRaises(KeyError):
             store.get_conversation(deleted_id)
-        self.assertEqual(app.selectbox[0].value, retained_id)
+        conversation_selector = next(field for field in app.selectbox if field.key == "selected_conversation_id")
+        self.assertEqual(conversation_selector.value, retained_id)
         self.assertEqual(store.get_conversation(retained_id).id, retained_id)
 
     def test_analyze_without_model_settings_saves_a_visible_configuration_failure(self) -> None:
-        app = AppTest.from_file("app.py").run()
+        app = AppTest.from_file("app.py").run(timeout=10)
+        self.open_page(app, "Legacy capture")
         app.text_area[0].input("A capture that needs analysis.").run()
         next(button for button in app.button if button.label == "Save capture").click().run()
 
@@ -268,3 +497,132 @@ class UiTests(unittest.TestCase):
         self.assertEqual(app.exception, [])
         self.assertIn("configuration", app.error[0].value)
         self.assertIn("CAPTUREFLOW_API_KEY", app.error[0].value)
+
+    def test_chat_command_writes_once_and_is_visible_on_calendar_page(self) -> None:
+        app = AppTest.from_file("app.py").run()
+
+        app.chat_input[0].set_value("/event 2026-09-15 | Submit report").run()
+        store = CaptureStore(os.environ["CAPTUREFLOW_DATABASE_PATH"])
+        store.initialize()
+
+        self.assertEqual(app.exception, [])
+        self.assertEqual(len(store.list_messages(store.list_conversations()[0].id)), 2)
+        self.assertEqual(len(store.list_calendar_events()), 1)
+        self.open_page(app, "Calendar")
+        self.assertTrue(any("Submit report" in element.value for element in app.text_input))
+
+    def test_unassigned_chat_reads_local_meeting_context_without_model_configuration(self) -> None:
+        app = AppTest.from_file("app.py").run()
+        store = CaptureStore(os.environ["CAPTUREFLOW_DATABASE_PATH"])
+        store.initialize()
+        source_conversation = store.list_conversations()[0]
+        later_conversation = store.save_conversation(Conversation(id="ui-local-context-later", title="Later"))
+        source = store.save_message(
+            Message(
+                id="ui-local-context-source",
+                conversation_id=source_conversation.id,
+                role="user",
+                content="The workflow meeting is tomorrow. It uses voting and idea merging.",
+            )
+        )
+        reference_date = configured_reference_date("America/Vancouver")
+        event = store.save_calendar_event(
+            CalendarEvent(
+                id="ui-local-context-event",
+                conversation_id=source_conversation.id,
+                title="Workflow meeting",
+                source_message_id=source.id,
+                source_quote=source.content,
+                start_at=reference_date + timedelta(days=1),
+                all_day=True,
+                timezone="America/Vancouver",
+            )
+        )
+        note = store.save_saved_item(
+            SavedItem(
+                id="ui-local-context-note",
+                conversation_id=source_conversation.id,
+                kind="note",
+                content="会议用于投票、合并和深度优化点子。",
+                source_message_id=source.id,
+                source_quote=source.content,
+            )
+        )
+
+        app.run()
+        next(field for field in app.selectbox if field.key == "selected_conversation_id").set_value(
+            later_conversation.id
+        ).run()
+        app.chat_input[0].set_value("我明天的会议要做什么？").run()
+
+        answer = store.get_assistant_reply(store.list_messages(later_conversation.id)[0].id)
+        self.assertIsNotNone(answer)
+        self.assertIn(note.content, answer.content)
+        self.assertEqual(
+            {source.reference.source_id for source in store.list_local_context_answer_sources(answer.id)},
+            {event.id, note.id},
+        )
+        self.assertTrue(any("Local context sources" in caption.value for caption in app.caption))
+
+    def test_new_conversation_can_be_assigned_to_a_project_from_the_normal_flow(self) -> None:
+        app = AppTest.from_file("app.py").run()
+        store = CaptureStore(os.environ["CAPTUREFLOW_DATABASE_PATH"])
+        store.initialize()
+        project = store.save_project(Project(id="ui-new-conversation-project", name="CaptureFlow"))
+
+        app.run()
+        next(field for field in app.selectbox if field.key == "new-conversation-project").set_value(
+            project.id
+        ).run()
+        next(field for field in app.text_input if field.key == "new_conversation_title").set_value(
+            "Project follow-up"
+        ).run()
+        next(button for button in app.button if button.label == "Create conversation").click().run()
+
+        created = next(
+            conversation for conversation in store.list_conversations() if conversation.title == "Project follow-up"
+        )
+        self.assertEqual(store.get_conversation_project(created.id), project)
+
+    def test_saved_item_can_be_deleted_and_restored_from_management_page(self) -> None:
+        app = AppTest.from_file("app.py").run()
+        app.chat_input[0].set_value("/note Keep SQLite.").run()
+        store = CaptureStore(os.environ["CAPTUREFLOW_DATABASE_PATH"])
+        store.initialize()
+        item = store.list_saved_items()[0]
+
+        self.open_page(app, "Ideas & Notes")
+        next(button for button in app.button if button.key == f"delete-item-{item.id}").click().run()
+        self.assertEqual(store.get_saved_item(item.id).status, "deleted")
+        next(button for button in app.button if button.key == f"restore-item-{item.id}").click().run()
+        self.assertEqual(store.get_saved_item(item.id).status, "active")
+
+    def test_calendar_event_can_be_edited_deleted_and_restored(self) -> None:
+        app = AppTest.from_file("app.py").run()
+        app.chat_input[0].set_value("/event 2026-09-15 | Submit report").run()
+        store = CaptureStore(os.environ["CAPTUREFLOW_DATABASE_PATH"])
+        store.initialize()
+        event = store.list_calendar_events()[0]
+
+        self.open_page(app, "Calendar")
+        next(field for field in app.text_input if field.key == f"event-title-{event.id}").set_value(
+            "Submit final report"
+        ).run()
+        next(button for button in app.button if button.key == f"save-event-{event.id}").click().run()
+        self.assertEqual(store.get_calendar_event(event.id).title, "Submit final report")
+        next(button for button in app.button if button.key == f"delete-event-{event.id}").click().run()
+        self.assertEqual(store.get_calendar_event(event.id).status, "deleted")
+        next(button for button in app.button if button.key == f"restore-event-{event.id}").click().run()
+        self.assertEqual(store.get_calendar_event(event.id).status, "active")
+
+    def test_chat_operation_can_be_undone_inline(self) -> None:
+        app = AppTest.from_file("app.py").run()
+        app.chat_input[0].set_value("/idea Test the import path.").run()
+        store = CaptureStore(os.environ["CAPTUREFLOW_DATABASE_PATH"])
+        store.initialize()
+        message = next(message for message in store.list_messages(store.list_conversations()[0].id) if message.role == "user")
+        operation = store.list_tool_operations(message.id)[0]
+
+        next(button for button in app.button if button.key == f"undo-operation-{operation.id}").click().run()
+        self.assertEqual(store.get_tool_operation(operation.id).status, "undone")
+        self.assertEqual(store.get_saved_item(operation.result["item_id"]).status, "deleted")

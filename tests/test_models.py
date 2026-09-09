@@ -1,8 +1,18 @@
 import unittest
+from datetime import date, datetime, timezone
 
 from pydantic import ValidationError
 
-from captureflow.models import Capture, Conversation, MAX_CAPTURE_CHARACTERS
+from captureflow.models import (
+    CalendarEvent,
+    Capture,
+    Conversation,
+    MAX_CAPTURE_CHARACTERS,
+    Message,
+    PendingClarification,
+    SavedItem,
+    ToolOperation,
+)
 
 
 class ModelTests(unittest.TestCase):
@@ -20,4 +30,72 @@ class ModelTests(unittest.TestCase):
             Capture(
                 conversation_id="conversation-1",
                 source_text="x" * (MAX_CAPTURE_CHARACTERS + 1),
+            )
+
+    def test_blank_message_is_invalid(self) -> None:
+        with self.assertRaises(ValidationError):
+            Message(conversation_id="conversation-1", role="user", content="   ")
+
+    def test_calendar_event_shape_matches_all_day_flag(self) -> None:
+        all_day = CalendarEvent(
+            conversation_id="conversation-1",
+            title="Submit report",
+            source_message_id="message-1",
+            source_quote="Submit the report on September 15.",
+            start_at=date(2026, 9, 15),
+            all_day=True,
+            timezone="America/Vancouver",
+        )
+        timed = CalendarEvent(
+            conversation_id="conversation-1",
+            title="Review results",
+            source_message_id="message-1",
+            source_quote="Review the results at 3 PM.",
+            start_at=datetime(2026, 9, 15, 15, tzinfo=timezone.utc),
+            all_day=False,
+            timezone="America/Vancouver",
+        )
+
+        self.assertIs(type(all_day.start_at), date)
+        self.assertIsInstance(timed.start_at, datetime)
+        with self.assertRaises(ValidationError):
+            CalendarEvent(
+                conversation_id="conversation-1",
+                title="Invalid",
+                source_message_id="message-1",
+                source_quote="Invalid",
+                start_at=date(2026, 9, 15),
+                all_day=False,
+                timezone="America/Vancouver",
+            )
+
+    def test_saved_item_rejects_blank_content(self) -> None:
+        with self.assertRaises(ValidationError):
+            SavedItem(
+                conversation_id="conversation-1",
+                kind="note",
+                content=" ",
+                source_message_id="message-1",
+                source_quote="Remember this.",
+            )
+
+    def test_failed_tool_operation_requires_error(self) -> None:
+        with self.assertRaises(ValidationError):
+            ToolOperation(
+                id="operation-1",
+                source_message_id="message-1",
+                action_index=0,
+                tool_name="save_note",
+                request={"content": "Remember this."},
+                status="failed",
+            )
+
+    def test_resolved_clarification_requires_resolution_time(self) -> None:
+        with self.assertRaises(ValidationError):
+            PendingClarification(
+                conversation_id="conversation-1",
+                source_message_id="message-1",
+                assistant_message_id="message-2",
+                original_action={"title": "Submit report"},
+                status="resolved",
             )

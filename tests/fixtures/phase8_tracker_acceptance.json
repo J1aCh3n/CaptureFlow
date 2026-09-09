@@ -1,0 +1,50 @@
+{
+  "protocol": {
+    "database_seed": "captureflow-phase8-self-tracker",
+    "timezone": "America/Vancouver",
+    "live_model": "record at execution time",
+    "prompt_revision": "record the checked-out commit at execution time",
+    "result": "not_run_requires_explicit_api_cost_approval"
+  },
+  "cases": [
+    {
+      "name": "task_create_and_follow_up_completion",
+      "input": "Track a task: finish Phase 8 acceptance.",
+      "follow_up": "That task is complete."
+    },
+    {
+      "name": "decision_rationale_and_supersession",
+      "input": "Decision: keep SQLite. Rationale: this is a local single-user MVP.",
+      "follow_up": "Replace that decision: use SQLite FTS5 before any vector store."
+    },
+    {
+      "name": "blocker_create_and_resolution",
+      "input": "Blocker: do not run paid live acceptance without approval.",
+      "follow_up": "The approval blocker is resolved."
+    },
+    {
+      "name": "cross_conversation_current_status",
+      "input": "现在做到哪里了？"
+    },
+    {
+      "name": "cross_conversation_history",
+      "input": "Why did we keep SQLite?"
+    },
+    {
+      "name": "deterministic_inaccurate_record_correction",
+      "input": "Incorrect deployment claim."
+    },
+    {
+      "name": "casual_turn_no_record",
+      "input": "Thanks for the update."
+    },
+    {
+      "name": "two_project_isolation",
+      "input": "What is the status of the other project?"
+    },
+    {
+      "name": "restart_prepared_transition",
+      "input": "Resume the prepared local tracker change."
+    }
+  ]
+}

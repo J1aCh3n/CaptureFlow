@@ -1,0 +1,27 @@
+[
+  {
+    "name": "current_status",
+    "query": "现在做到哪里了？",
+    "mode": "current",
+    "expected_record_ids": [
+      "task-phase-seven",
+      "decision-sqlite",
+      "constraint-local",
+      "question-evaluation",
+      "blocker-live-run",
+      "milestone-phase-six"
+    ]
+  },
+  {
+    "name": "sqlite_decision_why",
+    "query": "Why did we choose SQLite?",
+    "mode": "history",
+    "expected_record_ids": ["decision-sqlite"]
+  },
+  {
+    "name": "old_database_decision",
+    "query": "What was the old database decision?",
+    "mode": "history",
+    "expected_record_ids": ["decision-old-database"]
+  }
+]

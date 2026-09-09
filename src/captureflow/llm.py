@@ -6,7 +6,18 @@ from typing import Any, Protocol, TypeVar
 from openai import OpenAI
 from pydantic import BaseModel, ValidationError
 
-from .models import CapturePlan, GroundingReport, MemoryAgentDraft, MemoryItem, OrganizerDraft
+from .models import (
+    CapturePlan,
+    GroundingReport,
+    MemoryAgentDraft,
+    MemoryItem,
+    OrganizerDraft,
+    Project,
+    ProjectAnswerDecision,
+    ProjectConversationDecision,
+    ProjectTrackerDecision,
+    TurnDecision,
+)
 
 
 class ModelError(RuntimeError):
@@ -48,11 +59,62 @@ class PhaseThreeModel(PhaseTwoModel, MemoryAgentModel, Protocol):
     """The bounded Phase 2 and Phase 3 model surface."""
 
 
+class TurnRouterModel(Protocol):
+    def route_turn(
+        self,
+        user_message: str,
+        reference_date: str,
+        timezone: str,
+        clarification_context: dict | None = None,
+    ) -> TurnDecision: ...
+
+    def repair_turn(
+        self,
+        user_message: str,
+        reference_date: str,
+        timezone: str,
+        invalid_decision: TurnDecision | str,
+        validation_error: str,
+        clarification_context: dict | None = None,
+    ) -> TurnDecision: ...
+
+
+class ProjectConversationModel(Protocol):
+    def respond_to_project_turn(
+        self,
+        project: Project,
+        recent_messages: list[dict[str, str]],
+        context_truncated: bool,
+    ) -> ProjectConversationDecision: ...
+
+
+class ProjectTrackerModel(Protocol):
+    def propose_project_changes(
+        self,
+        project: Project,
+        recent_messages: list[dict[str, str]],
+        candidate_records: list[dict[str, str]],
+        context_truncated: bool,
+    ) -> ProjectTrackerDecision: ...
+
+
+class ProjectRetrievalModel(Protocol):
+    def answer_project_query(
+        self,
+        project: Project,
+        recent_messages: list[dict[str, str]],
+        retrieved_records: list[dict],
+        answer_kind: str,
+        context_truncated: bool,
+    ) -> ProjectAnswerDecision: ...
+
+
 @dataclass(frozen=True)
 class ModelSettings:
     api_key: str
     model: str
     base_url: str | None = None
+    timeout_seconds: float = 30
 
     @classmethod
     def from_environment(cls) -> "ModelSettings":
@@ -60,7 +122,18 @@ class ModelSettings:
         model = os.getenv("CAPTUREFLOW_MODEL")
         if not api_key or not model:
             raise ModelError("Set CAPTUREFLOW_API_KEY and CAPTUREFLOW_MODEL before analyzing.")
-        return cls(api_key=api_key, model=model, base_url=os.getenv("CAPTUREFLOW_BASE_URL"))
+        try:
+            timeout_seconds = float(os.getenv("CAPTUREFLOW_MODEL_TIMEOUT_SECONDS", "30"))
+        except ValueError as error:
+            raise ModelError("CAPTUREFLOW_MODEL_TIMEOUT_SECONDS must be numeric.") from error
+        if timeout_seconds <= 0:
+            raise ModelError("CAPTUREFLOW_MODEL_TIMEOUT_SECONDS must be positive.")
+        return cls(
+            api_key=api_key,
+            model=model,
+            base_url=os.getenv("CAPTUREFLOW_BASE_URL"),
+            timeout_seconds=timeout_seconds,
+        )
 
 
 Schema = TypeVar("Schema", bound=BaseModel)
@@ -109,6 +182,172 @@ class OpenAICompatibleModel:
                 "save it as a manual research task instead."
             ),
             payload={"source_text": source_text},
+        )
+
+    def route_turn(
+        self,
+        user_message: str,
+        reference_date: str,
+        timezone: str,
+        clarification_context: dict | None = None,
+    ) -> TurnDecision:
+        return self._complete(
+            TurnDecision,
+            system=(
+                "You are CaptureFlow's V2 TurnRouter. Return JSON only. This is not a "
+                "general chatbot. Choose execute only for explicit local calendar events, "
+                "ideas, or notes. Choose reply_only for unsupported/general conversation "
+                "and keep the reply short. An execute action needs content and an exact, "
+                "continuous source_quote copied from the user message except normalized "
+                "whitespace. create_event also needs an explicit date_expression copied "
+                "from the message; optional time_expression must be an explicit HH:MM or "
+                "H:MM AM/PM phrase. An event lacking a date must choose clarify with no "
+                "actions, one concise clarification_question, and pending_action describing "
+                "the event with no date_expression. save_idea and save_note never include "
+                "date_expression or time_expression. Do not make more than three independent "
+                "actions, do not infer details, and never include private reasoning."
+            ),
+            payload={
+                "user_message": user_message,
+                "reference_date": reference_date,
+                "timezone": timezone,
+                "clarification_context": clarification_context,
+            },
+        )
+
+    def repair_turn(
+        self,
+        user_message: str,
+        reference_date: str,
+        timezone: str,
+        invalid_decision: TurnDecision | str,
+        validation_error: str,
+        clarification_context: dict | None = None,
+    ) -> TurnDecision:
+        invalid_payload = (
+            invalid_decision.model_dump(mode="json")
+            if isinstance(invalid_decision, TurnDecision)
+            else invalid_decision
+        )
+        return self._complete(
+            TurnDecision,
+            system=(
+                "You are CaptureFlow's V2 TurnRouter repair pass. Return corrected JSON only. "
+                "Use only execute, clarify, or reply_only. Preserve exact source quotes and "
+                "never invent content, dates, times, or unsupported actions."
+            ),
+            payload={
+                "user_message": user_message,
+                "reference_date": reference_date,
+                "timezone": timezone,
+                "clarification_context": clarification_context,
+                "invalid_decision": invalid_payload,
+                "validation_error": validation_error,
+            },
+        )
+
+    def respond_to_project_turn(
+        self,
+        project: Project,
+        recent_messages: list[dict[str, str]],
+        context_truncated: bool,
+    ) -> ProjectConversationDecision:
+        return self._complete(
+            ProjectConversationDecision,
+            system=(
+                "You are CaptureFlow's Phase 5 project conversation responder. Return JSON only. "
+                "This is not a general chatbot and you cannot create, update, complete, delete, "
+                "or otherwise change project tracker records in this phase. Use only the supplied "
+                "project and recent conversation messages. Classify the current user turn as one of "
+                "new_subject, follow_up, correction, cancellation, clarification_answer, or clarify. "
+                "Use clarify only when a necessary referent is absent or ambiguous; then ask one "
+                "concise clarification_question. For every other kind, clarification_question must "
+                "be null. Reply concisely about the ongoing project discussion, do not claim memory "
+                "outside the supplied messages, do not invent tracker state, and do not propose tools "
+                "or actions. If context_truncated is true, do not imply that you saw older history."
+            ),
+            payload={
+                "project": {
+                    "id": project.id,
+                    "name": project.name,
+                    "description": project.description,
+                },
+                "recent_messages": recent_messages,
+                "context_truncated": context_truncated,
+            },
+        )
+
+    def propose_project_changes(
+        self,
+        project: Project,
+        recent_messages: list[dict[str, str]],
+        candidate_records: list[dict[str, str]],
+        context_truncated: bool,
+    ) -> ProjectTrackerDecision:
+        return self._complete(
+            ProjectTrackerDecision,
+            system=(
+                "You are CaptureFlow's Phase 6 project tracker proposer. Return JSON only. "
+                "You do not write to SQLite or execute tools; you only propose at most three "
+                "changes for deterministic local validation. Use the supplied project, recent "
+                "conversation messages, and candidate_records only. A no-change turn has an empty "
+                "changes list. Allowed changes are: create_record with kind, content, and an exact "
+                "source_quote from the current user message; transition_record with one exact "
+                "candidate target_record_id and target_state completed or resolved; or "
+                "supersede_record with an exact active candidate decision/constraint ID, matching "
+                "kind, replacement content, and exact source_quote. Never invent a target ID, "
+                "record state, project fact, rationale, or source quote. Do not propose a tracker "
+                "change for small talk, questions, acknowledgements, uncertain referents, or a "
+                "credential. Classify the turn as new_subject, follow_up, correction, cancellation, "
+                "clarification_answer, or clarify. A clarify turn needs one concise question and "
+                "must have no changes. Reply concisely; do not claim that a proposed change has "
+                "already been applied. If context_truncated is true, do not imply older history was seen."
+            ),
+            payload={
+                "project": {
+                    "id": project.id,
+                    "name": project.name,
+                    "description": project.description,
+                },
+                "recent_messages": recent_messages,
+                "candidate_records": candidate_records,
+                "context_truncated": context_truncated,
+            },
+        )
+
+    def answer_project_query(
+        self,
+        project: Project,
+        recent_messages: list[dict[str, str]],
+        retrieved_records: list[dict],
+        answer_kind: str,
+        context_truncated: bool,
+    ) -> ProjectAnswerDecision:
+        return self._complete(
+            ProjectAnswerDecision,
+            system=(
+                "You are CaptureFlow's Phase 7 project retrieval responder. Return JSON only. "
+                "Answer only from the supplied project, recent conversation messages, and "
+                "retrieved_records. This is not a general chatbot: do not create, edit, complete, "
+                "or propose tracker changes. The answer_kind is current_status or history. State "
+                "only facts supported by retrieved_records and include one to six exact "
+                "supporting_record_ids from that list. Do not invent IDs, sources, project facts, "
+                "or external information. For current_status, do not treat a superseded record as "
+                "current. For history, explain the historical record when present. If the records "
+                "are insufficient, say so rather than filling the gap. If context_truncated is true, "
+                "do not imply that older conversation messages were seen."
+            ),
+            payload={
+                "project": {
+                    "id": project.id,
+                    "name": project.name,
+                    "description": project.description,
+                },
+                "recent_messages": recent_messages,
+                "retrieved_records": retrieved_records,
+                "answer_kind": answer_kind,
+                "context_truncated": context_truncated,
+            },
         )
 
     def propose_memories(
@@ -222,6 +461,7 @@ class OpenAICompatibleModel:
         try:
             response = self.client.chat.completions.create(
                 model=self.settings.model,
+                timeout=self.settings.timeout_seconds,
                 response_format={"type": "json_object"},
                 messages=[
                     {"role": "system", "content": system},

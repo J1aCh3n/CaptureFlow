@@ -1,0 +1,15 @@
+{
+  "reference_date": "2026-09-08",
+  "meeting": {
+    "event_id": "workflow-meeting",
+    "title": "Workflow meeting",
+    "date": "2026-09-09",
+    "note_id": "workflow-meeting-note",
+    "note": "会议用于对异步收集的点子投票、合并和深度优化。",
+    "query": "我明天的会议要做什么？"
+  },
+  "required_reply_fragments": [
+    "2026-09-09",
+    "No explicit personal preparation task"
+  ]
+}
