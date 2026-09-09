@@ -391,10 +391,15 @@ class OpenAICompatibleModel:
                 "Preparation suggestions are optional inferences, not stored tasks or confirmed "
                 "requirements; do not invent an explicit preparation task. Do not state a date or "
                 "time in a summary point: CaptureFlow renders exact Calendar time locally after "
-                "validation. If local evidence does not establish the requested fact, use "
-                "insufficient_context and identify the missing information. If multiple Calendar "
-                "events plausibly match a singular question, use clarify with one concise question "
-                "instead of arbitrarily selecting one."
+                "validation. The supplied records can establish only part of a multi-part question. "
+                "When any supplied record supports any requested detail, use answer, select that "
+                "record, state only the supported detail, and list each unsupported requested detail "
+                "in missing_information. A stored meeting purpose, content, or process establishes "
+                "agenda coverage for this purpose; do not list agenda as missing in that case. Use "
+                "insufficient_context only when none of the supplied records supports any requested "
+                "detail. If multiple Calendar events plausibly match "
+                "a singular question, use clarify with one concise question instead of arbitrarily "
+                "selecting one."
             ),
             payload={
                 "user_message": user_message,
@@ -423,8 +428,11 @@ class OpenAICompatibleModel:
             system=(
                 "You are CaptureFlow's Phase 9.1 local-context repair pass. Return corrected "
                 "JSON only. Use only supplied source IDs. Every answer point and suggestion must "
-                "cite selected source IDs, never invent a time or an unrecorded preparation task, "
-                "and use clarify rather than arbitrarily selecting among multiple plausible events."
+                "cite selected source IDs. When any supplied record supports part of the question, "
+                "return answer with that supported part and list only the remaining gaps in "
+                "missing_information; do not discard selected evidence as insufficient_context. "
+                "Never invent a time or an unrecorded preparation task, and use clarify rather "
+                "than arbitrarily selecting among multiple plausible events."
             ),
             payload={
                 "user_message": user_message,

@@ -212,6 +212,58 @@ class LocalContextServiceTests(unittest.TestCase):
         self.assertIn(self.note.content, turn.assistant_message.content)
         self.assertEqual([call[0] for call in model.calls], ["answer"])
 
+    def test_partial_local_evidence_is_repaired_into_an_answer(self) -> None:
+        self.store.set_calendar_event_status(self.event.id, "deleted")
+        insufficient = {
+            "outcome": "insufficient_context",
+            "selected_event_ids": [],
+            "selected_item_ids": [],
+            "summary_points": [],
+            "preparation_suggestions": [],
+            "missing_information": ["time", "agenda", "preparation"],
+            "clarification_question": None,
+        }
+        repaired = {
+            "outcome": "answer",
+            "selected_event_ids": [],
+            "selected_item_ids": [self.note.id],
+            "summary_points": [
+                {
+                    "text": "The meeting uses voting and idea merging.",
+                    "source_ids": [self.note.id],
+                }
+            ],
+            "preparation_suggestions": [
+                {
+                    "text": "Bring existing ideas ready for voting and merging.",
+                    "based_on_source_ids": [self.note.id],
+                }
+            ],
+            "missing_information": ["time"],
+            "clarification_question": None,
+        }
+        model = ScriptedLocalContextModel([insufficient], [repaired])
+        service = LocalContextService(
+            self.store,
+            reference_date=date(2026, 9, 8),
+            timezone="America/Vancouver",
+            model=model,
+        )
+
+        turn = service.submit(
+            self.later.id,
+            "明天的工作流会议几点开？会议的目的是什么？我应该准备什么？",
+        )
+
+        self.assertEqual(turn.outcome, "grounded_local_context_model")
+        self.assertEqual(turn.model_calls, 2)
+        self.assertFalse(turn.fallback_used)
+        self.assertEqual([source.id for source in turn.sources], [self.note.id])
+        self.assertIn("The meeting uses voting and idea merging.", turn.assistant_message.content)
+        self.assertIn("Bring existing ideas ready", turn.assistant_message.content)
+        self.assertIn("Not stored locally: time.", turn.assistant_message.content)
+        self.assertEqual([call[0] for call in model.calls], ["answer", "repair"])
+
     def test_model_time_text_gets_repaired_so_python_is_the_time_authority(self) -> None:
         invalid = {
             "outcome": "answer",

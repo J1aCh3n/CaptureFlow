@@ -309,6 +309,12 @@ class LocalContextService:
         if any(_contains_calendar_time_or_date(point.text) for point in decision.summary_points):
             raise ValueError("local-context summary must leave Calendar date and time to local rendering")
 
+        if decision.outcome == "insufficient_context":
+            raise ValueError(
+                "selected local evidence requires a partial answer; list unsupported details in "
+                "missing_information instead"
+            )
+
         target_date = _query_date(query, self.reference_date, self.timezone)
         if target_date is not None and any(
             _event_date(events[source_id]) != target_date
