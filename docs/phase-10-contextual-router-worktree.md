@@ -15,11 +15,10 @@ agent tool use.
 
 ### 0. Freeze the contract and baseline
 
-- Read the current V2 models, router, storage, migrations, UI, and tests.
-- Record the current deterministic-test count and an isolated live failure
-  fixture for the two reported calendar inputs.
-- Define acceptance examples for calendar create, calendar update, task,
-  retrieval answer, and clarification.
+- Complete. Baseline and acceptance contract: `docs/phase-10-baseline.md`.
+- Executable current-route fixture:
+  `tests/fixtures/phase10_contextual_router_cases.json`.
+- No API call or production-code change belongs to this step.
 
 Exit gate: no production change; the failure cases are executable tests before
 the implementation begins.
@@ -149,4 +148,3 @@ Commit: `docs: record phase 10 live acceptance`
 - Responses API migration.
 - Semantic/vector retrieval overhaul.
 - More than one model call for ordinary routing/extraction.
-
