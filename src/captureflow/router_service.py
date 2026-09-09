@@ -271,9 +271,15 @@ class BoundedChatService:
                         id=_stable_id(user_message.id, f"event:{operation.action_index}"),
                         conversation_id=user_message.conversation_id,
                         title=request["title"],
+                        description=request.get("description"),
                         source_message_id=user_message.id,
                         source_quote=request["source_quote"],
                         start_at=start_at,
+                        end_at=(
+                            None
+                            if request.get("end_at") is None
+                            else datetime.fromisoformat(request["end_at"])
+                        ),
                         all_day=request["all_day"],
                         timezone=request["timezone"],
                         created_at=user_message.created_at,
@@ -324,6 +330,7 @@ class BoundedChatService:
             if resolution.status != "resolved" or resolution.resolved_date is None:
                 return "Which exact date should I use for this local event?"
             start_at: date | datetime = resolution.resolved_date
+            end_at: datetime | None = None
             all_day = True
             if action.time_expression:
                 parsed_time = _parse_time(action.time_expression)
@@ -333,13 +340,26 @@ class BoundedChatService:
                     resolution.resolved_date, parsed_time, tzinfo=ZoneInfo(self.timezone)
                 )
                 all_day = False
+                if action.end_time_expression:
+                    parsed_end_time = _parse_time(action.end_time_expression)
+                    if parsed_end_time is None:
+                        return "Which exact end time should I use (for example, 16:30)?"
+                    end_at = datetime.combine(
+                        resolution.resolved_date,
+                        parsed_end_time,
+                        tzinfo=ZoneInfo(self.timezone),
+                    )
+                    if end_at <= start_at:
+                        return "The event end time must be after its start time."
             event = CalendarEvent(
                 id=_stable_id(user_message.id, f"event:{index}"),
                 conversation_id=user_message.conversation_id,
                 title=action.content,
+                description=action.description,
                 source_message_id=user_message.id,
                 source_quote=action.source_quote,
                 start_at=start_at,
+                end_at=end_at,
                 all_day=all_day,
                 timezone=self.timezone,
                 created_at=user_message.created_at,
@@ -347,10 +367,13 @@ class BoundedChatService:
             )
             request = {
                 "title": event.title,
+                "description": event.description,
                 "source_quote": event.source_quote,
                 "date_expression": action.date_expression,
                 "time_expression": action.time_expression,
+                "end_time_expression": action.end_time_expression,
                 "start_at": event.start_at.isoformat(),
+                "end_at": None if event.end_at is None else event.end_at.isoformat(),
                 "all_day": event.all_day,
                 "timezone": event.timezone,
             }
@@ -445,7 +468,13 @@ class BoundedChatService:
         decision = TurnDecision(
             route="clarify",
             clarification_question=question,
-            pending_action=action.model_copy(update={"date_expression": None, "time_expression": None}),
+            pending_action=action.model_copy(
+                update={
+                    "date_expression": None,
+                    "time_expression": None,
+                    "end_time_expression": None,
+                }
+            ),
         )
         return self._save_clarification(
             user_message, decision, model_calls, model_seconds, repair_used
@@ -523,10 +552,26 @@ class BoundedChatService:
             quote = _normalize(action.source_quote)
             if not quote or (quote not in normalized_message and quote != context_quote):
                 raise ValueError("every source quote must occur in the current message or pending source")
+            if action.description:
+                description = _normalize(action.description)
+                if description not in normalized_message and description not in context_quote:
+                    raise ValueError("an event description must occur in its current or pending source")
             if action.action == "create_event" and decision.route == "execute" and not action.date_expression:
                 raise ValueError("an event needs a date or clarification")
-            if action.action != "create_event" and (action.date_expression or action.time_expression):
-                raise ValueError("ideas and notes cannot use the date tool")
+            if action.action == "create_event" and action.end_time_expression:
+                if not action.time_expression:
+                    raise ValueError("an event end time requires a start time")
+                start_time = _parse_time(action.time_expression)
+                end_time = _parse_time(action.end_time_expression)
+                if start_time is None or end_time is None or end_time <= start_time:
+                    raise ValueError("an event needs a valid end time after its start time")
+            if action.action != "create_event" and (
+                action.description
+                or action.date_expression
+                or action.time_expression
+                or action.end_time_expression
+            ):
+                raise ValueError("ideas and notes cannot use event fields")
             identity = (action.action, _normalize(action.content))
             if identity in seen:
                 raise ValueError("duplicate actions are not allowed in one turn")

@@ -23,6 +23,17 @@ _WEEKDAYS = {
     "sunday": 6,
 }
 
+_CHINESE_WEEKDAYS = {
+    "一": 0,
+    "二": 1,
+    "三": 2,
+    "四": 3,
+    "五": 4,
+    "六": 5,
+    "日": 6,
+    "天": 6,
+}
+
 def resolve_relative_date(expression: str, reference_date: date, timezone: str) -> DateResolution:
     """Resolve a small, explicit v0 vocabulary without guessing bare weekdays."""
 
@@ -44,6 +55,13 @@ def resolve_relative_date(expression: str, reference_date: date, timezone: str) 
             resolved_date=reference_date + timedelta(days=1),
             explanation="Resolved relative to the supplied reference date.",
         )
+    if normalized == "the day after tomorrow":
+        return DateResolution(
+            **base,
+            status="resolved",
+            resolved_date=reference_date + timedelta(days=2),
+            explanation="Resolved relative to the supplied reference date.",
+        )
     if expression.strip() == "今天":
         return DateResolution(
             **base,
@@ -57,6 +75,34 @@ def resolve_relative_date(expression: str, reference_date: date, timezone: str) 
             status="resolved",
             resolved_date=reference_date + timedelta(days=1),
             explanation="根据提供的参考日期解析。",
+        )
+    if expression.strip() == "后天":
+        return DateResolution(
+            **base,
+            status="resolved",
+            resolved_date=reference_date + timedelta(days=2),
+            explanation="根据提供的参考日期解析。",
+        )
+    if expression.strip() == "大后天":
+        return DateResolution(
+            **base,
+            status="resolved",
+            resolved_date=reference_date + timedelta(days=3),
+            explanation="根据提供的参考日期解析。",
+        )
+    if chinese_date := _parse_chinese_date(expression.strip()):
+        candidate, stated_weekday = chinese_date
+        if stated_weekday is not None and candidate.weekday() != stated_weekday:
+            return DateResolution(
+                **base,
+                status="ambiguous",
+                explanation="日期与括号中的星期不一致，请确认具体日期。",
+            )
+        return DateResolution(
+            **base,
+            status="resolved",
+            resolved_date=candidate,
+            explanation="解析了明确的中文年月日。",
         )
     if iso_date := _parse_iso_date(normalized):
         return DateResolution(
@@ -100,8 +146,8 @@ def resolve_relative_date(expression: str, reference_date: date, timezone: str) 
         **base,
         status="unsupported",
         explanation=(
-            "This Phase 2 date tool supports today, tomorrow, ISO dates, explicit next "
-            "weekdays, and reports bare English or Chinese weekdays as ambiguous."
+            "This date tool supports bounded relative dates, ISO or Chinese full dates, "
+            "explicit next weekdays, and reports bare weekdays as ambiguous."
         ),
     )
 
@@ -128,3 +174,20 @@ def _parse_month_day(value: str, reference_date: date) -> date | None:
         except ValueError:
             return None
     return candidate
+
+
+def _parse_chinese_date(value: str) -> tuple[date, int | None] | None:
+    match = re.fullmatch(
+        r"(\d{4})年(\d{1,2})月(\d{1,2})日"
+        r"(?:\s*[（(](?:周|星期|礼拜)([一二三四五六日天])[）)])?",
+        value,
+    )
+    if match is None:
+        return None
+    year, month, day, weekday_text = match.groups()
+    try:
+        candidate = date(int(year), int(month), int(day))
+    except ValueError:
+        return None
+    stated_weekday = None if weekday_text is None else _CHINESE_WEEKDAYS[weekday_text]
+    return candidate, stated_weekday

@@ -1,7 +1,7 @@
 import json
 import tempfile
 import unittest
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 from captureflow.llm import ModelError
@@ -115,6 +115,39 @@ class LocalContextServiceTests(unittest.TestCase):
             [source.reference.source_id for source in self.store.list_local_context_answer_sources(turn.assistant_message.id)],
             [self.event.id, self.note.id],
         )
+
+    def test_event_description_range_and_day_after_tomorrow_are_retrievable(self) -> None:
+        source = self.store.save_message(
+            Message(
+                id="range-source-message",
+                conversation_id=self.first.id,
+                role="user",
+                content="后天下午四点到五点有组会，所有人带好工牌。",
+            )
+        )
+        event = self.store.save_calendar_event(
+            CalendarEvent(
+                id="range-event",
+                conversation_id=self.first.id,
+                title="组会",
+                description="所有人带好工牌。",
+                source_message_id=source.id,
+                source_quote=source.content,
+                start_at=datetime.fromisoformat("2026-09-10T16:00:00-07:00"),
+                end_at=datetime.fromisoformat("2026-09-10T17:00:00-07:00"),
+                all_day=False,
+                timezone="America/Vancouver",
+            )
+        )
+
+        turn = self.service.submit(self.later.id, "我后天有什么安排？")
+        payload = self.service._event_for_model(event)
+
+        self.assertEqual([source.id for source in turn.sources], [event.id])
+        self.assertIn(event.description, turn.assistant_message.content)
+        self.assertIn(event.end_at.isoformat(), turn.assistant_message.content)
+        self.assertEqual(payload["description"], event.description)
+        self.assertEqual(payload["end_at"], event.end_at.isoformat())
 
     def test_deleted_event_and_unrelated_notes_are_not_returned(self) -> None:
         unrelated = self.store.save_saved_item(

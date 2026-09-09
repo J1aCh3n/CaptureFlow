@@ -33,13 +33,22 @@ class ScriptedTurnRouter:
         return self.repairs.pop(0)
 
 
-def event(content, quote, date_expression, time_expression=None):
+def event(
+    content,
+    quote,
+    date_expression,
+    time_expression=None,
+    description=None,
+    end_time_expression=None,
+):
     return ProposedAction(
         action="create_event",
         content=content,
+        description=description,
         source_quote=quote,
         date_expression=date_expression,
         time_expression=time_expression,
+        end_time_expression=end_time_expression,
     )
 
 
@@ -107,6 +116,77 @@ class BoundedChatServiceTests(unittest.TestCase):
 
             self.assertFalse(saved.all_day)
             self.assertEqual((saved.start_at.hour, saved.start_at.minute), (hour, minute))
+
+    def test_description_and_explicit_time_range_are_preserved(self) -> None:
+        text = (
+            "仿真环境与基准测试同步\n"
+            "会议时间：2026年9月11日 (周五) 10:30 - 11:30\n"
+            "会议主题：NVIDIA Isaac Sim 仿真环境进度汇报，重点讨论柔性线缆操作的"
+            "打结与理线基准测试数据收集情况。"
+        )
+        description = (
+            "NVIDIA Isaac Sim 仿真环境进度汇报，重点讨论柔性线缆操作的"
+            "打结与理线基准测试数据收集情况。"
+        )
+        router = ScriptedTurnRouter(
+            [
+                TurnDecision(
+                    route="execute",
+                    actions=[
+                        event(
+                            "仿真环境与基准测试同步",
+                            text,
+                            "2026年9月11日 (周五)",
+                            "10:30",
+                            description,
+                            "11:30",
+                        )
+                    ],
+                )
+            ]
+        )
+
+        turn = self.service(router).submit(self.conversation.id, text, "meeting-range")
+        saved = self.store.get_calendar_event(turn.operations[0].result["event_id"])
+
+        self.assertEqual(saved.description, description)
+        self.assertEqual((saved.start_at.hour, saved.start_at.minute), (10, 30))
+        self.assertEqual((saved.end_at.hour, saved.end_at.minute), (11, 30))
+        self.assertEqual(saved.source_quote, text)
+
+    def test_day_after_tomorrow_meeting_keeps_attendance_details(self) -> None:
+        text = "后天下午四点有组会，所有人都要按时到场，并带好工牌"
+        description = "所有人都要按时到场，并带好工牌"
+        router = ScriptedTurnRouter(
+            [
+                TurnDecision(
+                    route="execute",
+                    actions=[
+                        event("组会", text, "后天", "下午四点", description)
+                    ],
+                )
+            ]
+        )
+
+        turn = self.service(router).submit(self.conversation.id, text, "group-meeting")
+        saved = self.store.get_calendar_event(turn.operations[0].result["event_id"])
+
+        self.assertEqual(saved.start_at.date(), date(2026, 9, 10))
+        self.assertEqual((saved.start_at.hour, saved.start_at.minute), (16, 0))
+        self.assertEqual(saved.description, description)
+
+    def test_event_description_must_come_from_the_source(self) -> None:
+        text = "明天下午两点有组会。"
+        invalid = TurnDecision(
+            route="execute",
+            actions=[event("组会", text, "明天", "下午两点", "携带工牌")],
+        )
+        router = ScriptedTurnRouter([invalid], [invalid])
+
+        turn = self.service(router).submit(self.conversation.id, text, "invented-description")
+
+        self.assertEqual(self.store.list_calendar_events(), [])
+        self.assertEqual(turn.diagnostics.outcome, "repair_invalid")
 
     def test_ambiguous_chinese_time_does_not_create_an_event(self) -> None:
         text = "明天两点开会。"
@@ -291,3 +371,45 @@ class BoundedChatServiceTests(unittest.TestCase):
         self.assertEqual(len(router.calls), 0)
         self.assertEqual(turn.diagnostics.outcome, "resumed")
         self.assertEqual(turn.diagnostics.model_seconds, 0)
+
+    def test_prepared_calendar_range_resumes_with_description(self) -> None:
+        source = self.store.save_message(
+            Message(
+                id="prepared-calendar-message",
+                conversation_id=self.conversation.id,
+                role="user",
+                content="2026-09-11 10:30 - 11:30 benchmark meeting.",
+            )
+        )
+        self.store.save_tool_operation(
+            ToolOperation(
+                id="prepared-calendar-operation",
+                source_message_id=source.id,
+                action_index=0,
+                tool_name="create_local_event",
+                request={
+                    "title": "Benchmark meeting",
+                    "description": "benchmark meeting",
+                    "source_quote": source.content,
+                    "start_at": "2026-09-11T10:30:00-07:00",
+                    "end_at": "2026-09-11T11:30:00-07:00",
+                    "all_day": False,
+                    "timezone": "America/Vancouver",
+                },
+                status="prepared",
+            )
+        )
+
+        restarted = CaptureStore(self.store.database_path)
+        restarted.initialize()
+        turn = BoundedChatService(
+            restarted,
+            ScriptedTurnRouter([], fail=True),
+            reference_date=date(2026, 9, 8),
+            timezone="America/Vancouver",
+        ).submit(self.conversation.id, source.content, source.id)
+        saved = restarted.get_calendar_event(turn.operations[0].result["event_id"])
+
+        self.assertEqual(saved.description, "benchmark meeting")
+        self.assertEqual(saved.end_at.isoformat(), "2026-09-11T11:30:00-07:00")
+        self.assertEqual(turn.diagnostics.outcome, "resumed")

@@ -634,7 +634,12 @@ def render_calendar_page(store: CaptureStore) -> None:
                     else:
                         st.rerun()
             else:
-                st.caption(f"Timed event: {event.start_at.isoformat()}")
+                timing = event.start_at.isoformat()
+                if event.end_at is not None:
+                    timing = f"{timing} to {event.end_at.isoformat()}"
+                st.caption(f"Timed event: {timing}")
+            if event.description:
+                st.markdown(event.description)
             st.caption(f"Original chat source: {event.source_quote}")
             st.caption(f"Updated {event.updated_at.isoformat()}")
             if st.button("Delete event", key=f"delete-event-{event.id}"):
@@ -646,7 +651,12 @@ def render_calendar_page(store: CaptureStore) -> None:
         with st.expander(f"Calendar history ({len(history)})"):
             for event in history:
                 with st.container(border=True):
-                    st.write(f"{event.start_at.isoformat()} — {event.title}")
+                    timing = event.start_at.isoformat()
+                    if event.end_at is not None:
+                        timing = f"{timing} to {event.end_at.isoformat()}"
+                    st.write(f"{timing} — {event.title}")
+                    if event.description:
+                        st.markdown(event.description)
                     st.caption(f"Original chat source: {event.source_quote}")
                     if st.button("Restore event", key=f"restore-event-{event.id}"):
                         store.set_calendar_event_status(event.id, "active")

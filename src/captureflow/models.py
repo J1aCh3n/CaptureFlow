@@ -296,6 +296,7 @@ class CalendarEvent(BaseModel):
     workspace_id: str = DEFAULT_WORKSPACE_ID
     conversation_id: str
     title: str = Field(min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=4_000)
     source_message_id: str
     source_quote: str = Field(min_length=1)
     start_at: date | datetime
@@ -313,6 +314,14 @@ class CalendarEvent(BaseModel):
         if not value:
             raise ValueError("value must not be blank")
         return value
+
+    @field_validator("description")
+    @classmethod
+    def description_is_not_whitespace_when_present(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        return value or None
 
     @model_validator(mode="after")
     def date_shape_matches_event_kind(self) -> "CalendarEvent":
@@ -803,9 +812,11 @@ class ProposedAction(BaseModel):
 
     action: Literal["create_event", "save_idea", "save_note"]
     content: str = Field(min_length=1, max_length=4_000)
+    description: str | None = Field(default=None, max_length=4_000)
     source_quote: str = Field(min_length=1)
     date_expression: str | None = Field(default=None, max_length=100)
     time_expression: str | None = Field(default=None, max_length=20)
+    end_time_expression: str | None = Field(default=None, max_length=20)
 
 
 class TurnDecision(BaseModel):

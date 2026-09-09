@@ -344,6 +344,11 @@ MIGRATIONS = (
             "CREATE INDEX local_context_answer_sources_lookup ON local_context_answer_sources(source_type, source_id, assistant_message_id)",
         ),
     ),
+    Migration(
+        version=8,
+        name="v2_calendar_event_descriptions",
+        statements=("ALTER TABLE calendar_events ADD COLUMN description TEXT",),
+    ),
 )
 
 LATEST_SCHEMA_VERSION = MIGRATIONS[-1].version

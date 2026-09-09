@@ -104,6 +104,7 @@ class V2StorageTests(unittest.TestCase):
                 id="event-timed",
                 conversation_id=self.conversation.id,
                 title="Review results",
+                description="Compare simulation benchmark results.",
                 source_message_id=self.user_message.id,
                 source_quote=self.user_message.content,
                 start_at=datetime(2026, 9, 15, 15, tzinfo=timezone.utc),
@@ -113,7 +114,9 @@ class V2StorageTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(self.store.get_calendar_event(event.id), event)
+        saved = self.store.get_calendar_event(event.id)
+        self.assertEqual(saved, event)
+        self.assertEqual(saved.description, "Compare simulation benchmark results.")
 
     def test_only_one_pending_clarification_is_allowed_per_conversation(self) -> None:
         assistant = self.store.save_message(

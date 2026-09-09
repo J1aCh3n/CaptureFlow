@@ -53,7 +53,9 @@ class OpenAICompatibleModelTests(unittest.TestCase):
         self.assertIn("This is not a general chatbot", prompt)
         self.assertIn("exact, continuous source_quote", prompt)
         self.assertIn("definite first-person or subjectless statement", prompt)
-        self.assertIn("not separate notes", prompt)
+        self.assertIn("rather than creating separate notes", prompt)
+        self.assertIn("end_time_expression", prompt)
+        self.assertIn("Never invent a default duration", prompt)
 
     def test_project_responder_receives_only_bounded_project_context(self) -> None:
         completions = RecordingCompletions(

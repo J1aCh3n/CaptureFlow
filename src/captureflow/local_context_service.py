@@ -365,7 +365,11 @@ class LocalContextService:
         if target_date is not None:
             events = [event for event in events if _event_date(event) == target_date]
         else:
-            events = _rank(query, events, lambda event: f"{event.title} {event.source_quote}")
+            events = _rank(
+                query,
+                events,
+                lambda event: f"{event.title} {event.description or ''} {event.source_quote}",
+            )
 
         project = self.store.get_conversation_project(conversation_id)
         project_records: list[ProjectRecord] = []
@@ -402,6 +406,7 @@ class LocalContextService:
         return {
             "source_id": event.id,
             "title": event.title,
+            "description": event.description,
             "start_at": event.start_at.isoformat(),
             "end_at": None if event.end_at is None else event.end_at.isoformat(),
             "all_day": event.all_day,
@@ -544,11 +549,23 @@ class LocalContextService:
 
 def _query_date(query: str, reference_date: date, timezone: str) -> date | None:
     normalized = query.casefold()
-    for expression in ("明天", "tomorrow", "今天", "today"):
+    for expression in (
+        "the day after tomorrow",
+        "大后天",
+        "后天",
+        "tomorrow",
+        "明天",
+        "today",
+        "今天",
+    ):
         if expression in normalized:
             result = resolve_relative_date(expression, reference_date, timezone)
             return result.resolved_date
-    match = re.search(r"\b\d{4}-\d{2}-\d{2}\b", query)
+    match = re.search(
+        r"\b\d{4}-\d{2}-\d{2}\b|"
+        r"\d{4}年\d{1,2}月\d{1,2}日(?:\s*[（(](?:周|星期|礼拜)[一二三四五六日天][）)])?",
+        query,
+    )
     if match:
         result = resolve_relative_date(match.group(), reference_date, timezone)
         return result.resolved_date
@@ -624,7 +641,7 @@ def _format_model_reply(
 ) -> str:
     events = [source for source in sources if isinstance(source, CalendarEvent)]
     if decision.outcome == "clarify":
-        candidates = [f"- {event.start_at.isoformat()} — {event.title}" for event in events]
+        candidates = [_format_event(event) for event in events]
         prefix = "I found multiple possible local calendar events:"
         return "\n".join([prefix, *candidates, decision.clarification_question or "Which event do you mean?"])
     if decision.outcome == "insufficient_context":
@@ -636,7 +653,7 @@ def _format_model_reply(
         lines.append("No matching Calendar event is stored for the requested date or description.")
     if events:
         lines.append("Saved local calendar:")
-        lines.extend(f"- {event.start_at.isoformat()} — {event.title}" for event in events)
+        lines.extend(_format_event(event) for event in events)
     lines.append("Grounded local context:")
     lines.extend(f"- {point.text}" for point in decision.summary_points)
     if decision.preparation_suggestions:
@@ -659,7 +676,7 @@ def _format_reply(
     if events:
         heading = "I found these local calendar events:" if len(events) > 1 else "I found this local calendar event:"
         lines.append(heading)
-        lines.extend(f"- {event.start_at.isoformat()} — {event.title}" for event in events)
+        lines.extend(_format_event(event) for event in events)
     if notes:
         lines.append("Saved local note/idea context:")
         lines.extend(f"- {item.kind.title()}: {item.content}" for item in notes)
@@ -673,3 +690,13 @@ def _format_reply(
     if len(events) > 1 or len(notes) > 1:
         lines.append("If you mean one specific item, name it and I will narrow the local lookup.")
     return "\n".join(lines)
+
+
+def _format_event(event: CalendarEvent) -> str:
+    timing = event.start_at.isoformat()
+    if event.end_at is not None:
+        timing = f"{timing} to {event.end_at.isoformat()}"
+    summary = f"- {timing} — {event.title}"
+    if event.description:
+        summary = f"{summary}\n  {event.description}"
+    return summary

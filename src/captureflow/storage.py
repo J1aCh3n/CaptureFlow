@@ -454,8 +454,19 @@ class CaptureStore:
                     sources.append(
                         LocalContextSource(
                             reference=reference,
-                            label=f"Calendar · {event.start_at.isoformat()}",
-                            content=event.title,
+                            label=(
+                                f"Calendar · {event.start_at.isoformat()}"
+                                if event.end_at is None
+                                else (
+                                    f"Calendar · {event.start_at.isoformat()} to "
+                                    f"{event.end_at.isoformat()}"
+                                )
+                            ),
+                            content=(
+                                event.title
+                                if event.description is None
+                                else f"{event.title}\n\n{event.description}"
+                            ),
                             source_quote=event.source_quote,
                         )
                     )
@@ -1273,15 +1284,16 @@ class CaptureStore:
             cursor = connection.execute(
                 """
                 INSERT OR IGNORE INTO calendar_events
-                (id, workspace_id, conversation_id, title, source_message_id, source_quote,
-                 start_at, end_at, all_day, timezone, status, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (id, workspace_id, conversation_id, title, description, source_message_id,
+                 source_quote, start_at, end_at, all_day, timezone, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event.id,
                     event.workspace_id,
                     event.conversation_id,
                     event.title,
+                    event.description,
                     event.source_message_id,
                     event.source_quote,
                     event.start_at.isoformat(),
@@ -1549,15 +1561,16 @@ class CaptureStore:
             cursor = connection.execute(
                 """
                 INSERT OR IGNORE INTO calendar_events
-                (id, workspace_id, conversation_id, title, source_message_id, source_quote,
-                 start_at, end_at, all_day, timezone, status, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (id, workspace_id, conversation_id, title, description, source_message_id,
+                 source_quote, start_at, end_at, all_day, timezone, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event.id,
                     event.workspace_id,
                     event.conversation_id,
                     event.title,
+                    event.description,
                     event.source_message_id,
                     event.source_quote,
                     event.start_at.isoformat(),

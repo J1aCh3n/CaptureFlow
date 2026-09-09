@@ -43,3 +43,37 @@ class DateToolTests(unittest.TestCase):
 
         self.assertEqual(result.status, "resolved")
         self.assertEqual(result.resolved_date, date(2027, 9, 8))
+
+    def test_day_after_tomorrow_is_resolved_in_both_languages(self) -> None:
+        reference = date(2026, 9, 9)
+
+        self.assertEqual(
+            resolve_relative_date("后天", reference, "America/Vancouver").resolved_date,
+            date(2026, 9, 11),
+        )
+        self.assertEqual(
+            resolve_relative_date(
+                "the day after tomorrow", reference, "America/Vancouver"
+            ).resolved_date,
+            date(2026, 9, 11),
+        )
+        self.assertEqual(
+            resolve_relative_date("大后天", reference, "America/Vancouver").resolved_date,
+            date(2026, 9, 12),
+        )
+
+    def test_chinese_full_date_with_matching_weekday_is_resolved(self) -> None:
+        result = resolve_relative_date(
+            "2026年9月11日 (周五)", date(2026, 9, 9), "America/Vancouver"
+        )
+
+        self.assertEqual(result.status, "resolved")
+        self.assertEqual(result.resolved_date, date(2026, 9, 11))
+
+    def test_chinese_full_date_with_wrong_weekday_requires_confirmation(self) -> None:
+        result = resolve_relative_date(
+            "2026年9月11日（周四）", date(2026, 9, 9), "America/Vancouver"
+        )
+
+        self.assertEqual(result.status, "ambiguous")
+        self.assertIsNone(result.resolved_date)
