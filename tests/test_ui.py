@@ -74,6 +74,92 @@ class UiTests(unittest.TestCase):
             ["Chat", "Tracker", "Calendar", "Ideas & Notes"],
         )
 
+    def test_chat_workspace_shows_cross_conversation_project_snapshot(self) -> None:
+        app = AppTest.from_file("app.py").run()
+        store = CaptureStore(os.environ["CAPTUREFLOW_DATABASE_PATH"])
+        store.initialize()
+        selected_conversation = store.list_conversations()[0]
+        project = store.save_project(Project(id="snapshot-project", name="CaptureFlow"))
+        store.assign_conversation_project(selected_conversation.id, project.id)
+        source_conversation = store.save_conversation(
+            Conversation(id="snapshot-source-conversation", title="Project planning")
+        )
+        store.assign_conversation_project(source_conversation.id, project.id)
+        task_source = store.save_message(
+            Message(
+                id="snapshot-task-source",
+                conversation_id=source_conversation.id,
+                role="user",
+                content="Prepare the UI workspace.",
+            )
+        )
+        store.save_project_record(
+            ProjectRecord(
+                id="snapshot-task",
+                project_id=project.id,
+                conversation_id=source_conversation.id,
+                kind="task",
+                content="Prepare the UI workspace.",
+                state="active",
+                source_message_id=task_source.id,
+                source_quote=task_source.content,
+            )
+        )
+        event_source = store.save_message(
+            Message(
+                id="snapshot-event-source",
+                conversation_id=source_conversation.id,
+                role="user",
+                content="Review the new workspace tomorrow.",
+            )
+        )
+        event_date = configured_reference_date("America/Vancouver") + timedelta(days=1)
+        store.save_calendar_event(
+            CalendarEvent(
+                id="snapshot-event",
+                conversation_id=source_conversation.id,
+                title="Workspace review",
+                source_message_id=event_source.id,
+                source_quote=event_source.content,
+                start_at=event_date,
+                all_day=True,
+                timezone="America/Vancouver",
+            )
+        )
+        note_source = store.save_message(
+            Message(
+                id="snapshot-note-source",
+                conversation_id=source_conversation.id,
+                role="user",
+                content="Keep the project snapshot read-only.",
+            )
+        )
+        store.save_saved_item(
+            SavedItem(
+                id="snapshot-note",
+                conversation_id=source_conversation.id,
+                kind="note",
+                content="Keep the project snapshot read-only.",
+                source_message_id=note_source.id,
+                source_quote=note_source.content,
+            )
+        )
+
+        app.run()
+
+        self.assertEqual(app.exception, [])
+        self.assertTrue(any(item.value == "Project snapshot" for item in app.subheader))
+        metrics = {metric.label: str(metric.value) for metric in app.metric}
+        self.assertEqual(metrics, {"Active": "1", "Done": "0", "Blockers": "0"})
+        rendered_markdown = [item.value for item in app.markdown]
+        self.assertTrue(any("Project progress" in value for value in rendered_markdown))
+        self.assertTrue(any("Today" in value and "Priority" in value for value in rendered_markdown))
+        self.assertTrue(any("Prepare the UI workspace." in value for value in rendered_markdown))
+        self.assertTrue(any("Workspace review" in value for value in rendered_markdown))
+        self.assertTrue(
+            any("Keep the project snapshot read-only." in value for value in rendered_markdown)
+        )
+
     def test_diagnostics_switch_shows_session_only_turn_timing(self) -> None:
         app = AppTest.from_file("app.py").run()
         self.assertFalse(any(expander.label.startswith("Diagnostics ·") for expander in app.expander))

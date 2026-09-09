@@ -4,7 +4,10 @@ CaptureFlow is a local, single-user project continuity assistant under staged
 development. Its default interface is persisted text chat: it retains bounded
 current-conversation context and maintains source-grounded project records in
 local SQLite. Calendar events and explicit ideas/notes remain available as
-deterministic local capture tools.
+deterministic local capture tools. The default workspace keeps chat beside a
+read-only project snapshot that aggregates records from the project's assigned
+conversations; Calendar, Tracker, and Ideas & Notes remain available as full
+management views.
 
 It is deliberately not a general chatbot. The configured model can propose a
 small, typed tracker change, but Python validates the source quote, project,

@@ -1,4 +1,6 @@
 import os
+from datetime import date, datetime
+from html import escape
 from pathlib import Path
 from time import perf_counter
 from uuid import uuid4
@@ -36,6 +38,169 @@ from .workflow import configured_reference_date
 DIAGNOSTICS_SESSION_KEY = "captureflow_turn_diagnostics"
 
 
+def _inject_app_styles() -> None:
+    st.markdown(
+        """
+        <style>
+        :root {
+            --cf-primary: #2563eb;
+            --cf-primary-soft: #eaf2ff;
+            --cf-surface: #ffffff;
+            --cf-surface-muted: #f7f9fc;
+            --cf-border: #e3e9f2;
+            --cf-text-muted: #64748b;
+        }
+        .stApp {
+            background: var(--cf-surface-muted);
+        }
+        [data-testid="stMainBlockContainer"] {
+            max-width: 1540px;
+            padding-top: 1.75rem;
+            padding-bottom: 2rem;
+        }
+        [data-testid="stSidebar"] {
+            background: #fbfcfe;
+            border-right: 1px solid var(--cf-border);
+        }
+        [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p {
+            color: var(--cf-text-muted);
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"] {
+            background: var(--cf-surface);
+            border-color: var(--cf-border);
+            border-radius: 14px;
+            box-shadow: 0 4px 18px rgba(15, 23, 42, 0.035);
+        }
+        div[data-testid="stChatMessage"] {
+            background: var(--cf-surface);
+            border: 1px solid var(--cf-border);
+            border-radius: 14px;
+            margin-bottom: 0.7rem;
+        }
+        [data-testid="stChatInput"] {
+            border-color: #cbd5e1;
+            border-radius: 12px;
+            background: var(--cf-surface);
+        }
+        div[data-testid="stMetric"] {
+            background: #f8fafc;
+            border: 1px solid var(--cf-border);
+            border-radius: 12px;
+            padding: 0.75rem;
+        }
+        .stButton > button {
+            border-radius: 10px;
+        }
+        .cf-sidebar-brand {
+            display: flex;
+            align-items: center;
+            gap: 0.7rem;
+            margin: 0.2rem 0 1.25rem;
+        }
+        .cf-sidebar-mark {
+            display: grid;
+            place-items: center;
+            width: 2.4rem;
+            height: 2.4rem;
+            border-radius: 12px;
+            color: white;
+            background: linear-gradient(145deg, #2563eb, #38bdf8);
+            font-weight: 750;
+        }
+        .cf-sidebar-name {
+            color: #0f172a;
+            font-size: 1.08rem;
+            font-weight: 720;
+            line-height: 1.15;
+        }
+        .cf-sidebar-tagline {
+            color: var(--cf-text-muted);
+            font-size: 0.76rem;
+            margin-top: 0.18rem;
+        }
+        .cf-workspace-header {
+            background: linear-gradient(135deg, #ffffff 0%, #f4f8ff 100%);
+            border: 1px solid var(--cf-border);
+            border-radius: 14px;
+            padding: 1rem 1.15rem;
+            margin: 0.25rem 0 1rem;
+        }
+        .cf-workspace-kicker {
+            color: var(--cf-primary);
+            font-size: 0.72rem;
+            font-weight: 750;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+        .cf-workspace-title {
+            color: #0f172a;
+            font-size: 1.25rem;
+            font-weight: 730;
+            margin-top: 0.18rem;
+        }
+        .cf-workspace-copy {
+            color: var(--cf-text-muted);
+            font-size: 0.85rem;
+            margin-top: 0.2rem;
+        }
+        .cf-planned-views {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 0.45rem;
+            margin: 0.4rem 0 1rem;
+        }
+        .cf-view-chip {
+            background: #f8fafc;
+            border: 1px solid var(--cf-border);
+            border-radius: 9px;
+            color: #94a3b8;
+            font-size: 0.72rem;
+            padding: 0.55rem 0.35rem;
+            text-align: center;
+        }
+        .cf-view-chip strong {
+            color: #475569;
+            display: block;
+            font-size: 0.8rem;
+            margin-bottom: 0.08rem;
+        }
+        .cf-view-chip-active {
+            background: var(--cf-primary-soft);
+            border-color: #bfdbfe;
+        }
+        .cf-view-chip-active strong {
+            color: var(--cf-primary);
+        }
+        .cf-progress-slot {
+            align-items: center;
+            background: #f8fafc;
+            border: 1px dashed #cbd5e1;
+            border-radius: 10px;
+            display: flex;
+            justify-content: space-between;
+            margin: 0.2rem 0 0.65rem;
+            padding: 0.65rem 0.75rem;
+        }
+        .cf-progress-slot strong {
+            color: #475569;
+            font-size: 0.82rem;
+        }
+        .cf-progress-slot span {
+            color: #94a3b8;
+            font-size: 0.72rem;
+        }
+        @media (max-width: 900px) {
+            [data-testid="stMainBlockContainer"] {
+                padding-left: 1rem;
+                padding-right: 1rem;
+            }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def database_path() -> Path:
     return Path(os.getenv("CAPTUREFLOW_DATABASE_PATH", "data/captureflow.sqlite3"))
 
@@ -48,18 +213,37 @@ def get_store(path: str) -> CaptureStore:
 
 
 def main() -> None:
-    st.set_page_config(page_title="CaptureFlow", page_icon="🗂️")
+    st.set_page_config(
+        page_title="CaptureFlow",
+        page_icon="🗂️",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
+    _inject_app_styles()
     st.title("CaptureFlow")
     st.caption("A local project continuity assistant for conversations, tasks, calendar, and notes.")
 
     store = get_store(str(database_path()))
+    st.sidebar.markdown(
+        """
+        <div class="cf-sidebar-brand">
+            <div class="cf-sidebar-mark">C</div>
+            <div>
+                <div class="cf-sidebar-name">CaptureFlow</div>
+                <div class="cf-sidebar-tagline">Your local project workspace</div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    page = st.sidebar.radio(
+        "Workspace", ["Chat", "Tracker", "Calendar", "Ideas & Notes"]
+    )
+    st.sidebar.divider()
     diagnostics_enabled = st.sidebar.toggle(
         "Diagnostics",
         value=False,
         help="Show timing for turns submitted while this switch is enabled.",
-    )
-    page = st.sidebar.radio(
-        "Page", ["Chat", "Tracker", "Calendar", "Ideas & Notes"]
     )
     if page == "Calendar":
         render_calendar_page(store)
@@ -67,12 +251,13 @@ def main() -> None:
     if page == "Ideas & Notes":
         render_saved_items_page(store)
         return
-    selected_id = select_conversation(store, show_project_assignment=page != "Tracker")
+    with st.sidebar:
+        selected_id = select_conversation(store, show_project_assignment=page != "Tracker")
     if page == "Tracker":
         render_tracker_page(store, selected_id)
         return
     if page == "Chat":
-        render_chat_page(store, selected_id, diagnostics_enabled)
+        render_chat_workspace(store, selected_id, diagnostics_enabled)
 
 
 def select_conversation(store: CaptureStore, *, show_project_assignment: bool = True) -> str:
@@ -174,22 +359,158 @@ def select_conversation(store: CaptureStore, *, show_project_assignment: bool = 
     return selected_id
 
 
+def render_chat_workspace(
+    store: CaptureStore, conversation_id: str, diagnostics_enabled: bool = False
+) -> None:
+    current_project = store.get_conversation_project(conversation_id)
+    project_name = current_project.name if current_project is not None else "Unassigned workspace"
+    project_copy = (
+        current_project.description
+        if current_project is not None and current_project.description
+        else "Conversation, project state, calendar, and notes in one local workspace."
+    )
+    st.markdown(
+        f"""
+        <div class="cf-workspace-header">
+            <div class="cf-workspace-kicker">Project workspace</div>
+            <div class="cf-workspace-title">{escape(project_name)}</div>
+            <div class="cf-workspace-copy">{escape(project_copy)}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    chat_column, snapshot_column = st.columns([1.75, 1], gap="large")
+    with chat_column:
+        render_chat_page(store, conversation_id, diagnostics_enabled)
+    with snapshot_column:
+        render_project_snapshot(store, conversation_id)
+
+
+def render_project_snapshot(store: CaptureStore, conversation_id: str) -> None:
+    current_project = store.get_conversation_project(conversation_id)
+    with st.container(border=True):
+        st.subheader("Project snapshot")
+        st.caption("A read-only view of locally grounded project context.")
+        _render_planned_project_views()
+        if current_project is None:
+            st.info("Assign this conversation to a project to activate the snapshot.")
+            return
+
+        conversation_ids = {
+            conversation.id
+            for conversation in store.list_conversations()
+            if (
+                (project := store.get_conversation_project(conversation.id)) is not None
+                and project.id == current_project.id
+            )
+        }
+        records = store.list_project_records(
+            current_project.id,
+            states=("active", "completed", "resolved", "superseded"),
+        )
+        active_tasks = [
+            record for record in records if record.kind == "task" and record.state == "active"
+        ]
+        completed_tasks = [
+            record for record in records if record.kind == "task" and record.state == "completed"
+        ]
+        active_blockers = [
+            record for record in records if record.kind == "blocker" and record.state == "active"
+        ]
+        active_metric, completed_metric, blocker_metric = st.columns(3)
+        active_metric.metric("Active", len(active_tasks))
+        completed_metric.metric("Done", len(completed_tasks))
+        blocker_metric.metric("Blockers", len(active_blockers))
+
+        reference_date = configured_reference_date(
+            os.getenv("CAPTUREFLOW_TIMEZONE", "America/Vancouver")
+        )
+        upcoming_events = [
+            event
+            for event in store.list_calendar_events()
+            if event.conversation_id in conversation_ids
+            and _calendar_event_date(event.start_at) >= reference_date
+        ][:3]
+        st.markdown("#### Upcoming")
+        if not upcoming_events:
+            st.caption("No upcoming project events.")
+        for event in upcoming_events:
+            with st.container(border=True):
+                st.caption(_format_calendar_timing(event.start_at, event.end_at))
+                st.markdown(f"**{event.title}**")
+                if event.description:
+                    st.caption(event.description)
+
+        active_context = [
+            record
+            for record in records
+            if record.state == "active"
+            and record.kind in {"blocker", "task", "open_question", "decision", "constraint"}
+        ][:4]
+        st.markdown("#### Active work")
+        if not active_context:
+            st.caption("No active project records.")
+        for record in active_context:
+            with st.container(border=True):
+                st.caption(record.kind.replace("_", " ").title())
+                st.markdown(record.content)
+
+        recent_items = [
+            item
+            for item in store.list_saved_items()
+            if item.conversation_id in conversation_ids
+        ][:3]
+        st.markdown("#### Recent ideas & notes")
+        if not recent_items:
+            st.caption("No project ideas or notes yet.")
+        for item in recent_items:
+            with st.container(border=True):
+                st.caption(item.kind.title())
+                st.markdown(item.content)
+
+
+def _render_planned_project_views() -> None:
+    st.markdown(
+        """
+        <div class="cf-progress-slot">
+            <strong>Project progress</strong>
+            <span>Planned</span>
+        </div>
+        <div class="cf-planned-views">
+            <div class="cf-view-chip cf-view-chip-active"><strong>All</strong>Current view</div>
+            <div class="cf-view-chip"><strong>Today</strong>Planned</div>
+            <div class="cf-view-chip"><strong>Priority</strong>Planned</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _calendar_event_date(start_at: date | datetime) -> date:
+    return start_at.date() if isinstance(start_at, datetime) else start_at
+
+
+def _format_calendar_timing(start_at: date | datetime, end_at: datetime | None) -> str:
+    if not isinstance(start_at, datetime):
+        return start_at.strftime("%b %d · All day")
+    timing = start_at.strftime("%b %d · %H:%M")
+    if end_at is not None:
+        if end_at.date() == start_at.date():
+            timing += f"–{end_at.strftime('%H:%M')}"
+        else:
+            timing += f"–{end_at.strftime('%b %d · %H:%M')}"
+    return timing
+
+
 def render_chat_page(
     store: CaptureStore, conversation_id: str, diagnostics_enabled: bool = False
 ) -> None:
     st.subheader("Chat")
     st.caption(
-        "Assigned project conversations use bounded recent context. The model may only propose "
-        "source-grounded tracker changes; local validation applies or routes them to review. "
-        "Project status and history questions retrieve bounded local project records with visible sources. "
-        "`/event`, `/idea`, and `/note` remain deterministic shortcuts."
+        "Grounded in recent conversation context and locally stored project records."
     )
     local_service = DeterministicChatService(
         store, os.getenv("CAPTUREFLOW_TIMEZONE", "America/Vancouver")
-    )
-    current_project = store.get_conversation_project(conversation_id)
-    st.caption(
-        f"Project: {current_project.name}" if current_project is not None else "Project: Unassigned"
     )
     for message in store.list_messages(conversation_id):
         with st.chat_message(message.role):
