@@ -92,7 +92,11 @@ class ProjectRetrievalTests(unittest.TestCase):
     def test_query_classification_is_read_only_and_deterministic(self) -> None:
         self.assertEqual(classify_project_query("现在做到哪里了？"), "current")
         self.assertEqual(classify_project_query("Why did we choose SQLite?"), "history")
+        self.assertEqual(classify_project_query("项目进度如何？"), "current")
+        self.assertEqual(classify_project_query("之前是怎么决定使用 SQLite 的？"), "history")
         self.assertIsNone(classify_project_query("Implement Phase 7."))
+        self.assertIsNone(classify_project_query("NVIDIA Isaac Sim 仿真环境进度汇报。"))
+        self.assertIsNone(classify_project_query("会议主题：当前架构状态讨论。"))
 
     def test_cross_conversation_answer_persists_only_valid_source_cards(self) -> None:
         model = ScriptedRetrievalModel(

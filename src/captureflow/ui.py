@@ -10,6 +10,7 @@ from .chat_service import DeterministicChatService
 from .local_context_service import (
     LocalContextService,
     is_local_context_query,
+    is_local_event_statement,
     is_local_write_request,
 )
 from .llm import ModelError, ModelSettings, OpenAICompatibleModel
@@ -233,7 +234,7 @@ def render_chat_page(
         else:
             try:
                 timezone = os.getenv("CAPTUREFLOW_TIMEZONE", "America/Vancouver")
-                if is_local_write_request(prompt):
+                if is_local_write_request(prompt) or is_local_event_statement(prompt):
                     settings = ModelSettings.from_environment()
                     turn = BoundedChatService(
                         store,

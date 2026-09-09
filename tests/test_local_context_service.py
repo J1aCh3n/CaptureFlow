@@ -8,6 +8,7 @@ from captureflow.llm import ModelError
 from captureflow.local_context_service import (
     LocalContextService,
     is_local_context_query,
+    is_local_event_statement,
     is_local_write_request,
 )
 from captureflow.models import (
@@ -465,3 +466,27 @@ class LocalContextServiceTests(unittest.TestCase):
         self.assertTrue(is_local_write_request("请在明天下午两点创建日历：工作流会议。"))
         self.assertTrue(is_local_write_request("Save this as an idea."))
         self.assertFalse(is_local_write_request("我明天有什么活动"))
+
+    def test_event_statement_classifier_preempts_project_routing(self) -> None:
+        self.assertTrue(
+            is_local_event_statement(
+                "我明天下午有个系统架构与驱动集成探讨。"
+                "排查 ROS 2 发布者-订阅者节点之间的延迟问题，并测试 MoveIt 2 的运动规划框架。"
+            )
+        )
+        self.assertTrue(
+            is_local_event_statement("后天下午四点有组会，所有人都要按时到场，并带好工牌")
+        )
+        self.assertTrue(
+            is_local_event_statement(
+                "仿真环境与基准测试同步 (Simulation & Benchmark Sync)\n"
+                "会议时间：2026年9月11日 (周五) 10:30 - 11:30\n"
+                "会议主题：NVIDIA Isaac Sim 仿真环境进度汇报。"
+            )
+        )
+        self.assertFalse(is_local_event_statement("我明天有组会吗？"))
+        self.assertFalse(is_local_event_statement("老板明天下午有个会议。"))
+
+    def test_question_particles_keep_calendar_questions_read_only(self) -> None:
+        self.assertTrue(is_local_context_query("我明天有安排吗，如果有的话是什么"))
+        self.assertTrue(is_local_context_query("明天有没有组会？"))

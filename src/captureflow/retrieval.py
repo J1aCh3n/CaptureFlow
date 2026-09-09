@@ -31,12 +31,28 @@ def classify_project_query(query: str) -> RetrievalMode | None:
     """Return a narrow read-query mode; other turns remain Phase 6 write proposals."""
 
     normalized = query.casefold()
-    history_markers = ("why", "history", "earlier", "previous", "为什么", "为何", "历史", "之前")
-    if any(marker in normalized for marker in history_markers):
+    direct_history_questions = ("why", "为什么", "为何")
+    history_topics = ("history", "earlier", "previous", "历史", "之前")
+    history_question_markers = (
+        "what",
+        "how",
+        "which",
+        "show",
+        "tell me",
+        "什么",
+        "怎么",
+        "如何",
+        "哪些",
+        "查看",
+        "告诉我",
+        "回顾",
+    )
+    if any(marker in normalized for marker in direct_history_questions) or (
+        any(marker in normalized for marker in history_topics)
+        and any(marker in normalized for marker in history_question_markers)
+    ):
         return "history"
-    current_markers = (
-        "?",
-        "？",
+    current_topics = (
         "status",
         "progress",
         "where are we",
@@ -48,7 +64,28 @@ def classify_project_query(query: str) -> RetrievalMode | None:
         "做到哪里",
         "还有什么",
     )
-    return "current" if any(marker in normalized for marker in current_markers) else None
+    question_markers = (
+        "?",
+        "？",
+        "what",
+        "where",
+        "how",
+        "which",
+        "什么",
+        "哪里",
+        "如何",
+        "怎么",
+        "怎样",
+        "哪些",
+        "吗",
+        "呢",
+    )
+    return (
+        "current"
+        if any(marker in normalized for marker in current_topics)
+        and any(marker in normalized for marker in question_markers)
+        else None
+    )
 
 
 def retrieve_project_records(

@@ -66,9 +66,33 @@ LOCAL_WRITE_TARGETS = (
     "日历",
     "日程",
     "会议",
+    "组会",
+    "例会",
+    "面试",
+    "会面",
     "想法",
     "笔记",
     "备忘",
+)
+
+_STRUCTURED_EVENT_TIME = re.compile(
+    r"(?im)^\s*(?:会议|日程|活动|meeting|event)\s*(?:时间|time)\s*[:：]\s*\S+"
+)
+_STRUCTURED_EVENT_TITLE = re.compile(
+    r"(?im)^\s*(?:会议|日程|活动|meeting|event)\s*(?:主题|标题|名称|topic|title)\s*[:：]\s*\S+"
+)
+_EVENT_DATE = re.compile(
+    r"(?:今天|明天|后天|大后天|(?:本|这|下)周[一二三四五六日天]?|"
+    r"(?:周|星期|礼拜)[一二三四五六日天]|\d{4}[-年]\d{1,2}(?:[-月]\d{1,2}日?)?|"
+    r"\b(?:today|tomorrow|the day after tomorrow|next\s+"
+    r"(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday))\b)"
+)
+_CHINESE_EVENT_ASSERTION = re.compile(
+    r"有(?:一?[个场次])?[^。！？\n]{0,100}(?:会议|组会|例会|面试|会面|探讨|讨论|同步)"
+)
+_ENGLISH_EVENT_ASSERTION = re.compile(
+    r"\b(?:i\s+have|we\s+have|there(?:'s|\s+is)|scheduled)\b"
+    r"[^.!?\n]{0,120}\b(?:meeting|appointment|interview|sync|discussion)\b"
 )
 
 
@@ -79,6 +103,24 @@ def is_local_write_request(query: str) -> bool:
     return any(marker in normalized for marker in LOCAL_WRITE_MARKERS) and any(
         marker in normalized for marker in LOCAL_WRITE_TARGETS
     )
+
+
+def is_local_event_statement(query: str) -> bool:
+    """Recognize a bounded event assertion before project routing claims the turn."""
+
+    if _STRUCTURED_EVENT_TIME.search(query) and _STRUCTURED_EVENT_TITLE.search(query):
+        return True
+    if is_local_context_query(query):
+        return False
+    date_match = _EVENT_DATE.search(query.casefold())
+    if date_match is None:
+        return False
+    if _ENGLISH_EVENT_ASSERTION.search(query.casefold()):
+        return True
+    if _CHINESE_EVENT_ASSERTION.search(query) is None:
+        return False
+    subject_prefix = query[: date_match.start()].strip()
+    return not subject_prefix or subject_prefix.startswith(("我", "我们"))
 
 
 def is_local_context_query(query: str) -> bool:
@@ -98,6 +140,11 @@ def is_local_context_query(query: str) -> bool:
         "日历",
         "日程",
         "会议",
+        "组会",
+        "例会",
+        "面试",
+        "会面",
+        "探讨",
         "议程",
         "活动",
         "安排",
@@ -130,6 +177,9 @@ def is_local_context_query(query: str) -> bool:
         "查询",
         "查看",
         "告诉我",
+        "吗",
+        "是否",
+        "有没有",
     )
     return any(marker in normalized for marker in topic_markers) and any(
         marker in normalized for marker in question_markers
