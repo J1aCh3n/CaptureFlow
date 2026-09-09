@@ -248,3 +248,6 @@ class LocalContextServiceTests(unittest.TestCase):
         self.assertTrue(is_local_context_query("我明天的会议要做什么？"))
         self.assertTrue(is_local_context_query("When is the calendar meeting?"))
         self.assertFalse(is_local_context_query("Track a meeting task."))
+        self.assertFalse(is_local_context_query("请在明天下午两点创建日历：工作流会议。"))
+        self.assertFalse(is_local_context_query("会议内容是关于新的工作流。"))
+        self.assertFalse(is_local_context_query("Schedule a workflow meeting tomorrow at 2 PM."))

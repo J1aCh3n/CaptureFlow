@@ -39,10 +39,52 @@ def is_local_context_query(query: str) -> bool:
     """Recognize a small read-only Calendar/Note query vocabulary before model routing."""
 
     normalized = query.casefold()
+    write_markers = (
+        "create",
+        "add to",
+        "schedule",
+        "set up",
+        "remind me",
+        "创建",
+        "新建",
+        "新增",
+        "添加",
+        "加入日历",
+        "记到日历",
+        "提醒我",
+        "帮我安排",
+        "请安排",
+    )
+    if any(marker in normalized for marker in write_markers):
+        return False
     topic_markers = ("calendar", "event", "meeting", "日历", "日程", "会议", "议程")
     question_markers = (
-        "?", "？", "when", "what", "where", "agenda", "prepare", "time", "tomorrow",
-        "几点", "什么时候", "什么时间", "内容", "准备", "要做什么", "安排", "明天",
+        "?",
+        "？",
+        "when",
+        "what",
+        "where",
+        "which",
+        "show me",
+        "find",
+        "look up",
+        "list",
+        "tell me",
+        "几点",
+        "什么时候",
+        "什么时间",
+        "什么内容",
+        "内容是什么",
+        "需要准备什么",
+        "该准备什么",
+        "要做什么",
+        "有哪些",
+        "有什么",
+        "如何准备",
+        "怎么准备",
+        "查询",
+        "查看",
+        "告诉我",
     )
     return any(marker in normalized for marker in topic_markers) and any(
         marker in normalized for marker in question_markers
