@@ -945,6 +945,7 @@ class ConversationDecision(BaseModel):
     clarification_question: str | None = Field(default=None, max_length=300)
     pending_action: ContextualAction | None = None
     reply: str | None = Field(default=None, max_length=1_000)
+    source_ids: list[str] = Field(default_factory=list, max_length=6)
 
     @field_validator("clarification_question", "reply")
     @classmethod
@@ -953,6 +954,13 @@ class ConversationDecision(BaseModel):
             return None
         value = value.strip()
         return value or None
+
+    @field_validator("source_ids")
+    @classmethod
+    def source_ids_are_unique(cls, value: list[str]) -> list[str]:
+        if len(set(value)) != len(value):
+            raise ValueError("answer source IDs must be unique")
+        return value
 
     @model_validator(mode="after")
     def intent_matches_payload(self) -> "ConversationDecision":
@@ -968,13 +976,19 @@ class ConversationDecision(BaseModel):
                 raise ValueError(f"{self.intent} requires a {expected_action} action")
             if self.intent == "calendar_update" and self.action.target_event_id is None:
                 raise ValueError("a calendar update requires a candidate event target")
-            if self.project_changes or self.clarification_question or self.pending_action:
+            if self.project_changes or self.clarification_question or self.pending_action or self.source_ids:
                 raise ValueError("a local write cannot include tracker or clarification payload")
         elif self.intent == "tracker_change":
-            if self.action or not self.project_changes or self.clarification_question or self.pending_action:
+            if (
+                self.action
+                or not self.project_changes
+                or self.clarification_question
+                or self.pending_action
+                or self.source_ids
+            ):
                 raise ValueError("a tracker change requires project changes only")
         elif self.intent == "clarify":
-            if self.action or self.project_changes or not self.clarification_question:
+            if self.action or self.project_changes or not self.clarification_question or self.source_ids:
                 raise ValueError("a clarification cannot include a committed action or tracker change")
             if self.pending_action is None or self.pending_action.action not in {
                 "create_event",
@@ -984,6 +998,8 @@ class ConversationDecision(BaseModel):
         else:
             if self.action or self.project_changes or self.clarification_question or self.pending_action:
                 raise ValueError("a read-only decision cannot include a write or clarification payload")
+            if self.intent == "reply_only" and self.source_ids:
+                raise ValueError("a reply-only decision cannot cite local sources")
             if not self.reply:
                 raise ValueError("a read-only decision requires a reply")
         return self

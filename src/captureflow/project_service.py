@@ -97,23 +97,11 @@ class ProjectTrackerService:
                     context_window.truncated,
                 )
             )
-            proposed_operations = self._prepare_operations(
-                project, user_message, decision.changes, candidates
+            committed, reviewed = self.apply_validated_changes(
+                self.store, project, user_message, decision.changes, candidates
             )
         except (ModelError, ValidationError, ValueError) as error:
             return self._failure_reply(user_message, context_window, perf_counter() - started, str(error))
-
-        committed: list[ProjectChangeOperation] = []
-        reviewed: list[ProjectChangeOperation] = []
-        for operation in proposed_operations:
-            saved = self.store.save_project_change_operation(operation)
-            if saved.status == "review":
-                reviewed.append(saved)
-                continue
-            try:
-                committed.append(self.store.commit_prepared_project_change(saved.id))
-            except (KeyError, ValidationError, ValueError) as error:
-                committed.append(self.store.fail_prepared_project_change(saved.id, str(error)))
 
         reply = self._reply_text(decision, committed, reviewed, context_window)
         assistant = self._reply_message(user_message, reply)
@@ -132,6 +120,32 @@ class ProjectTrackerService:
             outcome=outcome,
         )
 
+    @staticmethod
+    def apply_validated_changes(
+        store: CaptureStore,
+        project: Project,
+        user_message: Message,
+        changes: list[ProjectChange],
+        candidates: list[ProjectRecord],
+    ) -> tuple[list[ProjectChangeOperation], list[ProjectChangeOperation]]:
+        """Apply an already-model-validated tracker proposal without another model call."""
+
+        proposed_operations = ProjectTrackerService._prepare_operations(
+            project, user_message, changes, candidates
+        )
+        committed: list[ProjectChangeOperation] = []
+        reviewed: list[ProjectChangeOperation] = []
+        for operation in proposed_operations:
+            saved = store.save_project_change_operation(operation)
+            if saved.status == "review":
+                reviewed.append(saved)
+                continue
+            try:
+                committed.append(store.commit_prepared_project_change(saved.id))
+            except (KeyError, ValidationError, ValueError) as error:
+                committed.append(store.fail_prepared_project_change(saved.id, str(error)))
+        return committed, reviewed
+
     def _candidate_records(self, project: Project) -> list[ProjectRecord]:
         # Phase 6 uses a deterministic recency-bounded set; Phase 7 adds retrieval.
         return self.store.list_project_records(project.id, states=("active",))[:MAX_CANDIDATE_RECORDS]
@@ -145,8 +159,8 @@ class ProjectTrackerService:
             "state": record.state,
         }
 
+    @staticmethod
     def _prepare_operations(
-        self,
         project: Project,
         user_message: Message,
         changes: list[ProjectChange],
@@ -154,22 +168,26 @@ class ProjectTrackerService:
     ) -> list[ProjectChangeOperation]:
         candidate_by_id = {record.id: record for record in candidates}
         active_by_kind_content = {
-            (record.kind, self._normalized(record.content)): record for record in candidates
+            (record.kind, ProjectTrackerService._normalized(record.content)): record
+            for record in candidates
         }
         signatures: set[tuple[str, str, str]] = set()
         review_indexes: set[int] = set()
         for index, change in enumerate(changes):
-            self._validate_change_source(change, user_message)
+            ProjectTrackerService._validate_change_source(change, user_message)
             signature = (
                 change.action,
                 change.target_record_id or "",
-                self._normalized(change.content or ""),
+                ProjectTrackerService._normalized(change.content or ""),
             )
             if signature in signatures:
                 raise ValueError("duplicate project changes in the same turn are not allowed")
             signatures.add(signature)
             if change.action == "create_record":
-                if (change.kind, self._normalized(change.content or "")) in active_by_kind_content:
+                if (
+                    change.kind,
+                    ProjectTrackerService._normalized(change.content or ""),
+                ) in active_by_kind_content:
                     raise ValueError("an identical active project record already exists")
                 if change.kind in {"decision", "constraint"} and any(
                     record.kind == change.kind for record in candidates

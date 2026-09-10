@@ -87,6 +87,11 @@ Commit: `feat: support audited local calendar updates`
 
 ### 5. Add the unified conversation-router service
 
+- Complete. `ConversationRouterService` persists the user message, provides
+  bounded context and candidates to one contextual decision, then validates and
+  dispatches local Calendar/idea/note writes, tracker changes, answers, or a
+  clarification. The tracker application path now accepts an already-validated
+  proposal without a second model call.
 - Create `conversation_router_service.py` as the sole normal-language entry.
 - It persists the current message, builds bounded context/candidates, requests
   one proposal, validates evidence and candidates, and dispatches to local,

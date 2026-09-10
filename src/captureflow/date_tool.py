@@ -130,6 +130,30 @@ def resolve_relative_date(expression: str, reference_date: date, timezone: str) 
             resolved_date=reference_date + timedelta(days=days_ahead),
             explanation="Resolved the explicit next-weekday expression.",
         )
+    if match := re.fullmatch(r"(?:this week|this) (monday|tuesday|wednesday|thursday|friday|saturday|sunday)", normalized):
+        weekday = _WEEKDAYS[match.group(1)]
+        return DateResolution(
+            **base,
+            status="resolved",
+            resolved_date=reference_date + timedelta(days=weekday - reference_date.weekday()),
+            explanation="Resolved the explicit weekday in the reference week.",
+        )
+    if match := re.fullmatch(r"(?:本周|这周|本星期|这星期)([一二三四五六日天])", expression.strip()):
+        weekday = _CHINESE_WEEKDAYS[match.group(1)]
+        return DateResolution(
+            **base,
+            status="resolved",
+            resolved_date=reference_date + timedelta(days=weekday - reference_date.weekday()),
+            explanation="根据提供的参考日期解析了本周日期。",
+        )
+    if match := re.fullmatch(r"(?:下周|下星期)([一二三四五六日天])", expression.strip()):
+        weekday = _CHINESE_WEEKDAYS[match.group(1)]
+        return DateResolution(
+            **base,
+            status="resolved",
+            resolved_date=reference_date + timedelta(days=7 + weekday - reference_date.weekday()),
+            explanation="根据提供的参考日期解析了下周日期。",
+        )
     if normalized in _WEEKDAYS:
         return DateResolution(
             **base,

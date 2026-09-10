@@ -175,6 +175,20 @@ class ModelTests(unittest.TestCase):
 
         self.assertEqual(decision.pending_action.action, "update_event")
 
+    def test_contextual_answer_sources_are_unique_and_reply_only_has_none(self) -> None:
+        with self.assertRaises(ValidationError):
+            ConversationDecision(
+                intent="project_answer",
+                reply="The current task is stored locally.",
+                source_ids=["record-1", "record-1"],
+            )
+        with self.assertRaises(ValidationError):
+            ConversationDecision(
+                intent="reply_only",
+                reply="I cannot help with that local action.",
+                source_ids=["record-1"],
+            )
+
     def test_calendar_update_operation_cannot_rewrite_original_event_provenance(self) -> None:
         before = CalendarEvent(
             id="event-1",

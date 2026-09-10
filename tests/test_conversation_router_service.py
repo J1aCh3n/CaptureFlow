@@ -1,0 +1,229 @@
+import tempfile
+import unittest
+from datetime import date, datetime
+from pathlib import Path
+
+from captureflow.conversation_router_service import ConversationRouterService
+from captureflow.models import CalendarEvent, Conversation, Message, Project, ProjectRecord
+from captureflow.storage import CaptureStore
+
+
+class ScriptedContextualModel:
+    def __init__(self, decisions):
+        self.decisions = list(decisions)
+        self.calls = []
+
+    def propose_conversation_decision(self, **kwargs):
+        self.calls.append(kwargs)
+        return self.decisions.pop(0)
+
+
+class ConversationRouterServiceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.store = CaptureStore(Path(self.temporary_directory.name) / "captureflow.sqlite3")
+        self.store.initialize()
+        self.conversation = self.store.save_conversation(
+            Conversation(id="contextual-router-chat", title="Contextual router")
+        )
+        self.project = self.store.save_project(Project(id="contextual-router-project", name="Workflow"))
+        self.store.assign_conversation_project(self.conversation.id, self.project.id)
+
+    def tearDown(self) -> None:
+        self.temporary_directory.cleanup()
+
+    def test_event_statement_creates_calendar_event_not_project_task(self) -> None:
+        content = "我这周四下午四点到五点有算法优化与代码审查会议。"
+        model = ScriptedContextualModel(
+            [
+                {
+                    "intent": "calendar_create",
+                    "action": {
+                        "action": "create_event",
+                        "content": "算法优化与代码审查",
+                        "description": "讨论前缀树与最小堆性能瓶颈。",
+                        "date_expression": "这周四",
+                        "time_expression": "下午四点",
+                        "end_time_expression": "下午五点",
+                        "target_event_id": None,
+                        "evidence": [{"message_id": "event-turn", "source_quote": content}],
+                    },
+                }
+            ]
+        )
+
+        turn = ConversationRouterService(
+            self.store, model, date(2026, 9, 9)
+        ).submit(self.conversation.id, content, "event-turn")
+        replay = ConversationRouterService(
+            self.store, model, date(2026, 9, 9)
+        ).submit(self.conversation.id, content, "event-turn")
+
+        event = self.store.list_calendar_events()[0]
+        self.assertEqual(turn.outcome, "calendar_create")
+        self.assertEqual(turn.model_calls, 1)
+        self.assertEqual(event.title, "算法优化与代码审查")
+        self.assertEqual(event.start_at, datetime.fromisoformat("2026-09-10T16:00:00-07:00"))
+        self.assertEqual(event.end_at, datetime.fromisoformat("2026-09-10T17:00:00-07:00"))
+        self.assertEqual(self.store.list_project_records(self.project.id), [])
+        self.assertEqual(model.calls[0]["candidate_events"], [])
+        self.assertEqual(replay.model_calls, 0)
+        self.assertEqual(len(model.calls), 1)
+
+    def test_event_correction_updates_supplied_event_without_second_model_call(self) -> None:
+        source = self.store.save_message(
+            Message(
+                id="existing-event-source",
+                conversation_id=self.conversation.id,
+                role="user",
+                content="本周四下午四点有工作流会议。",
+            )
+        )
+        event = self.store.save_calendar_event(
+            CalendarEvent(
+                id="workflow-event",
+                conversation_id=self.conversation.id,
+                title="工作流会议",
+                source_message_id=source.id,
+                source_quote=source.content,
+                start_at=datetime.fromisoformat("2026-09-10T16:00:00-07:00"),
+                end_at=datetime.fromisoformat("2026-09-10T17:00:00-07:00"),
+                all_day=False,
+                timezone="America/Vancouver",
+            )
+        )
+        correction = "帮我记录一下，这个会议在周四 14:00 - 15:00"
+        model = ScriptedContextualModel(
+            [
+                {
+                    "intent": "calendar_update",
+                    "action": {
+                        "action": "update_event",
+                        "content": None,
+                        "description": None,
+                        "date_expression": "这周四",
+                        "time_expression": "14:00",
+                        "end_time_expression": "15:00",
+                        "target_event_id": event.id,
+                        "evidence": [
+                            {"message_id": "existing-event-source", "source_quote": source.content},
+                            {"message_id": "correction-turn", "source_quote": correction},
+                        ],
+                    },
+                }
+            ]
+        )
+
+        turn = ConversationRouterService(
+            self.store, model, date(2026, 9, 9)
+        ).submit(self.conversation.id, correction, "correction-turn")
+
+        updated = self.store.get_calendar_event(event.id)
+        self.assertEqual(turn.outcome, "calendar_update")
+        self.assertEqual(turn.model_calls, 1)
+        self.assertEqual(updated.start_at, datetime.fromisoformat("2026-09-10T14:00:00-07:00"))
+        self.assertEqual(updated.end_at, datetime.fromisoformat("2026-09-10T15:00:00-07:00"))
+        self.assertEqual(len(self.store.list_calendar_event_update_operations("correction-turn")), 1)
+        self.assertEqual(len(model.calls), 1)
+
+    def test_tracker_change_uses_current_decision_without_another_model_call(self) -> None:
+        content = "排查 ROS 2 发布者-订阅者节点之间的延迟问题。"
+        model = ScriptedContextualModel(
+            [
+                {
+                    "intent": "tracker_change",
+                    "project_changes": [
+                        {
+                            "action": "create_record",
+                            "kind": "task",
+                            "content": content,
+                            "source_quote": content,
+                            "target_record_id": None,
+                            "target_state": None,
+                            "rationale": None,
+                        }
+                    ],
+                }
+            ]
+        )
+
+        turn = ConversationRouterService(
+            self.store, model, date(2026, 9, 9)
+        ).submit(self.conversation.id, content, "tracker-turn")
+
+        self.assertEqual(turn.outcome, "tracker_change")
+        self.assertEqual(turn.model_calls, 1)
+        self.assertEqual(len(model.calls), 1)
+        self.assertEqual(
+            [record.content for record in self.store.list_project_records(self.project.id)], [content]
+        )
+
+    def test_project_answer_keeps_only_supplied_candidate_source_cards(self) -> None:
+        source = self.store.save_message(
+            Message(
+                id="project-answer-source",
+                conversation_id=self.conversation.id,
+                role="user",
+                content="排查 ROS 2 节点延迟。",
+            )
+        )
+        record = self.store.save_project_record(
+            ProjectRecord(
+                id="ros-delay-task",
+                project_id=self.project.id,
+                conversation_id=self.conversation.id,
+                kind="task",
+                content=source.content,
+                state="active",
+                source_message_id=source.id,
+                source_quote=source.content,
+            )
+        )
+        query = "项目现在有什么任务？"
+        model = ScriptedContextualModel(
+            [
+                {
+                    "intent": "project_answer",
+                    "reply": "当前任务是排查 ROS 2 节点延迟。",
+                    "source_ids": [record.id],
+                }
+            ]
+        )
+
+        turn = ConversationRouterService(
+            self.store, model, date(2026, 9, 9)
+        ).submit(self.conversation.id, query, "project-answer-turn")
+
+        self.assertEqual(turn.outcome, "project_answer")
+        self.assertEqual(turn.model_calls, 1)
+        self.assertEqual(
+            [source.id for source in self.store.list_project_answer_sources(turn.assistant_message.id)],
+            [record.id],
+        )
+
+    def test_invalid_event_target_leaves_local_data_unchanged(self) -> None:
+        content = "把会议改到下午两点。"
+        model = ScriptedContextualModel(
+            [
+                {
+                    "intent": "calendar_update",
+                    "action": {
+                        "action": "update_event",
+                        "content": None,
+                        "description": None,
+                        "date_expression": None,
+                        "time_expression": "下午两点",
+                        "end_time_expression": None,
+                        "target_event_id": "invented-event",
+                        "evidence": [{"message_id": "invalid-target-turn", "source_quote": content}],
+                    },
+                }
+            ]
+        )
+
+        turn = ConversationRouterService(
+            self.store, model, date(2026, 9, 9)
+        ).submit(self.conversation.id, content, "invalid-target-turn")
+
+        self.assertEqual(turn.outcome, "model_or_validation_failure")
+        self.assertEqual(self.store.list_calendar_events(), [])

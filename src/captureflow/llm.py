@@ -296,7 +296,8 @@ class OpenAICompatibleModel:
                 "If its target or replacement information is ambiguous, use clarify with a pending calendar "
                 "action and one concise question; do not create a tracker record. "
                 "A meeting question is local_answer and must not propose a write. Project status/history "
-                "questions are project_answer and must not propose a write. Save only an explicit idea or "
+                "questions are project_answer and must not propose a write. For local_answer or project_answer, "
+                "list every supplied candidate ID used by the reply in source_ids. Save only an explicit idea or "
                 "note with save_idea or save_note. Use reply_only for unsupported conversation. "
                 "Every local action needs one to three EvidenceReference entries. Each entry must copy an "
                 "exact quote from one supplied recent_messages message and its exact message_id; do not cite "
@@ -320,6 +321,7 @@ class OpenAICompatibleModel:
             decision,
             recent_messages,
             candidate_events,
+            candidate_saved_items,
             candidate_project_records,
         )
         return decision
@@ -651,6 +653,7 @@ class OpenAICompatibleModel:
         decision: ConversationDecision,
         recent_messages: list[dict[str, str]],
         candidate_events: list[dict],
+        candidate_saved_items: list[dict],
         candidate_project_records: list[dict],
     ) -> None:
         messages_by_id = {
@@ -659,6 +662,9 @@ class OpenAICompatibleModel:
             if "message_id" in message and "content" in message
         }
         event_ids = {candidate["id"] for candidate in candidate_events if "id" in candidate}
+        saved_item_ids = {
+            candidate["id"] for candidate in candidate_saved_items if "id" in candidate
+        }
         record_ids = {
             candidate["id"] for candidate in candidate_project_records if "id" in candidate
         }
@@ -688,6 +694,11 @@ class OpenAICompatibleModel:
         ):
             raise InvalidStructuredOutput(
                 "The model selected a project record outside the supplied candidates.",
+                decision.model_dump_json(),
+            )
+        if any(source_id not in event_ids | saved_item_ids | record_ids for source_id in decision.source_ids):
+            raise InvalidStructuredOutput(
+                "The model cited a local answer source outside the supplied candidates.",
                 decision.model_dump_json(),
             )
 

@@ -1500,6 +1500,20 @@ class CaptureStore:
             raise KeyError(f"calendar update operation not found: {operation_id}")
         return _decode_calendar_event_update_operation(row)
 
+    def list_calendar_event_update_operations(
+        self, source_message_id: str
+    ) -> list[CalendarEventUpdateOperation]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM calendar_event_update_operations
+                WHERE source_message_id = ?
+                ORDER BY action_index ASC, id ASC
+                """,
+                (source_message_id,),
+            ).fetchall()
+        return [_decode_calendar_event_update_operation(row) for row in rows]
+
     def list_calendar_event_update_sources(self, operation_id: str) -> list[EvidenceReference]:
         with self._connect() as connection:
             rows = connection.execute(
