@@ -297,7 +297,10 @@ class ConversationRouterService:
         committed, saved_event = self.store.commit_prepared_calendar_event(
             saved.id, event, action.evidence
         )
-        return (committed,), f"Created local calendar event: {saved_event.title}."
+        return (
+            (committed,),
+            f"Created local calendar event: {saved_event.title} — {_event_schedule(saved_event)}.",
+        )
 
     def _update_event(
         self, user_message: Message, action: ContextualAction | None
@@ -749,3 +752,10 @@ def _parse_start_at(value: str) -> date | datetime:
         return datetime.fromisoformat(value)
     except ValueError:
         return date.fromisoformat(value)
+
+
+def _event_schedule(event: CalendarEvent) -> str:
+    timing = event.start_at.isoformat()
+    if event.end_at is not None:
+        timing = f"{timing} to {event.end_at.isoformat()}"
+    return f"{timing} ({event.timezone})"

@@ -24,6 +24,7 @@ from .models import (
 )
 from .phase_three import PhaseThreeWorkflow
 from .storage import CaptureStore
+from .time_config import configured_timezone
 from .workflow import configured_reference_date
 
 
@@ -622,9 +623,8 @@ def render_chat_page(
     st.caption(
         "Grounded in recent conversation context and locally stored project records."
     )
-    local_service = DeterministicChatService(
-        store, os.getenv("CAPTUREFLOW_TIMEZONE", "America/Vancouver")
-    )
+    timezone = configured_timezone()
+    local_service = DeterministicChatService(store, timezone)
     for message in store.list_messages(conversation_id):
         with st.chat_message(message.role):
             st.write(message.content)
@@ -653,9 +653,8 @@ def render_chat_page(
 def render_chat_input(
     store: CaptureStore, conversation_id: str, diagnostics_enabled: bool = False
 ) -> None:
-    local_service = DeterministicChatService(
-        store, os.getenv("CAPTUREFLOW_TIMEZONE", "America/Vancouver")
-    )
+    timezone = configured_timezone()
+    local_service = DeterministicChatService(store, timezone)
     if prompt := st.chat_input("Message CaptureFlow"):
         started = perf_counter()
         if prompt.strip().startswith("/"):
@@ -673,7 +672,6 @@ def render_chat_input(
                 )
         else:
             try:
-                timezone = os.getenv("CAPTUREFLOW_TIMEZONE", "America/Vancouver")
                 settings = ModelSettings.from_environment()
                 turn = ConversationRouterService(
                     store,

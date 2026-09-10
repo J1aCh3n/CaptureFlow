@@ -82,6 +82,35 @@ class ConversationRouterServiceTests(unittest.TestCase):
         self.assertEqual(replay.model_calls, 0)
         self.assertEqual(len(model.calls), 1)
 
+    def test_bare_future_weekday_creates_an_event_with_its_resolved_date(self) -> None:
+        content = "周五下午两点有架构评审。"
+        model = ScriptedContextualModel(
+            [
+                {
+                    "intent": "calendar_create",
+                    "action": {
+                        "action": "create_event",
+                        "content": "架构评审",
+                        "description": None,
+                        "date_expression": "周五",
+                        "time_expression": "下午两点",
+                        "end_time_expression": None,
+                        "target_event_id": None,
+                        "evidence": [{"message_id": "bare-weekday-turn", "source_quote": content}],
+                    },
+                }
+            ]
+        )
+
+        turn = ConversationRouterService(self.store, model, date(2026, 9, 10)).submit(
+            self.conversation.id, content, "bare-weekday-turn"
+        )
+
+        event = self.store.list_calendar_events()[0]
+        self.assertEqual(turn.outcome, "calendar_create")
+        self.assertEqual(event.start_at, datetime.fromisoformat("2026-09-11T14:00:00-07:00"))
+        self.assertIn("2026-09-11T14:00:00-07:00 (America/Vancouver)", turn.assistant_message.content)
+
     def test_event_correction_updates_supplied_event_without_second_model_call(self) -> None:
         source = self.store.save_message(
             Message(
@@ -262,7 +291,7 @@ class ConversationRouterServiceTests(unittest.TestCase):
                 timezone="America/Vancouver",
             )
         )
-        correction = "这个会议改到周四。"
+        correction = "这个会议改到周三。"
         model = ScriptedContextualModel(
             [
                 {
@@ -271,7 +300,7 @@ class ConversationRouterServiceTests(unittest.TestCase):
                         "action": "update_event",
                         "content": None,
                         "description": None,
-                        "date_expression": "周四",
+                        "date_expression": "周三",
                         "time_expression": None,
                         "end_time_expression": None,
                         "target_event_id": event.id,
@@ -308,7 +337,7 @@ class ConversationRouterServiceTests(unittest.TestCase):
                         "action": "create_event",
                         "content": "与 Daohui 碰头",
                         "description": "讨论 UR5 交接和 Vention 工装板尺寸。",
-                        "date_expression": "周五",
+                        "date_expression": "周四",
                         "time_expression": None,
                         "end_time_expression": None,
                         "target_event_id": None,
@@ -342,7 +371,7 @@ class ConversationRouterServiceTests(unittest.TestCase):
         self.assertEqual(self.store.list_tool_operations("initial-event-turn"), [])
         pending = self.store.get_pending_clarification(self.conversation.id)
         self.assertIsNotNone(pending)
-        self.assertEqual(pending.original_action["date_expression"], "周五")
+        self.assertEqual(pending.original_action["date_expression"], "周四")
 
         created = service.submit(self.conversation.id, answer, "date-answer-turn")
 
@@ -351,6 +380,7 @@ class ConversationRouterServiceTests(unittest.TestCase):
         self.assertEqual(event.title, "与 Daohui 碰头")
         self.assertEqual(event.description, "讨论 UR5 交接和 Vention 工装板尺寸。")
         self.assertEqual(event.start_at, datetime.fromisoformat("2026-09-11T14:00:00-07:00"))
+        self.assertIn("2026-09-11T14:00:00-07:00 (America/Vancouver)", created.assistant_message.content)
         expected_sources = [
             EvidenceReference(message_id="initial-event-turn", source_quote=original),
             EvidenceReference(message_id="date-answer-turn", source_quote=answer),

@@ -35,7 +35,7 @@ _CHINESE_WEEKDAYS = {
 }
 
 def resolve_relative_date(expression: str, reference_date: date, timezone: str) -> DateResolution:
-    """Resolve a small, explicit v0 vocabulary without guessing bare weekdays."""
+    """Resolve a small, explicit v0 vocabulary with future bare weekdays."""
 
     normalized = " ".join(expression.lower().split())
     if normalized.startswith("by "):
@@ -155,25 +155,49 @@ def resolve_relative_date(expression: str, reference_date: date, timezone: str) 
             explanation="根据提供的参考日期解析了下周日期。",
         )
     if normalized in _WEEKDAYS:
+        candidate = _future_weekday(reference_date, _WEEKDAYS[normalized])
+        if candidate is not None:
+            return DateResolution(
+                **base,
+                status="resolved",
+                resolved_date=candidate,
+                explanation="Resolved the nearest future weekday from the supplied reference date.",
+            )
         return DateResolution(
             **base,
             status="ambiguous",
-            explanation="A bare weekday can refer to more than one upcoming date.",
+            explanation="A bare weekday on the reference date needs an explicit date.",
         )
     if re.fullmatch(r"(?:周|星期|礼拜)[一二三四五六日天]", expression.strip()):
+        weekday = _CHINESE_WEEKDAYS[expression.strip()[-1]]
+        candidate = _future_weekday(reference_date, weekday)
+        if candidate is not None:
+            return DateResolution(
+                **base,
+                status="resolved",
+                resolved_date=candidate,
+                explanation="根据提供的参考日期解析了最近未来的星期。",
+            )
         return DateResolution(
             **base,
             status="ambiguous",
-            explanation="未带周次的中文星期表达可能指不同的日期，请确认具体日期。",
+            explanation="日期与所说星期相同，请确认具体日期。",
         )
     return DateResolution(
         **base,
         status="unsupported",
         explanation=(
             "This date tool supports bounded relative dates, ISO or Chinese full dates, "
-            "explicit next weekdays, and reports bare weekdays as ambiguous."
+            "explicit next weekdays, and future bare weekdays."
         ),
     )
+
+
+def _future_weekday(reference_date: date, weekday: int) -> date | None:
+    days_ahead = (weekday - reference_date.weekday()) % 7
+    if days_ahead == 0:
+        return None
+    return reference_date + timedelta(days=days_ahead)
 
 
 def _parse_iso_date(value: str) -> date | None:
