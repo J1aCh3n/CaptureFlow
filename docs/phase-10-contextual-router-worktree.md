@@ -126,6 +126,11 @@ Commit: `feat: use contextual routing in chat UI`
 
 ### 7. Complete deterministic and live acceptance
 
+- Complete. The non-UI deterministic suite passed 174 tests and the 20 UI
+  tests passed in isolated Streamlit groups. The frozen Phase 10 live fixture
+  passed all 16 ordered case/assertion records once with `gpt-5.6-terra` after
+  a first-run ambiguity failure revealed and verified a fail-closed
+  clarification repair. See `docs/phase-10-live-evidence.md`.
 - Cover schema, context, LLM payload, storage migration, calendar update/undo,
   unified routing, project apply-without-second-call, UI dispatch, and fallback.
 - Run the full deterministic suite.
