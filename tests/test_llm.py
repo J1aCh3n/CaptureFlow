@@ -9,12 +9,14 @@ from captureflow.models import CapturePlan, OrganizerDraft, Project
 class RecordingCompletions:
     def __init__(self, content: str | None = None) -> None:
         self.kwargs = None
+        self.calls = 0
         self.content = content or (
             '{"steps":[{"id":"task","action":"extract_task",'
             '"source_span":"Buy milk.","reason":"Explicit task."}]}'
         )
 
     def create(self, **kwargs):
+        self.calls += 1
         self.kwargs = kwargs
         return SimpleNamespace(
             choices=[
@@ -56,6 +58,114 @@ class OpenAICompatibleModelTests(unittest.TestCase):
         self.assertIn("rather than creating separate notes", prompt)
         self.assertIn("end_time_expression", prompt)
         self.assertIn("Never invent a default duration", prompt)
+
+    def test_contextual_router_receives_bounded_context_and_candidates_once(self) -> None:
+        completions = RecordingCompletions(
+            '{"intent":"calendar_create","action":{"action":"create_event",'
+            '"content":"Algorithm & Code Review","description":"讨论前缀树与最小堆。",'
+            '"date_expression":"这周四","time_expression":"下午四点",'
+            '"end_time_expression":"下午五点","target_event_id":null,'
+            '"evidence":[{"message_id":"message-1",'
+            '"source_quote":"我这周四下午四点到五点有算法优化与代码审查会议。"}]},'
+            '"project_changes":[],"clarification_question":null,'
+            '"pending_action":null,"reply":null}'
+        )
+        model = OpenAICompatibleModel.__new__(OpenAICompatibleModel)
+        model.settings = ModelSettings(api_key="test-key", model="gpt-5.6-terra")
+        model.client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+        recent_messages = [
+            {
+                "message_id": "message-1",
+                "role": "user",
+                "content": "我这周四下午四点到五点有算法优化与代码审查会议。",
+            }
+        ]
+
+        decision = model.propose_conversation_decision(
+            current_message=recent_messages[0],
+            recent_messages=recent_messages,
+            candidate_events=[{"id": "event-1", "title": "Existing meeting"}],
+            candidate_saved_items=[{"id": "idea-1", "kind": "idea", "content": "An idea."}],
+            candidate_project_records=[{"id": "record-1", "kind": "task", "state": "active"}],
+            reference_date="2026-09-09",
+            timezone="America/Vancouver",
+        )
+
+        prompt = completions.kwargs["messages"][0]["content"]
+        payload = json.loads(completions.kwargs["messages"][1]["content"])["input"]
+        self.assertEqual(decision.intent, "calendar_create")
+        self.assertEqual(decision.action.evidence[0].message_id, "message-1")
+        self.assertEqual(completions.calls, 1)
+        self.assertIn("calendar_create", prompt)
+        self.assertIn("tracker_change", prompt)
+        self.assertIn("exactly one supplied candidate_events ID", prompt)
+        self.assertEqual(payload["current_message"]["message_id"], "message-1")
+        self.assertEqual(payload["recent_messages"], recent_messages)
+        self.assertEqual(payload["candidate_events"][0]["id"], "event-1")
+        self.assertEqual(payload["candidate_saved_items"][0]["id"], "idea-1")
+        self.assertEqual(payload["candidate_project_records"][0]["id"], "record-1")
+
+    def test_contextual_router_accepts_task_not_calendar_decision(self) -> None:
+        completions = RecordingCompletions(
+            '{"intent":"tracker_change","action":null,"project_changes":['
+            '{"action":"create_record","kind":"task","content":"完成代码审查。",'
+            '"rationale":null,"source_quote":"我这周四需要完成代码审查。",'
+            '"target_record_id":null,"target_state":null}],'
+            '"clarification_question":null,"pending_action":null,"reply":null}'
+        )
+        model = OpenAICompatibleModel.__new__(OpenAICompatibleModel)
+        model.settings = ModelSettings(api_key="test-key", model="gpt-5.6-terra")
+        model.client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+        message = {
+            "message_id": "task-message",
+            "role": "user",
+            "content": "我这周四需要完成代码审查。",
+        }
+
+        decision = model.propose_conversation_decision(
+            current_message=message,
+            recent_messages=[message],
+            candidate_events=[],
+            candidate_saved_items=[],
+            candidate_project_records=[],
+            reference_date="2026-09-09",
+            timezone="America/Vancouver",
+        )
+
+        self.assertEqual(decision.intent, "tracker_change")
+        self.assertEqual(decision.project_changes[0].kind, "task")
+        self.assertEqual(completions.calls, 1)
+
+    def test_contextual_router_rejects_an_event_outside_its_candidates(self) -> None:
+        completions = RecordingCompletions(
+            '{"intent":"calendar_update","action":{"action":"update_event",'
+            '"content":null,"description":null,"date_expression":null,'
+            '"time_expression":"14:00","end_time_expression":null,'
+            '"target_event_id":"foreign-event","evidence":[{"message_id":"message-1",'
+            '"source_quote":"这个会议改到下午两点。"}]},"project_changes":[],'
+            '"clarification_question":null,"pending_action":null,"reply":null}'
+        )
+        model = OpenAICompatibleModel.__new__(OpenAICompatibleModel)
+        model.settings = ModelSettings(api_key="test-key", model="gpt-5.6-terra")
+        model.client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+        message = {
+            "message_id": "message-1",
+            "role": "user",
+            "content": "这个会议改到下午两点。",
+        }
+
+        with self.assertRaisesRegex(InvalidStructuredOutput, "outside the supplied candidates"):
+            model.propose_conversation_decision(
+                current_message=message,
+                recent_messages=[message],
+                candidate_events=[{"id": "event-1", "title": "Known meeting"}],
+                candidate_saved_items=[],
+                candidate_project_records=[],
+                reference_date="2026-09-09",
+                timezone="America/Vancouver",
+            )
+
+        self.assertEqual(completions.calls, 1)
 
     def test_project_responder_receives_only_bounded_project_context(self) -> None:
         completions = RecordingCompletions(

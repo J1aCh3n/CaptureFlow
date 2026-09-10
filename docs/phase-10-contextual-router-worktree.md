@@ -53,13 +53,13 @@ Commit: `feat: expose bounded context for conversation routing`
 
 ### 3. Implement one-call contextual model proposal
 
-- Extend `llm.py` with a structured `propose_conversation_decision()` call.
-- Provide current message, bounded context, candidate IDs, reference date,
-  timezone, and pending clarification state in its prompt.
-- Require one of: calendar create/update, saved item, tracker change, local or
-  project answer, clarify, reply only.
-- Do not permit the model to supply arbitrary database IDs or act outside the
-  supplied candidates.
+- Complete. `propose_conversation_decision()` makes one JSON/Pydantic proposal
+  using the current message, bounded context, candidates, date/time context,
+  and pending clarification state.
+- The prompt distinguishes calendar create/update, saved items, tracker change,
+  local/project answer, clarification, and reply-only.
+- A zero-extra-call adapter guard rejects event/record IDs outside supplied
+  candidates and evidence IDs or quotes outside supplied recent messages.
 
 Exit gate: fixture/model tests distinguish an event statement from a task, and
 the model needs only one proposal call per normal natural-language turn.

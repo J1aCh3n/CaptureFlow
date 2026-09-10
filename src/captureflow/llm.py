@@ -8,6 +8,7 @@ from pydantic import BaseModel, ValidationError
 
 from .models import (
     CapturePlan,
+    ConversationDecision,
     GroundingReport,
     LocalContextAnswerDecision,
     MemoryAgentDraft,
@@ -78,6 +79,21 @@ class TurnRouterModel(Protocol):
         validation_error: str,
         clarification_context: dict | None = None,
     ) -> TurnDecision: ...
+
+
+class ContextualConversationModel(Protocol):
+    def propose_conversation_decision(
+        self,
+        current_message: dict[str, str],
+        recent_messages: list[dict[str, str]],
+        candidate_events: list[dict],
+        candidate_saved_items: list[dict],
+        candidate_project_records: list[dict],
+        reference_date: str,
+        timezone: str,
+        pending_clarification: dict | None = None,
+        context_truncated: bool = False,
+    ) -> ConversationDecision: ...
 
 
 class ProjectConversationModel(Protocol):
@@ -247,6 +263,66 @@ class OpenAICompatibleModel:
                 "clarification_context": clarification_context,
             },
         )
+
+    def propose_conversation_decision(
+        self,
+        current_message: dict[str, str],
+        recent_messages: list[dict[str, str]],
+        candidate_events: list[dict],
+        candidate_saved_items: list[dict],
+        candidate_project_records: list[dict],
+        reference_date: str,
+        timezone: str,
+        pending_clarification: dict | None = None,
+        context_truncated: bool = False,
+    ) -> ConversationDecision:
+        """Make one untrusted, context-aware routing proposal; storage remains downstream."""
+
+        decision = self._complete(
+            ConversationDecision,
+            system=(
+                "You are CaptureFlow's Phase 10 contextual conversation router. Return JSON only. "
+                "You do not execute tools or write SQLite. Choose exactly one intent and use only "
+                "the supplied current_message, recent_messages, candidates, reference_date, timezone, "
+                "and pending clarification. This is not a general chatbot. "
+                "A definite user statement that a meeting or event is scheduled with an explicit date "
+                "must use calendar_create, even when it is not phrased as a command. Use the event title "
+                "as action content, keep agenda or attendance text in description, and copy explicit date "
+                "and time expressions rather than resolving them yourself. A user-owned task or deadline "
+                "that is not a scheduled event must use tracker_change, not Calendar. "
+                "Use calendar_update only when exactly one supplied candidate_events ID is the intended "
+                "active event. Its target_event_id must be copied exactly from that candidate; never invent "
+                "an ID. A correction may cite the earlier meeting message and the current correction message. "
+                "If its target or replacement information is ambiguous, use clarify with a pending calendar "
+                "action and one concise question; do not create a tracker record. "
+                "A meeting question is local_answer and must not propose a write. Project status/history "
+                "questions are project_answer and must not propose a write. Save only an explicit idea or "
+                "note with save_idea or save_note. Use reply_only for unsupported conversation. "
+                "Every local action needs one to three EvidenceReference entries. Each entry must copy an "
+                "exact quote from one supplied recent_messages message and its exact message_id; do not cite "
+                "the same message twice. Any candidate ID you provide may reference only supplied candidates. "
+                "Never invent a source quote, candidate ID, date, time, task, meeting, project "
+                "fact, or external information. If context_truncated is true, do not imply older messages were seen."
+            ),
+            payload={
+                "current_message": current_message,
+                "recent_messages": recent_messages,
+                "candidate_events": candidate_events,
+                "candidate_saved_items": candidate_saved_items,
+                "candidate_project_records": candidate_project_records,
+                "reference_date": reference_date,
+                "timezone": timezone,
+                "pending_clarification": pending_clarification,
+                "context_truncated": context_truncated,
+            },
+        )
+        self._validate_contextual_references(
+            decision,
+            recent_messages,
+            candidate_events,
+            candidate_project_records,
+        )
+        return decision
 
     def repair_turn(
         self,
@@ -570,6 +646,51 @@ class OpenAICompatibleModel:
             payload={"source_text": source_text, "draft": draft.model_dump(mode="json")},
         )
 
+    @staticmethod
+    def _validate_contextual_references(
+        decision: ConversationDecision,
+        recent_messages: list[dict[str, str]],
+        candidate_events: list[dict],
+        candidate_project_records: list[dict],
+    ) -> None:
+        messages_by_id = {
+            message["message_id"]: message["content"]
+            for message in recent_messages
+            if "message_id" in message and "content" in message
+        }
+        event_ids = {candidate["id"] for candidate in candidate_events if "id" in candidate}
+        record_ids = {
+            candidate["id"] for candidate in candidate_project_records if "id" in candidate
+        }
+        for action in (decision.action, decision.pending_action):
+            if action is None:
+                continue
+            if action.target_event_id is not None and action.target_event_id not in event_ids:
+                raise InvalidStructuredOutput(
+                    "The model selected a calendar event outside the supplied candidates.",
+                    decision.model_dump_json(),
+                )
+            for evidence in action.evidence:
+                source_message = messages_by_id.get(evidence.message_id)
+                if source_message is None:
+                    raise InvalidStructuredOutput(
+                        "The model cited a message outside the supplied recent context.",
+                        decision.model_dump_json(),
+                    )
+                if _normalized_text(evidence.source_quote) not in _normalized_text(source_message):
+                    raise InvalidStructuredOutput(
+                        "The model cited text that is not present in its supplied message.",
+                        decision.model_dump_json(),
+                    )
+        if any(
+            change.target_record_id is not None and change.target_record_id not in record_ids
+            for change in decision.project_changes
+        ):
+            raise InvalidStructuredOutput(
+                "The model selected a project record outside the supplied candidates.",
+                decision.model_dump_json(),
+            )
+
     def _complete(self, schema: type[Schema], system: str, payload: dict[str, Any]) -> Schema:
         prompt = json.dumps(
             {"schema": schema.model_json_schema(), "input": payload}, ensure_ascii=False
@@ -599,6 +720,10 @@ class OpenAICompatibleModel:
             if isinstance(error, ModelError):
                 raise
             raise ModelError(f"Model request failed: {error}") from error
+
+
+def _normalized_text(value: str) -> str:
+    return " ".join(value.split())
 
 
 class ScriptedModel:
