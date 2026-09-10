@@ -7,12 +7,21 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 from pydantic import ValidationError
 
 from .llm import ModelError, ProjectConversationModel
-from .models import Message, Project, ProjectConversationDecision, utc_now
+from .models import (
+    CalendarEvent,
+    Message,
+    Project,
+    ProjectConversationDecision,
+    ProjectRecord,
+    SavedItem,
+    utc_now,
+)
 from .storage import CaptureStore
 
 
 MAX_CONTEXT_MESSAGES = 8
 MAX_CONTEXT_CHARACTERS = 12_000
+MAX_ROUTER_CANDIDATES_PER_KIND = 3
 
 
 @dataclass(frozen=True)
@@ -26,6 +35,23 @@ class ProjectContextWindow:
 
     def for_model(self) -> list[dict[str, str]]:
         return [{"role": message.role, "content": message.content} for message in self.messages]
+
+    def for_router(self) -> list[dict[str, str]]:
+        """Expose stable message IDs for cross-message router evidence."""
+
+        return [
+            {"message_id": message.id, "role": message.role, "content": message.content}
+            for message in self.messages
+        ]
+
+
+@dataclass(frozen=True)
+class RouterCandidates:
+    """Bounded, workspace-safe records that a contextual router may reference."""
+
+    events: tuple[CalendarEvent, ...]
+    saved_items: tuple[SavedItem, ...]
+    project_records: tuple[ProjectRecord, ...]
 
 
 @dataclass(frozen=True)
@@ -67,6 +93,37 @@ def select_project_context(
         character_count += len(message.content)
 
     return ProjectContextWindow(messages=tuple(reversed(selected_reversed)), omitted_message_count=0)
+
+
+def select_router_candidates(
+    store: CaptureStore,
+    conversation_id: str,
+    *,
+    max_per_kind: int = MAX_ROUTER_CANDIDATES_PER_KIND,
+) -> RouterCandidates:
+    """Select stable local candidates without widening the current workspace or Project scope."""
+
+    if max_per_kind < 1:
+        raise ValueError("router candidate limit must be positive")
+    conversation = store.get_conversation(conversation_id)
+    events = tuple(store.list_calendar_events(conversation.workspace_id)[:max_per_kind])
+    project = store.get_conversation_project(conversation_id)
+    if project is None:
+        return RouterCandidates(
+            events=events,
+            saved_items=tuple(store.list_saved_items(conversation.workspace_id)[:max_per_kind]),
+            project_records=(),
+        )
+
+    return RouterCandidates(
+        events=events,
+        saved_items=tuple(
+            store.list_saved_items_for_project(project.id, conversation.workspace_id)[:max_per_kind]
+        ),
+        project_records=tuple(
+            store.list_project_records(project.id, states=("active",))[:max_per_kind]
+        ),
+    )
 
 
 def _logical_turn_order(messages: list[Message]) -> list[Message]:

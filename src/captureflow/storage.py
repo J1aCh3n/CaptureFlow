@@ -1490,6 +1490,34 @@ class CaptureStore:
             ).fetchall()
         return [SavedItem(**dict(row)) for row in rows]
 
+    def list_saved_items_for_project(
+        self,
+        project_id: str,
+        workspace_id: str = DEFAULT_WORKSPACE_ID,
+        kinds: tuple[str, ...] = ("idea", "note"),
+        statuses: tuple[str, ...] = ("active",),
+    ) -> list[SavedItem]:
+        if not kinds or not statuses:
+            return []
+        kind_placeholders = ", ".join("?" for _ in kinds)
+        status_placeholders = ", ".join("?" for _ in statuses)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT saved_items.*
+                FROM saved_items
+                JOIN conversation_projects
+                  ON conversation_projects.conversation_id = saved_items.conversation_id
+                WHERE conversation_projects.project_id = ?
+                  AND saved_items.workspace_id = ?
+                  AND saved_items.kind IN ({kind_placeholders})
+                  AND saved_items.status IN ({status_placeholders})
+                ORDER BY saved_items.updated_at DESC, saved_items.id DESC
+                """,
+                (project_id, workspace_id, *kinds, *statuses),
+            ).fetchall()
+        return [SavedItem(**dict(row)) for row in rows]
+
     def update_saved_item(self, item_id: str, *, content: str) -> SavedItem:
         existing = self.get_saved_item(item_id)
         updated = SavedItem(

@@ -39,11 +39,12 @@ Commit: `feat: add contextual conversation decision schema`
 
 ### 2. Expose bounded router context and candidates
 
-- Add `ProjectContextWindow.for_router()` in `context_service.py`; it includes
-  stable message IDs, roles, and text without changing existing `for_model()`.
-- Add deterministic candidate selectors for active calendar events, saved items,
-  and project records.
-- Bound every candidate list and include only workspace-safe active records.
+- Complete. `ProjectContextWindow.for_router()` includes stable message IDs,
+  roles, and text without changing `for_model()`.
+- `select_router_candidates()` returns at most three active Calendar events,
+  SavedItems, and ProjectRecords per kind.
+- Calendar stays personal-workspace scoped; Project conversations restrict
+  SavedItems and ProjectRecords to their assigned Project.
 
 Exit gate: router context has at most the established message/character budget,
 and each candidate can be traced to a stable local ID.

@@ -1,10 +1,23 @@
 import tempfile
 import unittest
+from datetime import date
 from pathlib import Path
 
-from captureflow.context_service import ProjectConversationService, select_project_context
+from captureflow.context_service import (
+    ProjectConversationService,
+    select_project_context,
+    select_router_candidates,
+)
 from captureflow.llm import ModelError
-from captureflow.models import Conversation, Message, Project, ProjectConversationDecision
+from captureflow.models import (
+    CalendarEvent,
+    Conversation,
+    Message,
+    Project,
+    ProjectConversationDecision,
+    ProjectRecord,
+    SavedItem,
+)
 from captureflow.storage import CaptureStore
 
 
@@ -100,6 +113,237 @@ class ProjectConversationServiceTests(unittest.TestCase):
         window = select_project_context([assistant, user])
 
         self.assertEqual([message.id for message in window.messages], [user.id, assistant.id])
+
+    def test_router_context_adds_message_ids_without_changing_model_context(self) -> None:
+        messages = [
+            Message(id="user-1", conversation_id="conversation", role="user", content="Schedule it."),
+            Message(
+                id="assistant-1",
+                conversation_id="conversation",
+                role="assistant",
+                content="Which time?",
+                reply_to_message_id="user-1",
+            ),
+        ]
+
+        window = select_project_context(messages)
+
+        self.assertEqual(
+            window.for_model(),
+            [
+                {"role": "user", "content": "Schedule it."},
+                {"role": "assistant", "content": "Which time?"},
+            ],
+        )
+        self.assertEqual(
+            window.for_router(),
+            [
+                {"message_id": "user-1", "role": "user", "content": "Schedule it."},
+                {
+                    "message_id": "assistant-1",
+                    "role": "assistant",
+                    "content": "Which time?",
+                },
+            ],
+        )
+
+    def test_router_candidates_are_bounded_and_project_scoped(self) -> None:
+        source = self.store.save_message(
+            Message(
+                id="candidate-source",
+                conversation_id=self.conversation.id,
+                role="user",
+                content="Candidate source.",
+            )
+        )
+        other_conversation = self.store.save_conversation(
+            Conversation(id="candidate-other", title="Other project")
+        )
+        other_project = self.store.save_project(Project(id="project-other", name="Other"))
+        self.store.assign_conversation_project(other_conversation.id, other_project.id)
+        other_source = self.store.save_message(
+            Message(
+                id="candidate-other-source",
+                conversation_id=other_conversation.id,
+                role="user",
+                content="Other candidate source.",
+            )
+        )
+        events = [
+            self.store.save_calendar_event(
+                CalendarEvent(
+                    id=f"candidate-event-{index}",
+                    conversation_id=self.conversation.id,
+                    title=f"Event {index}",
+                    source_message_id=source.id,
+                    source_quote=source.content,
+                    start_at=date(2026, 9, 10 + index),
+                    all_day=True,
+                    timezone="America/Vancouver",
+                )
+            )
+            for index in range(4)
+        ]
+        same_project_item = self.store.save_saved_item(
+            SavedItem(
+                id="same-project-item",
+                conversation_id=self.conversation.id,
+                kind="idea",
+                content="Same project idea.",
+                source_message_id=source.id,
+                source_quote=source.content,
+            )
+        )
+        other_project_item = self.store.save_saved_item(
+            SavedItem(
+                id="other-project-item",
+                conversation_id=other_conversation.id,
+                kind="note",
+                content="Other project note.",
+                source_message_id=other_source.id,
+                source_quote=other_source.content,
+            )
+        )
+        active_record = self.store.save_project_record(
+            ProjectRecord(
+                id="active-project-record",
+                project_id=self.project.id,
+                conversation_id=self.conversation.id,
+                kind="task",
+                content="Active project task.",
+                state="active",
+                source_message_id=source.id,
+                source_quote=source.content,
+            )
+        )
+        self.store.save_project_record(
+            ProjectRecord(
+                id="completed-project-record",
+                project_id=self.project.id,
+                conversation_id=self.conversation.id,
+                kind="task",
+                content="Completed project task.",
+                state="completed",
+                source_message_id=source.id,
+                source_quote=source.content,
+            )
+        )
+
+        candidates = select_router_candidates(self.store, self.conversation.id)
+
+        self.assertEqual([event.id for event in candidates.events], [event.id for event in events[:3]])
+        self.assertEqual([item.id for item in candidates.saved_items], [same_project_item.id])
+        self.assertNotIn(other_project_item.id, [item.id for item in candidates.saved_items])
+        self.assertEqual([record.id for record in candidates.project_records], [active_record.id])
+
+    def test_unassigned_router_candidates_exclude_project_records(self) -> None:
+        unassigned = self.store.save_conversation(
+            Conversation(id="unassigned-router", title="Unassigned")
+        )
+        source = self.store.save_message(
+            Message(
+                id="unassigned-source",
+                conversation_id=unassigned.id,
+                role="user",
+                content="An unassigned idea.",
+            )
+        )
+        item = self.store.save_saved_item(
+            SavedItem(
+                id="unassigned-item",
+                conversation_id=unassigned.id,
+                kind="note",
+                content="An unassigned note.",
+                source_message_id=source.id,
+                source_quote=source.content,
+            )
+        )
+
+        candidates = select_router_candidates(self.store, unassigned.id)
+
+        self.assertIn(item.id, [candidate.id for candidate in candidates.saved_items])
+        self.assertEqual(candidates.project_records, ())
+
+    def test_router_candidates_exclude_deleted_and_foreign_workspace_records(self) -> None:
+        source = self.store.save_message(
+            Message(
+                id="deleted-candidate-source",
+                conversation_id=self.conversation.id,
+                role="user",
+                content="Deleted candidate source.",
+            )
+        )
+        deleted_event = self.store.save_calendar_event(
+            CalendarEvent(
+                id="deleted-candidate-event",
+                conversation_id=self.conversation.id,
+                title="Deleted event",
+                source_message_id=source.id,
+                source_quote=source.content,
+                start_at=date(2026, 9, 10),
+                all_day=True,
+                timezone="America/Vancouver",
+            )
+        )
+        deleted_item = self.store.save_saved_item(
+            SavedItem(
+                id="deleted-candidate-item",
+                conversation_id=self.conversation.id,
+                kind="note",
+                content="Deleted note.",
+                source_message_id=source.id,
+                source_quote=source.content,
+            )
+        )
+        self.store.save_project_record(
+            ProjectRecord(
+                id="deleted-candidate-record",
+                project_id=self.project.id,
+                conversation_id=self.conversation.id,
+                kind="task",
+                content="Deleted task.",
+                state="deleted",
+                source_message_id=source.id,
+                source_quote=source.content,
+            )
+        )
+        self.store.set_calendar_event_status(deleted_event.id, "deleted")
+        self.store.set_saved_item_status(deleted_item.id, "deleted")
+        other_workspace_conversation = self.store.save_conversation(
+            Conversation(
+                id="other-workspace-conversation",
+                workspace_id="other-workspace",
+                title="Other workspace",
+            )
+        )
+        other_workspace_source = self.store.save_message(
+            Message(
+                id="other-workspace-source",
+                conversation_id=other_workspace_conversation.id,
+                role="user",
+                content="Other workspace source.",
+            )
+        )
+        foreign_event = self.store.save_calendar_event(
+            CalendarEvent(
+                id="other-workspace-event",
+                workspace_id="other-workspace",
+                conversation_id=other_workspace_conversation.id,
+                title="Foreign event",
+                source_message_id=other_workspace_source.id,
+                source_quote=other_workspace_source.content,
+                start_at=date(2026, 9, 11),
+                all_day=True,
+                timezone="America/Vancouver",
+            )
+        )
+
+        candidates = select_router_candidates(self.store, self.conversation.id)
+
+        self.assertNotIn(deleted_event.id, [candidate.id for candidate in candidates.events])
+        self.assertNotIn(deleted_item.id, [candidate.id for candidate in candidates.saved_items])
+        self.assertNotIn(foreign_event.id, [candidate.id for candidate in candidates.events])
+        self.assertEqual(candidates.project_records, ())
 
     def test_service_discloses_when_older_messages_fall_outside_the_window(self) -> None:
         for index in range(4):
