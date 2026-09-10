@@ -688,6 +688,7 @@ class UiTests(unittest.TestCase):
         event = store.list_calendar_events()[0]
 
         self.open_page(app, "Calendar")
+        self.assertTrue(any(element.label == "Sources (1)" for element in app.expander))
         next(field for field in app.text_input if field.key == f"event-title-{event.id}").set_value(
             "Submit final report"
         ).run()

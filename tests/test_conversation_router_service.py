@@ -4,7 +4,15 @@ from datetime import date, datetime
 from pathlib import Path
 
 from captureflow.conversation_router_service import ConversationRouterService
-from captureflow.models import CalendarEvent, Conversation, Message, Project, ProjectRecord
+from captureflow.models import (
+    CalendarEvent,
+    Conversation,
+    EvidenceReference,
+    Message,
+    Project,
+    ProjectRecord,
+    ToolOperation,
+)
 from captureflow.storage import CaptureStore
 
 
@@ -65,6 +73,10 @@ class ConversationRouterServiceTests(unittest.TestCase):
         self.assertEqual(event.title, "算法优化与代码审查")
         self.assertEqual(event.start_at, datetime.fromisoformat("2026-09-10T16:00:00-07:00"))
         self.assertEqual(event.end_at, datetime.fromisoformat("2026-09-10T17:00:00-07:00"))
+        self.assertEqual(
+            self.store.list_calendar_event_sources(event.id),
+            [EvidenceReference(message_id="event-turn", source_quote=content)],
+        )
         self.assertEqual(self.store.list_project_records(self.project.id), [])
         self.assertEqual(model.calls[0]["candidate_events"], [])
         self.assertEqual(replay.model_calls, 0)
@@ -284,3 +296,122 @@ class ConversationRouterServiceTests(unittest.TestCase):
             self.store.list_calendar_event_update_operations("ambiguous-correction-turn"), []
         )
         self.assertIsNotNone(self.store.get_pending_clarification(self.conversation.id))
+
+    def test_unresolved_event_creation_clarifies_then_persists_all_message_sources(self) -> None:
+        original = "与 Daohui 碰头，讨论 UR5 交接和 Vention 工装板尺寸。"
+        answer = "会议时间是 2026-09-11 下午两点。"
+        model = ScriptedContextualModel(
+            [
+                {
+                    "intent": "calendar_create",
+                    "action": {
+                        "action": "create_event",
+                        "content": "与 Daohui 碰头",
+                        "description": "讨论 UR5 交接和 Vention 工装板尺寸。",
+                        "date_expression": "周五",
+                        "time_expression": None,
+                        "end_time_expression": None,
+                        "target_event_id": None,
+                        "evidence": [{"message_id": "initial-event-turn", "source_quote": original}],
+                    },
+                },
+                {
+                    "intent": "calendar_create",
+                    "action": {
+                        "action": "create_event",
+                        "content": "与 Daohui 碰头",
+                        "description": "讨论 UR5 交接和 Vention 工装板尺寸。",
+                        "date_expression": "2026-09-11",
+                        "time_expression": "下午两点",
+                        "end_time_expression": None,
+                        "target_event_id": None,
+                        "evidence": [
+                            {"message_id": "initial-event-turn", "source_quote": original},
+                            {"message_id": "date-answer-turn", "source_quote": answer},
+                        ],
+                    },
+                },
+            ]
+        )
+        service = ConversationRouterService(self.store, model, date(2026, 9, 10))
+
+        clarification = service.submit(self.conversation.id, original, "initial-event-turn")
+
+        self.assertEqual(clarification.outcome, "clarification_created")
+        self.assertEqual(self.store.list_calendar_events(), [])
+        self.assertEqual(self.store.list_tool_operations("initial-event-turn"), [])
+        pending = self.store.get_pending_clarification(self.conversation.id)
+        self.assertIsNotNone(pending)
+        self.assertEqual(pending.original_action["date_expression"], "周五")
+
+        created = service.submit(self.conversation.id, answer, "date-answer-turn")
+
+        event = self.store.list_calendar_events()[0]
+        self.assertEqual(created.outcome, "calendar_create")
+        self.assertEqual(event.title, "与 Daohui 碰头")
+        self.assertEqual(event.description, "讨论 UR5 交接和 Vention 工装板尺寸。")
+        self.assertEqual(event.start_at, datetime.fromisoformat("2026-09-11T14:00:00-07:00"))
+        expected_sources = [
+            EvidenceReference(message_id="initial-event-turn", source_quote=original),
+            EvidenceReference(message_id="date-answer-turn", source_quote=answer),
+        ]
+        self.assertEqual(self.store.list_calendar_event_sources(event.id), expected_sources)
+        operation = self.store.list_tool_operations("date-answer-turn")[0]
+        self.assertEqual(
+            operation.request["evidence"],
+            [source.model_dump(mode="json") for source in expected_sources],
+        )
+        self.assertIsNone(self.store.get_pending_clarification(self.conversation.id))
+
+    def test_resumed_calendar_creation_restores_all_persisted_sources(self) -> None:
+        original = self.store.save_message(
+            Message(
+                id="resume-original-turn",
+                conversation_id=self.conversation.id,
+                role="user",
+                content="与 Daohui 碰头，讨论 UR5 交接。",
+            )
+        )
+        current = self.store.save_message(
+            Message(
+                id="resume-date-turn",
+                conversation_id=self.conversation.id,
+                role="user",
+                content="会议时间是 2026-09-11 下午两点。",
+            )
+        )
+        sources = [
+            EvidenceReference(message_id=original.id, source_quote=original.content),
+            EvidenceReference(message_id=current.id, source_quote=current.content),
+        ]
+        self.store.save_tool_operation(
+            ToolOperation(
+                id="prepared-contextual-event",
+                source_message_id=current.id,
+                action_index=0,
+                tool_name="create_local_event",
+                request={
+                    "title": "与 Daohui 碰头",
+                    "description": "讨论 UR5 交接。",
+                    "source_quote": current.content,
+                    "evidence": [source.model_dump(mode="json") for source in sources],
+                    "start_at": "2026-09-11T14:00:00-07:00",
+                    "end_at": None,
+                    "all_day": False,
+                    "timezone": "America/Vancouver",
+                },
+                status="prepared",
+            )
+        )
+        model = ScriptedContextualModel([])
+
+        resumed = ConversationRouterService(self.store, model, date(2026, 9, 10)).submit(
+            self.conversation.id, current.content, current.id
+        )
+
+        event = self.store.list_calendar_events()[0]
+        self.assertEqual(resumed.outcome, "resumed")
+        self.assertEqual(resumed.model_calls, 0)
+        self.assertEqual(event.title, "与 Daohui 碰头")
+        self.assertEqual(self.store.list_calendar_event_sources(event.id), sources)
+        self.assertEqual(model.calls, [])

@@ -13,6 +13,7 @@ from .conversation_router_service import ConversationRouterService
 from .llm import ModelError, ModelSettings, OpenAICompatibleModel
 from .memory_service import MemoryService
 from .models import (
+    CalendarEvent,
     Capture,
     CaptureRun,
     Conversation,
@@ -1046,7 +1047,7 @@ def render_calendar_page(store: CaptureStore) -> None:
                 st.caption(f"Timed event: {timing}")
             if event.description:
                 st.markdown(event.description)
-            st.caption(f"Original chat source: {event.source_quote}")
+            _render_calendar_sources(store, event)
             st.caption(f"Updated {event.updated_at.isoformat()}")
             if st.button("Delete event", key=f"delete-event-{event.id}"):
                 store.set_calendar_event_status(event.id, "deleted")
@@ -1063,10 +1064,17 @@ def render_calendar_page(store: CaptureStore) -> None:
                     st.write(f"{timing} — {event.title}")
                     if event.description:
                         st.markdown(event.description)
-                    st.caption(f"Original chat source: {event.source_quote}")
+                    _render_calendar_sources(store, event)
                     if st.button("Restore event", key=f"restore-event-{event.id}"):
                         store.set_calendar_event_status(event.id, "active")
                         st.rerun()
+
+
+def _render_calendar_sources(store: CaptureStore, event: CalendarEvent) -> None:
+    sources = store.list_calendar_event_sources(event.id)
+    with st.expander(f"Sources ({len(sources)})"):
+        for source in sources:
+            st.caption(source.source_quote)
 
 
 def render_saved_items_page(store: CaptureStore) -> None:

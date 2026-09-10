@@ -95,6 +95,10 @@ class V2StorageTests(unittest.TestCase):
 
         self.assertEqual(self.store.get_calendar_event(event.id), event)
         self.assertEqual(self.store.list_calendar_events(), [event])
+        self.assertEqual(
+            self.store.list_calendar_event_sources(event.id),
+            [EvidenceReference(message_id=self.user_message.id, source_quote=self.user_message.content)],
+        )
         self.assertEqual(self.store.get_saved_item(saved_item.id), saved_item)
         self.assertEqual(self.store.list_saved_items(), [saved_item])
         self.assertEqual(self.store.get_tool_operation(operation.id), operation)

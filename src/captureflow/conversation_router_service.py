@@ -134,12 +134,26 @@ class ConversationRouterService:
         local_started = perf_counter()
         try:
             if decision.intent == "calendar_create":
+                if self._date_needs_clarification(decision.action):
+                    assistant = self._save_calendar_date_clarification(user_message, decision.action)
+                    return self._turn(
+                        user_message,
+                        assistant,
+                        decision,
+                        context_window,
+                        candidates,
+                        (),
+                        model_calls=1,
+                        model_seconds=model_seconds,
+                        local_seconds=perf_counter() - local_started,
+                        outcome="clarification_created",
+                    )
                 operations, reply = self._create_event(user_message, decision.action)
                 if pending is not None:
                     self.store.resolve_pending_clarification(pending.id, "resolved")
             elif decision.intent == "calendar_update":
-                if self._update_date_needs_clarification(decision.action):
-                    assistant = self._save_update_date_clarification(user_message, decision.action)
+                if self._date_needs_clarification(decision.action):
+                    assistant = self._save_calendar_date_clarification(user_message, decision.action)
                     return self._turn(
                         user_message,
                         assistant,
@@ -269,6 +283,7 @@ class ConversationRouterService:
                 "title": event.title,
                 "description": event.description,
                 "source_quote": event.source_quote,
+                "evidence": [reference.model_dump(mode="json") for reference in action.evidence],
                 "start_at": event.start_at.isoformat(),
                 "end_at": None if event.end_at is None else event.end_at.isoformat(),
                 "all_day": event.all_day,
@@ -279,7 +294,9 @@ class ConversationRouterService:
             updated_at=user_message.created_at,
         )
         saved = self.store.save_tool_operation(operation)
-        committed, saved_event = self.store.commit_prepared_calendar_event(saved.id, event)
+        committed, saved_event = self.store.commit_prepared_calendar_event(
+            saved.id, event, action.evidence
+        )
         return (committed,), f"Created local calendar event: {saved_event.title}."
 
     def _update_event(
@@ -308,7 +325,7 @@ class ConversationRouterService:
         committed, event = self.store.commit_prepared_calendar_event_update(saved.id)
         return (committed,), f"Updated local calendar event: {event.title}."
 
-    def _update_date_needs_clarification(self, action: ContextualAction | None) -> bool:
+    def _date_needs_clarification(self, action: ContextualAction | None) -> bool:
         if action is None or action.date_expression is None:
             return False
         resolution = resolve_relative_date(action.date_expression, self.reference_date, self.timezone)
@@ -387,16 +404,16 @@ class ConversationRouterService:
         self.store.save_pending_clarification(clarification)
         return assistant
 
-    def _save_update_date_clarification(
+    def _save_calendar_date_clarification(
         self, user_message: Message, action: ContextualAction | None
     ) -> Message:
         assert action is not None
         assistant = self._assistant_message(
-            user_message, "Which exact date should I use for this local event update?"
+            user_message, "Which exact date should I use for this local event?"
         )
         self.store.save_pending_clarification(
             PendingClarification(
-                id=_stable_id(user_message.id, "contextual-update-date-clarification"),
+                id=_stable_id(user_message.id, "contextual-calendar-date-clarification"),
                 conversation_id=user_message.conversation_id,
                 source_message_id=user_message.id,
                 assistant_message_id=assistant.id,
@@ -466,7 +483,14 @@ class ConversationRouterService:
                 created_at=user_message.created_at,
                 updated_at=user_message.created_at,
             )
-            committed, _ = self.store.commit_prepared_calendar_event(operation.id, event)
+            evidence = [
+                EvidenceReference.model_validate(reference)
+                for reference in request.get(
+                    "evidence",
+                    [{"message_id": user_message.id, "source_quote": request["source_quote"]}],
+                )
+            ]
+            committed, _ = self.store.commit_prepared_calendar_event(operation.id, event, evidence)
             return committed
         kind = "idea" if operation.tool_name == "save_idea" else "note"
         item = SavedItem(

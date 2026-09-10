@@ -386,6 +386,29 @@ MIGRATIONS = (
             "CREATE INDEX calendar_event_update_operations_message ON calendar_event_update_operations(source_message_id, action_index)",
         ),
     ),
+    Migration(
+        version=10,
+        name="v2_calendar_event_sources",
+        statements=(
+            """
+            CREATE TABLE calendar_event_sources (
+                event_id TEXT NOT NULL REFERENCES calendar_events(id) ON DELETE CASCADE,
+                source_message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+                source_quote TEXT NOT NULL,
+                source_rank INTEGER NOT NULL CHECK (source_rank BETWEEN 0 AND 2),
+                PRIMARY KEY (event_id, source_message_id),
+                UNIQUE (event_id, source_rank)
+            )
+            """,
+            """
+            INSERT INTO calendar_event_sources
+            (event_id, source_message_id, source_quote, source_rank)
+            SELECT id, source_message_id, source_quote, 0
+            FROM calendar_events
+            """,
+            "CREATE INDEX calendar_event_sources_message ON calendar_event_sources(source_message_id, event_id)",
+        ),
+    ),
 )
 
 LATEST_SCHEMA_VERSION = MIGRATIONS[-1].version

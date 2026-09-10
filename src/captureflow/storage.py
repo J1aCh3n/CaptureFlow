@@ -1359,6 +1359,17 @@ class CaptureStore:
                 ),
             )
             inserted = cursor.rowcount == 1
+            if inserted:
+                self._save_calendar_event_sources(
+                    connection,
+                    event,
+                    [
+                        EvidenceReference(
+                            message_id=event.source_message_id,
+                            source_quote=event.source_quote,
+                        )
+                    ],
+                )
         if not inserted:
             existing = self.get_calendar_event(event.id)
             if existing != event:
@@ -1392,6 +1403,22 @@ class CaptureStore:
                 (workspace_id, *statuses),
             ).fetchall()
         return [CalendarEvent(**dict(row)) for row in rows]
+
+    def list_calendar_event_sources(self, event_id: str) -> list[EvidenceReference]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT source_message_id, source_quote
+                FROM calendar_event_sources
+                WHERE event_id = ?
+                ORDER BY source_rank ASC
+                """,
+                (event_id,),
+            ).fetchall()
+        return [
+            EvidenceReference(message_id=row["source_message_id"], source_quote=row["source_quote"])
+            for row in rows
+        ]
 
     def update_calendar_event(
         self, event_id: str, *, title: str, start_at: date | datetime
@@ -1774,8 +1801,14 @@ class CaptureStore:
         ]
 
     def commit_prepared_calendar_event(
-        self, operation_id: str, event: CalendarEvent
+        self,
+        operation_id: str,
+        event: CalendarEvent,
+        evidence: list[EvidenceReference] | None = None,
     ) -> tuple[ToolOperation, CalendarEvent]:
+        event_evidence = evidence or [
+            EvidenceReference(message_id=event.source_message_id, source_quote=event.source_quote)
+        ]
         with self._connect() as connection:
             operation = self._prepared_operation(connection, operation_id, "create_local_event")
             result = {"event_id": event.id}
@@ -1817,6 +1850,7 @@ class CaptureStore:
                 )
                 if existing != event:
                     raise ValueError("calendar event ID already exists with different content")
+            self._save_calendar_event_sources(connection, event, event_evidence)
             self._commit_operation(connection, operation, result)
         return self.get_tool_operation(operation_id), self.get_calendar_event(event.id)
 
@@ -2141,6 +2175,38 @@ class CaptureStore:
         if conversation_id is not None and message.conversation_id != conversation_id:
             raise ValueError("a V2 source message must belong to the target conversation")
         return message
+
+    @staticmethod
+    def _save_calendar_event_sources(
+        connection: sqlite3.Connection,
+        event: CalendarEvent,
+        evidence: list[EvidenceReference],
+    ) -> None:
+        if not evidence:
+            raise ValueError("a calendar event requires evidence")
+        if len(evidence) > 3:
+            raise ValueError("a calendar event supports at most three evidence references")
+        if len({reference.message_id for reference in evidence}) != len(evidence):
+            raise ValueError("calendar event evidence messages must be unique")
+        for reference in evidence:
+            message = CaptureStore._source_message_in_workspace(
+                connection, reference.message_id, event.workspace_id
+            )
+            if message.role != "user":
+                raise ValueError("calendar event evidence must reference user messages")
+            CaptureStore._require_source_quote(message, reference.source_quote)
+        connection.executemany(
+            """
+            INSERT INTO calendar_event_sources
+            (event_id, source_message_id, source_quote, source_rank)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(event_id, source_message_id) DO NOTHING
+            """,
+            [
+                (event.id, reference.message_id, reference.source_quote, rank)
+                for rank, reference in enumerate(evidence)
+            ],
+        )
 
     @staticmethod
     def _calendar_event_in_connection(

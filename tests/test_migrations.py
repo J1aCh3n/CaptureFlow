@@ -42,7 +42,7 @@ class MigrationTests(unittest.TestCase):
 
         self.assertEqual(
             versions,
-            [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (LATEST_SCHEMA_VERSION,)],
+            [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (LATEST_SCHEMA_VERSION,)],
         )
         self.assertTrue(
             {
@@ -61,6 +61,7 @@ class MigrationTests(unittest.TestCase):
                 "local_context_answer_sources",
                 "calendar_event_update_operations",
                 "calendar_event_update_sources",
+                "calendar_event_sources",
             }.issubset(tables)
         )
         self.assertIn("description", calendar_columns)
@@ -94,7 +95,7 @@ class MigrationTests(unittest.TestCase):
             versions = connection.execute(
                 "SELECT version FROM schema_migrations ORDER BY version"
             ).fetchall()
-        self.assertEqual(versions, [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,)])
+        self.assertEqual(versions, [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,)])
 
     def test_existing_v7_event_upgrades_with_an_empty_description(self) -> None:
         with closing(sqlite3.connect(self.database_path)) as connection:
@@ -130,8 +131,12 @@ class MigrationTests(unittest.TestCase):
             event = connection.execute(
                 "SELECT title, description FROM calendar_events WHERE id = 'event-1'"
             ).fetchone()
+            sources = connection.execute(
+                "SELECT source_message_id, source_quote, source_rank FROM calendar_event_sources WHERE event_id = 'event-1'"
+            ).fetchall()
 
         self.assertEqual(event, ("Meeting", None))
+        self.assertEqual(sources, [("message-1", "Meeting", 0)])
 
     def test_repeated_initialize_does_not_repeat_migrations(self) -> None:
         store = CaptureStore(self.database_path)
@@ -144,7 +149,7 @@ class MigrationTests(unittest.TestCase):
             ).fetchall()
         self.assertEqual(
             rows,
-            [(1, 1), (2, 1), (3, 1), (4, 1), (5, 1), (6, 1), (7, 1), (8, 1), (9, 1)],
+            [(1, 1), (2, 1), (3, 1), (4, 1), (5, 1), (6, 1), (7, 1), (8, 1), (9, 1), (10, 1)],
         )
 
     def test_failed_migration_rolls_back_schema_and_version(self) -> None:
