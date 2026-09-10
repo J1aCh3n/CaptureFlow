@@ -698,6 +698,12 @@ def render_chat_input(
                         repair_used=False,
                     )
             except (ModelError, ValueError) as error:
+                project = store.get_conversation_project(conversation_id)
+                if project is not None and store.get_pending_clarification(conversation_id) is None:
+                    try:
+                        store.begin_project_conversation(conversation_id)
+                    except ValueError as project_error:
+                        error = ModelError(str(project_error))
                 turn = local_service.submit_reply_only(conversation_id, prompt, str(error))
                 if diagnostics_enabled:
                     elapsed = perf_counter() - started

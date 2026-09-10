@@ -1,0 +1,42 @@
+{
+  "protocol": {
+    "reference_date": "2026-09-09",
+    "timezone": "America/Vancouver",
+    "database_seed": "isolated phase-10 contextual-router live fixture",
+    "model": "gpt-5.6-terra"
+  },
+  "cases": [
+    {
+      "name": "calendar_create",
+      "input": "我明天下午四点到五点有一场算法优化与代码审查会议。主题是讨论前缀树与最小堆在当前 Python 项目中的性能瓶颈。"
+    },
+    {
+      "name": "calendar_update",
+      "input": "把这场会议改到明天下午两点到三点。"
+    },
+    {
+      "name": "tracker_change",
+      "input": "我需要排查 ROS 2 发布者-订阅者节点之间的延迟问题。"
+    },
+    {
+      "name": "meeting_question",
+      "input": "我明天的算法优化与代码审查会议几点开始，讨论什么？"
+    },
+    {
+      "name": "replay_idempotency",
+      "input": "Replay the first calendar message with its existing message ID."
+    },
+    {
+      "name": "cross_conversation_local_retrieval",
+      "input": "我明天的算法优化与代码审查会议几点开始，讨论什么？"
+    },
+    {
+      "name": "cross_conversation_project_retrieval",
+      "input": "这个项目当前有什么待办？"
+    },
+    {
+      "name": "ambiguous_correction",
+      "input": "这个会议改到周四。"
+    }
+  ]
+}

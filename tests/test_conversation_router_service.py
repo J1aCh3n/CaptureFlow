@@ -227,3 +227,60 @@ class ConversationRouterServiceTests(unittest.TestCase):
 
         self.assertEqual(turn.outcome, "model_or_validation_failure")
         self.assertEqual(self.store.list_calendar_events(), [])
+
+    def test_unresolved_update_date_creates_a_pending_clarification_without_a_write(self) -> None:
+        source = self.store.save_message(
+            Message(
+                id="ambiguous-event-source",
+                conversation_id=self.conversation.id,
+                role="user",
+                content="本周四下午四点有工作流会议。",
+            )
+        )
+        event = self.store.save_calendar_event(
+            CalendarEvent(
+                id="ambiguous-workflow-event",
+                conversation_id=self.conversation.id,
+                title="工作流会议",
+                source_message_id=source.id,
+                source_quote=source.content,
+                start_at=datetime.fromisoformat("2026-09-10T16:00:00-07:00"),
+                end_at=datetime.fromisoformat("2026-09-10T17:00:00-07:00"),
+                all_day=False,
+                timezone="America/Vancouver",
+            )
+        )
+        correction = "这个会议改到周四。"
+        model = ScriptedContextualModel(
+            [
+                {
+                    "intent": "calendar_update",
+                    "action": {
+                        "action": "update_event",
+                        "content": None,
+                        "description": None,
+                        "date_expression": "周四",
+                        "time_expression": None,
+                        "end_time_expression": None,
+                        "target_event_id": event.id,
+                        "evidence": [
+                            {
+                                "message_id": "ambiguous-correction-turn",
+                                "source_quote": correction,
+                            }
+                        ],
+                    },
+                }
+            ]
+        )
+
+        turn = ConversationRouterService(
+            self.store, model, date(2026, 9, 9)
+        ).submit(self.conversation.id, correction, "ambiguous-correction-turn")
+
+        self.assertEqual(turn.outcome, "clarification_created")
+        self.assertEqual(self.store.get_calendar_event(event.id), event)
+        self.assertEqual(
+            self.store.list_calendar_event_update_operations("ambiguous-correction-turn"), []
+        )
+        self.assertIsNotNone(self.store.get_pending_clarification(self.conversation.id))
