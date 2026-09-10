@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from datetime import timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 from streamlit.testing.v1 import AppTest
 
@@ -18,6 +19,64 @@ from captureflow.models import (
 )
 from captureflow.storage import CaptureStore
 from captureflow.workflow import configured_reference_date
+
+
+class _CalendarRoutingUiModel:
+    """A deterministic Phase 6 seam: AppTest never reaches an external model."""
+
+    def propose_conversation_decision(
+        self,
+        *,
+        current_message: dict[str, str],
+        candidate_events: list[dict],
+        **_: object,
+    ) -> dict:
+        evidence = [
+            {
+                "message_id": current_message["message_id"],
+                "source_quote": current_message["content"],
+            }
+        ]
+        if candidate_events:
+            return {
+                "intent": "calendar_update",
+                "action": {
+                    "action": "update_event",
+                    "target_event_id": candidate_events[0]["id"],
+                    "time_expression": "15:00",
+                    "evidence": evidence,
+                },
+            }
+        return {
+            "intent": "calendar_create",
+            "action": {
+                "action": "create_event",
+                "content": "Algorithm review",
+                "description": "Discuss the algorithm bottleneck.",
+                "date_expression": "tomorrow",
+                "time_expression": "14:00",
+                "end_time_expression": "15:00",
+                "evidence": evidence,
+            },
+        }
+
+
+class _LocalAnswerUiModel:
+    def propose_conversation_decision(
+        self,
+        *,
+        candidate_events: list[dict],
+        candidate_saved_items: list[dict],
+        **_: object,
+    ) -> dict:
+        return {
+            "intent": "local_answer",
+            "reply": "Use the selected local records.",
+            "source_ids": [
+                *[event["id"] for event in candidate_events],
+                *[item["id"] for item in candidate_saved_items],
+            ],
+        }
 
 
 class UiTests(unittest.TestCase):
@@ -234,6 +293,37 @@ class UiTests(unittest.TestCase):
 
         self.assertEqual(len(store.list_calendar_events()), 0)
         self.assertTrue(any("CAPTUREFLOW_API_KEY" in element.value for element in app.markdown))
+
+    def test_ordinary_chat_routes_calendar_create_and_update_through_contextual_router(self) -> None:
+        os.environ["CAPTUREFLOW_API_KEY"] = "ui-test-key"
+        os.environ["CAPTUREFLOW_MODEL"] = "ui-test-model"
+        with patch(
+            "captureflow.ui.OpenAICompatibleModel",
+            return_value=_CalendarRoutingUiModel(),
+        ):
+            app = AppTest.from_file("app.py").run()
+            app.sidebar.toggle[0].set_value(True).run()
+            app.chat_input[0].set_value(
+                "Tomorrow at 14:00 I have an algorithm review meeting."
+            ).run()
+            app.chat_input[0].set_value("Move that review to 15:00.").run()
+
+        store = CaptureStore(os.environ["CAPTUREFLOW_DATABASE_PATH"])
+        store.initialize()
+        event = store.list_calendar_events()[0]
+        self.assertEqual(event.title, "Algorithm review")
+        self.assertEqual(event.start_at.hour, 15)
+        update_operations = [
+            operation
+            for message in store.list_messages(store.list_conversations()[0].id)
+            if message.role == "user"
+            for operation in store.list_calendar_event_update_operations(message.id)
+        ]
+        self.assertEqual(len(update_operations), 1)
+        self.assertTrue(
+            any(button.key.startswith("undo-calendar-update-") for button in app.button)
+        )
+        self.assertTrue(any("Intent: calendar_update" in caption.value for caption in app.caption))
 
     def test_pending_clarification_has_a_visible_cancel_control(self) -> None:
         app = AppTest.from_file("app.py").run()
@@ -498,7 +588,9 @@ class UiTests(unittest.TestCase):
         self.open_page(app, "Calendar")
         self.assertTrue(any("Submit report" in element.value for element in app.text_input))
 
-    def test_unassigned_chat_reads_local_meeting_context_without_model_configuration(self) -> None:
+    def test_unassigned_chat_reads_local_meeting_context_through_contextual_router(self) -> None:
+        os.environ["CAPTUREFLOW_API_KEY"] = "ui-test-key"
+        os.environ["CAPTUREFLOW_MODEL"] = "ui-test-model"
         app = AppTest.from_file("app.py").run()
         store = CaptureStore(os.environ["CAPTUREFLOW_DATABASE_PATH"])
         store.initialize()
@@ -536,11 +628,15 @@ class UiTests(unittest.TestCase):
             )
         )
 
-        app.run()
-        next(
-            field for field in app.sidebar.radio if field.key == "selected_conversation_id"
-        ).set_value(later_conversation.id).run()
-        app.chat_input[0].set_value("我明天的会议要做什么？").run()
+        with patch(
+            "captureflow.ui.OpenAICompatibleModel",
+            return_value=_LocalAnswerUiModel(),
+        ):
+            app.run()
+            next(
+                field for field in app.sidebar.radio if field.key == "selected_conversation_id"
+            ).set_value(later_conversation.id).run()
+            app.chat_input[0].set_value("我明天的会议要做什么？").run()
 
         answer = store.get_assistant_reply(store.list_messages(later_conversation.id)[0].id)
         self.assertIsNotNone(answer)

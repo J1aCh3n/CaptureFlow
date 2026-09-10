@@ -9,12 +9,7 @@ import streamlit as st
 from pydantic import ValidationError
 
 from .chat_service import DeterministicChatService
-from .local_context_service import (
-    LocalContextService,
-    is_local_context_query,
-    is_local_event_statement,
-    is_local_write_request,
-)
+from .conversation_router_service import ConversationRouterService
 from .llm import ModelError, ModelSettings, OpenAICompatibleModel
 from .memory_service import MemoryService
 from .models import (
@@ -27,10 +22,6 @@ from .models import (
     RunError,
 )
 from .phase_three import PhaseThreeWorkflow
-from .project_service import ProjectTrackerService
-from .retrieval import classify_project_query
-from .retrieval_service import ProjectRetrievalService
-from .router_service import BoundedChatService
 from .storage import CaptureStore
 from .workflow import configured_reference_date
 
@@ -639,6 +630,10 @@ def render_chat_page(
             if message.role == "assistant" and message.reply_to_message_id:
                 for operation in store.list_tool_operations(message.reply_to_message_id):
                     _render_operation_card(local_service, operation.id)
+                for operation in store.list_calendar_event_update_operations(
+                    message.reply_to_message_id
+                ):
+                    _render_calendar_update_card(local_service, operation.id)
                 for operation in store.list_project_change_operations(message.reply_to_message_id):
                     _render_project_change_card(store, operation.id)
                 _render_project_answer_sources(store, message.id)
@@ -678,108 +673,43 @@ def render_chat_input(
         else:
             try:
                 timezone = os.getenv("CAPTUREFLOW_TIMEZONE", "America/Vancouver")
-                if is_local_write_request(prompt) or is_local_event_statement(prompt):
-                    settings = ModelSettings.from_environment()
-                    turn = BoundedChatService(
-                        store,
-                        OpenAICompatibleModel(settings),
-                        configured_reference_date(timezone),
-                        timezone,
-                    ).submit(conversation_id, prompt)
-                    if diagnostics_enabled:
-                        _remember_turn_diagnostics(
-                            turn.user_message.id,
-                            mode="model_router",
-                            outcome=turn.diagnostics.outcome,
-                            model_calls=turn.model_calls,
-                            model_seconds=turn.diagnostics.model_seconds,
-                            local_seconds=turn.diagnostics.local_seconds,
-                            total_seconds=perf_counter() - started,
-                            repair_used=turn.diagnostics.repair_used,
-                        )
-                elif is_local_context_query(prompt):
-                    try:
-                        local_context_model = OpenAICompatibleModel(ModelSettings.from_environment())
-                    except ModelError:
-                        local_context_model = None
-                    turn = LocalContextService(
-                        store,
-                        configured_reference_date(timezone),
-                        timezone,
-                        model=local_context_model,
-                    ).submit(conversation_id, prompt)
-                    if diagnostics_enabled:
-                        _remember_turn_diagnostics(
-                            turn.user_message.id,
-                            mode=(
-                                "local_context_model"
-                                if turn.model_calls and not turn.fallback_used
-                                else "local_context_fallback"
-                            ),
-                            outcome=turn.outcome,
-                            model_calls=turn.model_calls,
-                            model_seconds=turn.model_seconds,
-                            local_seconds=max(0, perf_counter() - started - turn.model_seconds),
-                            total_seconds=perf_counter() - started,
-                            repair_used=turn.model_calls > 1,
-                        )
-                else:
-                    settings = ModelSettings.from_environment()
-                    pending = store.get_pending_clarification(conversation_id)
-                    project = store.get_conversation_project(conversation_id)
-                    if project is not None and pending is None:
-                        retrieval_mode = classify_project_query(prompt)
-                        if retrieval_mode is not None:
-                            turn = ProjectRetrievalService(
-                                store, OpenAICompatibleModel(settings)
-                            ).submit(conversation_id, prompt, retrieval_mode)
-                            diagnostics_mode = "project_retrieval"
-                        else:
-                            turn = ProjectTrackerService(
-                                store, OpenAICompatibleModel(settings)
-                            ).submit(conversation_id, prompt)
-                            diagnostics_mode = "project_tracker"
-                        if diagnostics_enabled:
-                            _remember_turn_diagnostics(
-                                turn.user_message.id,
-                                mode=diagnostics_mode,
-                                outcome=turn.outcome,
-                                model_calls=turn.model_calls,
-                                model_seconds=turn.model_seconds,
-                                local_seconds=max(0, perf_counter() - started - turn.model_seconds),
-                                total_seconds=perf_counter() - started,
-                                repair_used=False,
-                            )
-                    else:
-                        turn = BoundedChatService(
-                            store,
-                            OpenAICompatibleModel(settings),
-                            configured_reference_date(timezone), timezone
-                        ).submit(conversation_id, prompt)
-                        if diagnostics_enabled:
-                            _remember_turn_diagnostics(
-                                turn.user_message.id,
-                                mode="model_router",
-                                outcome=turn.diagnostics.outcome,
-                                model_calls=turn.model_calls,
-                                model_seconds=turn.diagnostics.model_seconds,
-                                local_seconds=turn.diagnostics.local_seconds,
-                                total_seconds=perf_counter() - started,
-                                repair_used=turn.diagnostics.repair_used,
-                            )
+                settings = ModelSettings.from_environment()
+                turn = ConversationRouterService(
+                    store,
+                    OpenAICompatibleModel(settings),
+                    configured_reference_date(timezone),
+                    timezone,
+                ).submit(conversation_id, prompt)
+                if diagnostics_enabled:
+                    _remember_turn_diagnostics(
+                        turn.user_message.id,
+                        mode="contextual_router",
+                        intent=None if turn.decision is None else turn.decision.intent,
+                        bounded_context_messages=len(turn.context_window.messages),
+                        context_truncated=turn.context_window.truncated,
+                        candidate_events=len(turn.candidates.events),
+                        candidate_saved_items=len(turn.candidates.saved_items),
+                        candidate_project_records=len(turn.candidates.project_records),
+                        outcome=turn.outcome,
+                        model_calls=turn.model_calls,
+                        model_seconds=turn.model_seconds,
+                        local_seconds=turn.local_seconds,
+                        total_seconds=perf_counter() - started,
+                        repair_used=False,
+                    )
             except (ModelError, ValueError) as error:
-                project = store.get_conversation_project(conversation_id)
-                if project is not None and store.get_pending_clarification(conversation_id) is None:
-                    try:
-                        store.begin_project_conversation(conversation_id)
-                    except ValueError as project_error:
-                        error = ModelError(str(project_error))
                 turn = local_service.submit_reply_only(conversation_id, prompt, str(error))
                 if diagnostics_enabled:
                     elapsed = perf_counter() - started
                     _remember_turn_diagnostics(
                         turn.user_message.id,
                         mode="configuration_error",
+                        intent=None,
+                        bounded_context_messages=0,
+                        context_truncated=False,
+                        candidate_events=0,
+                        candidate_saved_items=0,
+                        candidate_project_records=0,
                         outcome="no_model_call",
                         model_calls=0,
                         model_seconds=0,
@@ -810,6 +740,18 @@ def _render_turn_diagnostics(message_id: str) -> None:
             f"Local validation/write: {diagnostics['local_seconds']:.3f}s · "
             f"Total submit: {diagnostics['total_seconds']:.3f}s"
         )
+        if "intent" in diagnostics:
+            intent = diagnostics["intent"] or "not available"
+            st.caption(
+                f"Intent: {intent} · Bounded context: "
+                f"{diagnostics['bounded_context_messages']} message(s) · "
+                f"Truncated: {'yes' if diagnostics['context_truncated'] else 'no'}"
+            )
+            st.caption(
+                f"Candidates: events {diagnostics['candidate_events']} · "
+                f"ideas/notes {diagnostics['candidate_saved_items']} · "
+                f"project records {diagnostics['candidate_project_records']}"
+            )
         st.caption("Session-only timing; prompts, raw model output, and credentials are not stored.")
 
 
@@ -819,6 +761,19 @@ def _render_operation_card(service: DeterministicChatService, operation_id: str)
         st.caption(f"Local action: {operation.tool_name}; status: {operation.status}")
         if operation.status == "committed" and st.button(
             "Undo", key=f"undo-operation-{operation.id}"
+        ):
+            service.undo(operation.id)
+            st.rerun()
+
+
+def _render_calendar_update_card(service: DeterministicChatService, operation_id: str) -> None:
+    operation = service.store.get_calendar_event_update_operation(operation_id)
+    with st.container(border=True):
+        st.caption(
+            f"Local calendar update: {operation.after.title}; status: {operation.status}"
+        )
+        if operation.status == "committed" and st.button(
+            "Undo calendar update", key=f"undo-calendar-update-{operation.id}"
         ):
             service.undo(operation.id)
             st.rerun()

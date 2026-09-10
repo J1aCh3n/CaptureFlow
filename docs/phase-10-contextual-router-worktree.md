@@ -108,6 +108,11 @@ Commit: `feat: route ordinary chat through contextual decisions`
 
 ### 6. Switch the Streamlit entry point and diagnostics
 
+- Complete. Slash commands still use `DeterministicChatService`; every other
+  message now invokes `ConversationRouterService` once. Chat timelines render
+  calendar-update undo cards, and session diagnostics expose the decision
+  intent, bounded-context size, candidate counts, model-call count, and
+  outcome without retaining prompt text, raw output, or credentials.
 - Simplify `ui.py`: slash commands stay deterministic; all other natural
   language goes through the conversation-router service.
 - Show intent, bounded-context count, candidate counts, model-call count, and
