@@ -1,9 +1,10 @@
 import tempfile
 import unittest
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from captureflow.chat_service import DeterministicChatService
-from captureflow.models import Conversation
+from captureflow.models import CalendarEventUpdateOperation, Conversation, EvidenceReference
 from captureflow.storage import CaptureStore
 
 
@@ -77,3 +78,45 @@ class DeterministicChatServiceTests(unittest.TestCase):
         self.assertEqual(undone, repeated)
         self.assertEqual(undone.status, "undone")
         self.assertEqual(self.store.get_calendar_event(event_id).status, "deleted")
+
+    def test_undo_restores_a_committed_calendar_update(self) -> None:
+        created = self.service.submit(
+            self.conversation.id,
+            "/event 2026-09-15 | Submit report",
+            message_id="update-create-message",
+        )
+        correction = self.service.submit(
+            self.conversation.id,
+            "Move the report to September 16.",
+            message_id="update-correction-message",
+        )
+        event = self.store.get_calendar_event(created.operation.result["event_id"])
+        update = CalendarEventUpdateOperation(
+            id="calendar-update-undo",
+            source_message_id=correction.user_message.id,
+            action_index=0,
+            event_id=event.id,
+            before=event,
+            after=event.model_copy(
+                update={
+                    "start_at": date(2026, 9, 16),
+                    "updated_at": datetime(2026, 9, 9, tzinfo=timezone.utc),
+                }
+            ),
+            status="prepared",
+        )
+        self.store.prepare_calendar_event_update(
+            update,
+            [
+                EvidenceReference(
+                    message_id=correction.user_message.id,
+                    source_quote="Move the report",
+                )
+            ],
+        )
+        self.store.commit_prepared_calendar_event_update(update.id)
+
+        undone = self.service.undo(update.id)
+
+        self.assertEqual(undone.status, "undone")
+        self.assertEqual(self.store.get_calendar_event(event.id), event)

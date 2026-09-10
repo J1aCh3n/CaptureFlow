@@ -10,10 +10,12 @@ from .memory import MAX_RETRIEVED_MEMORIES, contains_credential_disclosure, lexi
 from .migrations import apply_migrations
 from .models import (
     CalendarEvent,
+    CalendarEventUpdateOperation,
     Capture,
     CaptureRun,
     Conversation,
     DEFAULT_WORKSPACE_ID,
+    EvidenceReference,
     MemoryEvent,
     MemoryItem,
     Message,
@@ -1414,6 +1416,136 @@ class CaptureStore:
             )
         return self.get_calendar_event(event_id)
 
+    def prepare_calendar_event_update(
+        self, operation: CalendarEventUpdateOperation, evidence: list[EvidenceReference]
+    ) -> CalendarEventUpdateOperation:
+        """Persist a validated update intent and its bounded message provenance."""
+
+        if operation.status != "prepared":
+            raise ValueError("only a prepared calendar update can be saved")
+        if not evidence:
+            raise ValueError("a calendar update requires evidence")
+        if len(evidence) > 3:
+            raise ValueError("a calendar update supports at most three evidence references")
+        if len({reference.message_id for reference in evidence}) != len(evidence):
+            raise ValueError("calendar update evidence messages must be unique")
+
+        with self._connect() as connection:
+            existing = self._calendar_event_in_connection(connection, operation.event_id)
+            if existing.workspace_id != operation.workspace_id:
+                raise ValueError("calendar update target is outside the intended workspace")
+            if existing.status != "active":
+                raise ValueError("only active calendar events can be updated")
+            if existing != operation.before:
+                raise ValueError("calendar update target changed before preparation")
+            source = self._source_message_in_workspace(
+                connection, operation.source_message_id, operation.workspace_id
+            )
+            if source.role != "user":
+                raise ValueError("a calendar update source message must have the user role")
+            for reference in evidence:
+                message = self._source_message_in_workspace(
+                    connection, reference.message_id, operation.workspace_id
+                )
+                if message.role != "user":
+                    raise ValueError("calendar update evidence must reference user messages")
+                self._require_source_quote(message, reference.source_quote)
+            cursor = connection.execute(
+                """
+                INSERT INTO calendar_event_update_operations
+                (id, source_message_id, action_index, event_id, workspace_id, before_json,
+                 after_json, status, error, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO NOTHING
+                """,
+                (
+                    operation.id,
+                    operation.source_message_id,
+                    operation.action_index,
+                    operation.event_id,
+                    operation.workspace_id,
+                    json.dumps(operation.before.model_dump(mode="json"), sort_keys=True),
+                    json.dumps(operation.after.model_dump(mode="json"), sort_keys=True),
+                    operation.status,
+                    operation.error,
+                    operation.created_at.isoformat(),
+                    operation.updated_at.isoformat(),
+                ),
+            )
+            inserted = cursor.rowcount == 1
+            if inserted:
+                connection.executemany(
+                    """
+                    INSERT INTO calendar_event_update_sources
+                    (update_operation_id, source_message_id, source_quote, source_rank)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    [
+                        (operation.id, reference.message_id, reference.source_quote, rank)
+                        for rank, reference in enumerate(evidence)
+                    ],
+                )
+        if not inserted:
+            existing_operation = self.get_calendar_event_update_operation(operation.id)
+            if existing_operation != operation or self.list_calendar_event_update_sources(operation.id) != evidence:
+                raise ValueError("calendar update operation ID already exists with different content")
+        return self.get_calendar_event_update_operation(operation.id)
+
+    def get_calendar_event_update_operation(self, operation_id: str) -> CalendarEventUpdateOperation:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM calendar_event_update_operations WHERE id = ?", (operation_id,)
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"calendar update operation not found: {operation_id}")
+        return _decode_calendar_event_update_operation(row)
+
+    def list_calendar_event_update_sources(self, operation_id: str) -> list[EvidenceReference]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT source_message_id, source_quote
+                FROM calendar_event_update_sources
+                WHERE update_operation_id = ?
+                ORDER BY source_rank ASC
+                """,
+                (operation_id,),
+            ).fetchall()
+        return [
+            EvidenceReference(message_id=row["source_message_id"], source_quote=row["source_quote"])
+            for row in rows
+        ]
+
+    def commit_prepared_calendar_event_update(
+        self, operation_id: str
+    ) -> tuple[CalendarEventUpdateOperation, CalendarEvent]:
+        with self._connect() as connection:
+            operation = self._calendar_event_update_operation_in_connection(connection, operation_id)
+            if operation.status == "committed":
+                return operation, self._calendar_event_in_connection(connection, operation.event_id)
+            if operation.status != "prepared":
+                raise ValueError("only a prepared calendar update can be committed")
+            existing = self._calendar_event_in_connection(connection, operation.event_id)
+            if existing != operation.before:
+                raise ValueError("calendar update target changed before commit")
+            self._write_calendar_event(connection, operation.after)
+            self._set_calendar_event_update_status(connection, operation, "committed")
+        return self.get_calendar_event_update_operation(operation_id), self.get_calendar_event(operation.event_id)
+
+    def undo_calendar_event_update(self, operation_id: str) -> CalendarEventUpdateOperation:
+        with self._connect() as connection:
+            operation = self._calendar_event_update_operation_in_connection(connection, operation_id)
+            if operation.status == "undone":
+                return operation
+            if operation.status != "committed":
+                raise ValueError("only a committed calendar update can be undone")
+            existing = self._calendar_event_in_connection(connection, operation.event_id)
+            if existing != operation.after:
+                raise ValueError("calendar update target changed after commit")
+            self._write_calendar_event(connection, operation.before)
+            self._set_calendar_event_update_status(connection, operation, "undone")
+        return self.get_calendar_event_update_operation(operation_id)
+
     def set_calendar_event_status(self, event_id: str, status: str) -> CalendarEvent:
         if status not in {"active", "deleted"}:
             raise ValueError("invalid calendar event status")
@@ -1997,6 +2129,79 @@ class CaptureStore:
         return message
 
     @staticmethod
+    def _calendar_event_in_connection(
+        connection: sqlite3.Connection, event_id: str
+    ) -> CalendarEvent:
+        row = connection.execute("SELECT * FROM calendar_events WHERE id = ?", (event_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"calendar event not found: {event_id}")
+        return CalendarEvent(**dict(row))
+
+    @staticmethod
+    def _calendar_event_update_operation_in_connection(
+        connection: sqlite3.Connection, operation_id: str
+    ) -> CalendarEventUpdateOperation:
+        row = connection.execute(
+            "SELECT * FROM calendar_event_update_operations WHERE id = ?", (operation_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"calendar update operation not found: {operation_id}")
+        return _decode_calendar_event_update_operation(row)
+
+    @staticmethod
+    def _source_message_in_workspace(
+        connection: sqlite3.Connection, message_id: str, workspace_id: str
+    ) -> Message:
+        row = connection.execute(
+            """
+            SELECT messages.*
+            FROM messages JOIN conversations ON conversations.id = messages.conversation_id
+            WHERE messages.id = ? AND conversations.workspace_id = ?
+            """,
+            (message_id, workspace_id),
+        ).fetchone()
+        if row is None:
+            raise ValueError("calendar update source is outside the intended workspace")
+        return Message(**dict(row))
+
+    @staticmethod
+    def _write_calendar_event(connection: sqlite3.Connection, event: CalendarEvent) -> None:
+        connection.execute(
+            """
+            UPDATE calendar_events
+            SET title = ?, description = ?, start_at = ?, end_at = ?, all_day = ?, timezone = ?,
+                status = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                event.title,
+                event.description,
+                event.start_at.isoformat(),
+                None if event.end_at is None else event.end_at.isoformat(),
+                int(event.all_day),
+                event.timezone,
+                event.status,
+                event.updated_at.isoformat(),
+                event.id,
+            ),
+        )
+
+    @staticmethod
+    def _set_calendar_event_update_status(
+        connection: sqlite3.Connection,
+        operation: CalendarEventUpdateOperation,
+        status: str,
+    ) -> None:
+        connection.execute(
+            """
+            UPDATE calendar_event_update_operations
+            SET status = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (status, utc_now().isoformat(), operation.id),
+        )
+
+    @staticmethod
     def _prepared_operation(
         connection: sqlite3.Connection, operation_id: str, tool_name: str | None = None
     ) -> ToolOperation:
@@ -2136,6 +2341,13 @@ def _decode_tool_operation(row: sqlite3.Row) -> ToolOperation:
     result_json = payload.pop("result_json")
     payload["result"] = None if result_json is None else json.loads(result_json)
     return ToolOperation(**payload)
+
+
+def _decode_calendar_event_update_operation(row: sqlite3.Row) -> CalendarEventUpdateOperation:
+    payload = dict(row)
+    payload["before"] = CalendarEvent.model_validate_json(payload.pop("before_json"))
+    payload["after"] = CalendarEvent.model_validate_json(payload.pop("after_json"))
+    return CalendarEventUpdateOperation(**payload)
 
 
 def _decode_clarification(row: sqlite3.Row) -> PendingClarification:

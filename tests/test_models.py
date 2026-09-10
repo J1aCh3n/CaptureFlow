@@ -5,6 +5,7 @@ from pydantic import ValidationError
 
 from captureflow.models import (
     CalendarEvent,
+    CalendarEventUpdateOperation,
     Capture,
     ContextualAction,
     ConversationDecision,
@@ -173,3 +174,25 @@ class ModelTests(unittest.TestCase):
         )
 
         self.assertEqual(decision.pending_action.action, "update_event")
+
+    def test_calendar_update_operation_cannot_rewrite_original_event_provenance(self) -> None:
+        before = CalendarEvent(
+            id="event-1",
+            conversation_id="conversation-1",
+            title="Review",
+            source_message_id="message-1",
+            source_quote="Review the current plan.",
+            start_at=date(2026, 9, 15),
+            all_day=True,
+            timezone="America/Vancouver",
+        )
+        with self.assertRaises(ValidationError):
+            CalendarEventUpdateOperation(
+                id="update-1",
+                source_message_id="message-2",
+                action_index=0,
+                event_id=before.id,
+                before=before,
+                after=before.model_copy(update={"source_quote": "A replacement quote."}),
+                status="prepared",
+            )

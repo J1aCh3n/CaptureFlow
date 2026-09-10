@@ -987,3 +987,46 @@ class ConversationDecision(BaseModel):
             if not self.reply:
                 raise ValueError("a read-only decision requires a reply")
         return self
+
+
+class CalendarEventUpdateOperation(BaseModel):
+    """An auditable, reversible update to one existing local calendar event."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: str
+    source_message_id: str
+    action_index: int = Field(ge=0, le=2)
+    event_id: str
+    workspace_id: str = DEFAULT_WORKSPACE_ID
+    before: CalendarEvent
+    after: CalendarEvent
+    status: Literal["prepared", "committed", "failed", "undone"]
+    error: str | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+    @model_validator(mode="after")
+    def snapshots_describe_one_active_event(self) -> "CalendarEventUpdateOperation":
+        immutable_fields = (
+            "id",
+            "workspace_id",
+            "conversation_id",
+            "source_message_id",
+            "source_quote",
+            "status",
+            "created_at",
+        )
+        if self.before.id != self.event_id or self.after.id != self.event_id:
+            raise ValueError("update snapshots must match the target event")
+        if self.before.workspace_id != self.workspace_id or self.after.workspace_id != self.workspace_id:
+            raise ValueError("update snapshots must match the target workspace")
+        if self.before.status != "active" or self.after.status != "active":
+            raise ValueError("only active calendar events can be updated")
+        if any(getattr(self.before, field) != getattr(self.after, field) for field in immutable_fields):
+            raise ValueError("calendar updates cannot change event identity or original provenance")
+        if self.status == "failed" and not self.error:
+            raise ValueError("a failed calendar update requires an error")
+        if self.status != "failed" and self.error is not None:
+            raise ValueError("only a failed calendar update may contain an error")
+        return self

@@ -6,7 +6,9 @@ from pathlib import Path
 
 from captureflow.models import (
     CalendarEvent,
+    CalendarEventUpdateOperation,
     Conversation,
+    EvidenceReference,
     Message,
     PendingClarification,
     SavedItem,
@@ -117,6 +119,132 @@ class V2StorageTests(unittest.TestCase):
         saved = self.store.get_calendar_event(event.id)
         self.assertEqual(saved, event)
         self.assertEqual(saved.description, "Compare simulation benchmark results.")
+
+    def test_calendar_update_is_idempotent_auditable_and_reversible(self) -> None:
+        event = self.store.save_calendar_event(
+            CalendarEvent(
+                id="event-update",
+                conversation_id=self.conversation.id,
+                title="Algorithm review",
+                description="Discuss current bottlenecks.",
+                source_message_id=self.user_message.id,
+                source_quote=self.user_message.content,
+                start_at=datetime(2026, 9, 10, 16, tzinfo=timezone.utc),
+                end_at=datetime(2026, 9, 10, 17, tzinfo=timezone.utc),
+                all_day=False,
+                timezone="America/Vancouver",
+            )
+        )
+        correction = self.store.save_message(
+            Message(
+                id="correction-message",
+                conversation_id=self.conversation.id,
+                role="user",
+                content="Move this meeting to Thursday from 14:00 to 15:00.",
+            )
+        )
+        updated = event.model_copy(
+            update={
+                "title": "Algorithm and code review",
+                "description": "Review prefix-tree and heap performance.",
+                "start_at": datetime(2026, 9, 10, 14, tzinfo=timezone.utc),
+                "end_at": datetime(2026, 9, 10, 15, tzinfo=timezone.utc),
+                "updated_at": datetime(2026, 9, 9, 12, tzinfo=timezone.utc),
+            }
+        )
+        operation = CalendarEventUpdateOperation(
+            id="calendar-update-1",
+            source_message_id=correction.id,
+            action_index=0,
+            event_id=event.id,
+            before=event,
+            after=updated,
+            status="prepared",
+            created_at=datetime(2026, 9, 9, 12, tzinfo=timezone.utc),
+            updated_at=datetime(2026, 9, 9, 12, tzinfo=timezone.utc),
+        )
+        evidence = [
+            EvidenceReference(message_id=self.user_message.id, source_quote="Submit the report"),
+            EvidenceReference(message_id=correction.id, source_quote="Move this meeting"),
+        ]
+
+        self.assertEqual(self.store.prepare_calendar_event_update(operation, evidence), operation)
+        self.assertEqual(self.store.prepare_calendar_event_update(operation, evidence), operation)
+        committed, committed_event = self.store.commit_prepared_calendar_event_update(operation.id)
+        repeated, repeated_event = self.store.commit_prepared_calendar_event_update(operation.id)
+
+        self.assertEqual(committed.status, "committed")
+        self.assertEqual(committed, repeated)
+        self.assertEqual(committed_event, updated)
+        self.assertEqual(repeated_event, updated)
+        self.assertEqual(self.store.list_calendar_event_update_sources(operation.id), evidence)
+
+        undone = self.store.undo_calendar_event_update(operation.id)
+        self.assertEqual(undone.status, "undone")
+        self.assertEqual(self.store.undo_calendar_event_update(operation.id), undone)
+        self.assertEqual(self.store.get_calendar_event(event.id), event)
+
+    def test_calendar_update_rejects_foreign_workspace_and_stale_target(self) -> None:
+        event = self.store.save_calendar_event(
+            CalendarEvent(
+                id="event-stale",
+                conversation_id=self.conversation.id,
+                title="Architecture review",
+                source_message_id=self.user_message.id,
+                source_quote=self.user_message.content,
+                start_at=date(2026, 9, 10),
+                all_day=True,
+                timezone="America/Vancouver",
+            )
+        )
+        operation = CalendarEventUpdateOperation(
+            id="calendar-update-stale",
+            source_message_id=self.user_message.id,
+            action_index=0,
+            event_id=event.id,
+            before=event,
+            after=event.model_copy(
+                update={"title": "Architecture and driver review", "updated_at": datetime(2026, 9, 9, tzinfo=timezone.utc)}
+            ),
+            status="prepared",
+        )
+        evidence = [EvidenceReference(message_id=self.user_message.id, source_quote="Submit the report")]
+
+        self.store.prepare_calendar_event_update(operation, evidence)
+        self.store.update_calendar_event(event.id, title="Manual change", start_at=date(2026, 9, 10))
+        with self.assertRaisesRegex(ValueError, "changed before commit"):
+            self.store.commit_prepared_calendar_event_update(operation.id)
+
+        foreign = self.store.save_conversation(
+            Conversation(id="foreign-conversation", workspace_id="foreign", title="Foreign")
+        )
+        foreign_message = self.store.save_message(
+            Message(
+                id="foreign-message",
+                conversation_id=foreign.id,
+                role="user",
+                content="Move the architecture review.",
+            )
+        )
+        current = self.store.get_calendar_event(event.id)
+        foreign_operation = operation.model_copy(
+            update={
+                "id": "calendar-update-foreign",
+                "source_message_id": foreign_message.id,
+                "before": current,
+                "after": current.model_copy(
+                    update={
+                        "title": "Foreign rewrite",
+                        "updated_at": datetime(2026, 9, 9, 1, tzinfo=timezone.utc),
+                    }
+                ),
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "outside the intended workspace"):
+            self.store.prepare_calendar_event_update(
+                foreign_operation,
+                [EvidenceReference(message_id=foreign_message.id, source_quote="Move the architecture review")],
+            )
 
     def test_only_one_pending_clarification_is_allowed_per_conversation(self) -> None:
         assistant = self.store.save_message(

@@ -68,6 +68,9 @@ Commit: `feat: propose contextual conversation decisions`
 
 ### 4. Make calendar updates safe and reversible
 
+- Complete. Calendar updates use an additive audit table with before/after
+  snapshots and up to three exact user-message sources. Commit and undo are
+  idempotent; undo refuses to overwrite a later event change.
 - Add an additive migration for update-operation audit data and multi-message
   calendar provenance. Do not rebuild existing V2 tables destructively.
 - Extend storage to transactionally update title, description, start, end, and

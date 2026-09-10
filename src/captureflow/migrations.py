@@ -349,6 +349,43 @@ MIGRATIONS = (
         name="v2_calendar_event_descriptions",
         statements=("ALTER TABLE calendar_events ADD COLUMN description TEXT",),
     ),
+    Migration(
+        version=9,
+        name="v2_calendar_event_update_operations",
+        statements=(
+            """
+            CREATE TABLE calendar_event_update_operations (
+                id TEXT PRIMARY KEY,
+                source_message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+                action_index INTEGER NOT NULL CHECK (action_index BETWEEN 0 AND 2),
+                event_id TEXT NOT NULL REFERENCES calendar_events(id) ON DELETE CASCADE,
+                workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+                before_json TEXT NOT NULL,
+                after_json TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (
+                    status IN ('prepared', 'committed', 'failed', 'undone')
+                ),
+                error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE (source_message_id, action_index, event_id)
+            )
+            """,
+            """
+            CREATE TABLE calendar_event_update_sources (
+                update_operation_id TEXT NOT NULL
+                    REFERENCES calendar_event_update_operations(id) ON DELETE CASCADE,
+                source_message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+                source_quote TEXT NOT NULL,
+                source_rank INTEGER NOT NULL CHECK (source_rank BETWEEN 0 AND 2),
+                PRIMARY KEY (update_operation_id, source_message_id),
+                UNIQUE (update_operation_id, source_rank)
+            )
+            """,
+            "CREATE INDEX calendar_event_update_operations_event_status ON calendar_event_update_operations(event_id, status, updated_at, id)",
+            "CREATE INDEX calendar_event_update_operations_message ON calendar_event_update_operations(source_message_id, action_index)",
+        ),
+    ),
 )
 
 LATEST_SCHEMA_VERSION = MIGRATIONS[-1].version

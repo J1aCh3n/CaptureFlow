@@ -6,7 +6,14 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from pydantic import ValidationError
 
-from .models import CalendarEvent, Message, SavedItem, ToolOperation, utc_now
+from .models import (
+    CalendarEvent,
+    CalendarEventUpdateOperation,
+    Message,
+    SavedItem,
+    ToolOperation,
+    utc_now,
+)
 from .storage import CaptureStore
 
 
@@ -110,8 +117,11 @@ class DeterministicChatService:
         )
         return ChatTurn(user_message, assistant_message, operation)
 
-    def undo(self, operation_id: str) -> ToolOperation:
-        operation = self.store.get_tool_operation(operation_id)
+    def undo(self, operation_id: str) -> ToolOperation | CalendarEventUpdateOperation:
+        try:
+            operation = self.store.get_tool_operation(operation_id)
+        except KeyError:
+            return self.store.undo_calendar_event_update(operation_id)
         if operation.status == "undone":
             return operation
         if operation.status != "committed":
