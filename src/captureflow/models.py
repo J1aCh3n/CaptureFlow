@@ -390,7 +390,7 @@ class ToolOperation(BaseModel):
 
 
 class PendingClarification(BaseModel):
-    """One persisted missing-date question for a V2 conversation."""
+    """One persisted bounded Calendar clarification for a V2 conversation."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -399,7 +399,7 @@ class PendingClarification(BaseModel):
     source_message_id: str
     assistant_message_id: str
     original_action: dict
-    missing_field: Literal["date"] = "date"
+    missing_field: Literal["date", "time", "duration"] = "date"
     status: Literal["pending", "resolved", "cancelled"] = "pending"
     created_at: datetime = Field(default_factory=utc_now)
     resolved_at: datetime | None = None
@@ -885,6 +885,7 @@ class ContextualAction(BaseModel):
     date_expression: str | None = Field(default=None, max_length=100)
     time_expression: str | None = Field(default=None, max_length=20)
     end_time_expression: str | None = Field(default=None, max_length=20)
+    duration_expression: str | None = Field(default=None, max_length=20)
     target_event_id: str | None = Field(default=None, min_length=1)
     evidence: list[EvidenceReference] = Field(min_length=1, max_length=3)
 
@@ -894,6 +895,7 @@ class ContextualAction(BaseModel):
         "date_expression",
         "time_expression",
         "end_time_expression",
+        "duration_expression",
     )
     @classmethod
     def optional_text_is_not_whitespace(cls, value: str | None) -> str | None:
@@ -917,7 +919,10 @@ class ContextualAction(BaseModel):
             self.date_expression,
             self.time_expression,
             self.end_time_expression,
+            self.duration_expression,
         )
+        if self.end_time_expression is not None and self.duration_expression is not None:
+            raise ValueError("an event cannot have both an end time and a duration")
         if self.action == "create_event":
             if self.content is None or self.date_expression is None:
                 raise ValueError("an event creation requires title content and a date expression")

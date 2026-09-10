@@ -42,7 +42,7 @@ class MigrationTests(unittest.TestCase):
 
         self.assertEqual(
             versions,
-            [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (LATEST_SCHEMA_VERSION,)],
+            [(version,) for version in range(1, LATEST_SCHEMA_VERSION + 1)],
         )
         self.assertTrue(
             {
@@ -95,7 +95,7 @@ class MigrationTests(unittest.TestCase):
             versions = connection.execute(
                 "SELECT version FROM schema_migrations ORDER BY version"
             ).fetchall()
-        self.assertEqual(versions, [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,)])
+        self.assertEqual(versions, [(version,) for version in range(1, LATEST_SCHEMA_VERSION + 1)])
 
     def test_existing_v7_event_upgrades_with_an_empty_description(self) -> None:
         with closing(sqlite3.connect(self.database_path)) as connection:
@@ -138,6 +138,43 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual(event, ("Meeting", None))
         self.assertEqual(sources, [("message-1", "Meeting", 0)])
 
+    def test_existing_date_clarification_is_preserved_when_fields_expand(self) -> None:
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            connection.execute("PRAGMA foreign_keys = ON")
+            apply_migrations(connection, target_version=10)
+            connection.execute(
+                "INSERT INTO workspaces (id, created_at) VALUES ('default', '2026-09-08')"
+            )
+            connection.execute(
+                """
+                INSERT INTO conversations (id, workspace_id, title, created_at)
+                VALUES ('conversation-1', 'default', 'Calendar', '2026-09-08')
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO messages (id, conversation_id, role, content, created_at)
+                VALUES ('user-1', 'conversation-1', 'user', 'Meeting', '2026-09-08'),
+                       ('assistant-1', 'conversation-1', 'assistant', 'Which date?', '2026-09-08')
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO pending_clarifications
+                (id, conversation_id, source_message_id, assistant_message_id,
+                 original_action_json, missing_field, status, created_at, resolved_at)
+                VALUES ('clarification-1', 'conversation-1', 'user-1', 'assistant-1',
+                        '{}', 'date', 'pending', '2026-09-08', NULL)
+                """
+            )
+            connection.commit()
+            apply_migrations(connection)
+            clarification = connection.execute(
+                "SELECT missing_field, status FROM pending_clarifications WHERE id = 'clarification-1'"
+            ).fetchone()
+
+        self.assertEqual(clarification, ("date", "pending"))
+
     def test_repeated_initialize_does_not_repeat_migrations(self) -> None:
         store = CaptureStore(self.database_path)
         store.initialize()
@@ -147,10 +184,7 @@ class MigrationTests(unittest.TestCase):
             rows = connection.execute(
                 "SELECT version, COUNT(*) FROM schema_migrations GROUP BY version"
             ).fetchall()
-        self.assertEqual(
-            rows,
-            [(1, 1), (2, 1), (3, 1), (4, 1), (5, 1), (6, 1), (7, 1), (8, 1), (9, 1), (10, 1)],
-        )
+        self.assertEqual(rows, [(version, 1) for version in range(1, LATEST_SCHEMA_VERSION + 1)])
 
     def test_failed_migration_rolls_back_schema_and_version(self) -> None:
         with closing(sqlite3.connect(self.database_path)) as connection:

@@ -1,7 +1,7 @@
 """One bounded, contextual entry point for ordinary CaptureFlow chat."""
 
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import date, datetime, timedelta
 from time import perf_counter
 from uuid import NAMESPACE_URL, uuid4, uuid5
 from zoneinfo import ZoneInfo
@@ -30,6 +30,7 @@ from .models import (
 )
 from .project_service import ProjectTrackerService
 from .storage import CaptureStore
+from .time_tool import parse_duration, parse_time
 
 
 RouterOperation = ToolOperation | CalendarEventUpdateOperation | ProjectChangeOperation
@@ -134,8 +135,8 @@ class ConversationRouterService:
         local_started = perf_counter()
         try:
             if decision.intent == "calendar_create":
-                if self._date_needs_clarification(decision.action):
-                    assistant = self._save_calendar_date_clarification(user_message, decision.action)
+                if field := self._calendar_clarification_field(decision.action):
+                    assistant = self._save_calendar_clarification(user_message, decision.action, field)
                     return self._turn(
                         user_message,
                         assistant,
@@ -152,8 +153,8 @@ class ConversationRouterService:
                 if pending is not None:
                     self.store.resolve_pending_clarification(pending.id, "resolved")
             elif decision.intent == "calendar_update":
-                if self._date_needs_clarification(decision.action):
-                    assistant = self._save_calendar_date_clarification(user_message, decision.action)
+                if field := self._calendar_clarification_field(decision.action):
+                    assistant = self._save_calendar_clarification(user_message, decision.action, field)
                     return self._turn(
                         user_message,
                         assistant,
@@ -248,18 +249,23 @@ class ConversationRouterService:
         end_at: datetime | None = None
         all_day = True
         if action.time_expression is not None:
-            start_time = _parse_time(action.time_expression)
+            start_time = parse_time(action.time_expression)
             if start_time is None:
                 raise ValueError("event start time is not valid")
             start_at = datetime.combine(resolved_date, start_time, tzinfo=ZoneInfo(self.timezone))
             all_day = False
             if action.end_time_expression is not None:
-                end_time = _parse_time(action.end_time_expression)
+                end_time = parse_time(action.end_time_expression)
                 if end_time is None:
                     raise ValueError("event end time is not valid")
                 end_at = datetime.combine(resolved_date, end_time, tzinfo=ZoneInfo(self.timezone))
                 if end_at <= start_at:
-                    raise ValueError("event end time must be after its start time")
+                    end_at += timedelta(days=1)
+            elif action.duration_expression is not None:
+                duration = parse_duration(action.duration_expression)
+                if duration is None:
+                    raise ValueError("event duration is not valid")
+                end_at = start_at + duration
         event = CalendarEvent(
             id=_stable_id(user_message.id, "contextual-event"),
             conversation_id=user_message.conversation_id,
@@ -328,11 +334,33 @@ class ConversationRouterService:
         committed, event = self.store.commit_prepared_calendar_event_update(saved.id)
         return (committed,), f"Updated local calendar event: {event.title}."
 
-    def _date_needs_clarification(self, action: ContextualAction | None) -> bool:
-        if action is None or action.date_expression is None:
-            return False
-        resolution = resolve_relative_date(action.date_expression, self.reference_date, self.timezone)
-        return resolution.status != "resolved"
+    def _calendar_clarification_field(
+        self, action: ContextualAction | None
+    ) -> str | None:
+        if action is None:
+            return None
+        if action.date_expression is not None:
+            resolution = resolve_relative_date(
+                action.date_expression, self.reference_date, self.timezone
+            )
+            if resolution.status != "resolved":
+                return "date"
+        if action.time_expression is not None and parse_time(action.time_expression) is None:
+            return "time"
+        if action.end_time_expression is not None and parse_time(action.end_time_expression) is None:
+            return "time"
+        if action.action == "create_event" and action.end_time_expression is not None and action.time_expression is None:
+            return "time"
+        if action.duration_expression is not None:
+            if parse_duration(action.duration_expression) is None:
+                return "duration"
+            if action.time_expression is None:
+                if action.action == "create_event":
+                    return "time"
+                assert action.target_event_id is not None
+                if not isinstance(self.store.get_calendar_event(action.target_event_id).start_at, datetime):
+                    return "time"
+        return None
 
     def _save_item(
         self, user_message: Message, action: ContextualAction | None
@@ -407,20 +435,26 @@ class ConversationRouterService:
         self.store.save_pending_clarification(clarification)
         return assistant
 
-    def _save_calendar_date_clarification(
-        self, user_message: Message, action: ContextualAction | None
+    def _save_calendar_clarification(
+        self, user_message: Message, action: ContextualAction | None, missing_field: str
     ) -> Message:
         assert action is not None
+        questions = {
+            "date": "Which exact date should I use for this local event?",
+            "time": "What exact start time should I use for this local event?",
+            "duration": "How long should this local event last (for example, 30 minutes)?",
+        }
         assistant = self._assistant_message(
-            user_message, "Which exact date should I use for this local event?"
+            user_message, questions[missing_field]
         )
         self.store.save_pending_clarification(
             PendingClarification(
-                id=_stable_id(user_message.id, "contextual-calendar-date-clarification"),
+                id=_stable_id(user_message.id, f"contextual-calendar-{missing_field}-clarification"),
                 conversation_id=user_message.conversation_id,
                 source_message_id=user_message.id,
                 assistant_message_id=assistant.id,
                 original_action=action.model_dump(mode="json"),
+                missing_field=missing_field,
                 created_at=user_message.created_at,
             )
         )
@@ -525,19 +559,12 @@ class ConversationRouterService:
         end_at = existing.end_at
         all_day = existing.all_day
         if action.time_expression is not None:
-            start_time = _parse_time(action.time_expression)
+            start_time = parse_time(action.time_expression)
             if start_time is None:
                 raise ValueError("event start time is not valid")
             start_at = datetime.combine(target_date, start_time, tzinfo=ZoneInfo(existing.timezone))
             all_day = False
             end_at = None
-            if action.end_time_expression is not None:
-                end_time = _parse_time(action.end_time_expression)
-                if end_time is None:
-                    raise ValueError("event end time is not valid")
-                end_at = datetime.combine(target_date, end_time, tzinfo=ZoneInfo(existing.timezone))
-                if end_at <= start_at:
-                    raise ValueError("event end time must be after its start time")
         elif action.date_expression is not None:
             if isinstance(existing.start_at, datetime):
                 start_at = datetime.combine(
@@ -547,6 +574,22 @@ class ConversationRouterService:
                     end_at = start_at + (existing.end_at - existing.start_at)
             else:
                 start_at = target_date
+        if action.end_time_expression is not None:
+            if not isinstance(start_at, datetime):
+                raise ValueError("event end time requires a start time")
+            end_time = parse_time(action.end_time_expression)
+            if end_time is None:
+                raise ValueError("event end time is not valid")
+            end_at = datetime.combine(start_at.date(), end_time, tzinfo=ZoneInfo(existing.timezone))
+            if end_at <= start_at:
+                end_at += timedelta(days=1)
+        elif action.duration_expression is not None:
+            if not isinstance(start_at, datetime):
+                raise ValueError("event duration requires a start time")
+            duration = parse_duration(action.duration_expression)
+            if duration is None:
+                raise ValueError("event duration is not valid")
+            end_at = start_at + duration
         return existing.model_copy(
             update={
                 "title": action.content if action.content is not None else existing.title,
@@ -728,23 +771,6 @@ def _stable_id(message_id: str, suffix: str) -> str:
 
 def _normalized(value: str) -> str:
     return " ".join(value.split())
-
-
-def _parse_time(value: str) -> time | None:
-    normalized = value.strip().casefold().replace("：", ":")
-    if ":" in normalized:
-        hour_text, minute_text = normalized.rsplit(":", 1)
-        hour_text = hour_text.replace("下午", "").replace("上午", "").replace("am", "").replace("pm", "").strip()
-        try:
-            hour, minute = int(hour_text), int(minute_text)
-        except ValueError:
-            return None
-        if "下午" in normalized or "pm" in normalized:
-            hour = hour + 12 if hour < 12 else hour
-        return time(hour, minute) if 0 <= hour <= 23 and 0 <= minute <= 59 else None
-    words = {"noon": 12, "midnight": 0, "下午两点": 14, "下午三点": 15, "下午四点": 16, "下午五点": 17}
-    hour = words.get(normalized)
-    return time(hour) if hour is not None else None
 
 
 def _parse_start_at(value: str) -> date | datetime:

@@ -157,6 +157,18 @@ class ModelTests(unittest.TestCase):
                 ],
             )
 
+    def test_contextual_action_rejects_an_end_time_and_duration_together(self) -> None:
+        with self.assertRaises(ValidationError):
+            ContextualAction(
+                action="create_event",
+                content="代码审查",
+                date_expression="这周四",
+                time_expression="下午四点",
+                end_time_expression="下午五点",
+                duration_expression="一小时",
+                evidence=[EvidenceReference(message_id="message-1", source_quote="代码审查")],
+            )
+
     def test_contextual_clarification_retains_an_unresolved_calendar_update(self) -> None:
         decision = ConversationDecision(
             intent="clarify",

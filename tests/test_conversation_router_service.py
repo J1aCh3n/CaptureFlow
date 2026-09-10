@@ -6,6 +6,7 @@ from pathlib import Path
 from captureflow.conversation_router_service import ConversationRouterService
 from captureflow.models import (
     CalendarEvent,
+    CalendarEventUpdateOperation,
     Conversation,
     EvidenceReference,
     Message,
@@ -166,6 +167,278 @@ class ConversationRouterServiceTests(unittest.TestCase):
         self.assertEqual(updated.end_at, datetime.fromisoformat("2026-09-10T15:00:00-07:00"))
         self.assertEqual(len(self.store.list_calendar_event_update_operations("correction-turn")), 1)
         self.assertEqual(len(model.calls), 1)
+
+    def test_calendar_update_resolves_chinese_time_and_explicit_duration(self) -> None:
+        original = "今天开始进行A测，下午三点钟要准备好，四点有个相关的说明会"
+        correction = "会议延期了，时间也被缩短到半个小时，现在晚上七点才开始"
+        model = ScriptedContextualModel(
+            [
+                {
+                    "intent": "calendar_create",
+                    "action": {
+                        "action": "create_event",
+                        "content": "相关的说明会",
+                        "description": "今天开始进行A测，下午三点钟要准备好",
+                        "date_expression": "今天",
+                        "time_expression": "下午四点",
+                        "end_time_expression": None,
+                        "duration_expression": None,
+                        "target_event_id": None,
+                        "evidence": [{"message_id": "phase-10-3-create", "source_quote": original}],
+                    },
+                },
+                {
+                    "intent": "calendar_update",
+                    "action": {
+                        "action": "update_event",
+                        "content": None,
+                        "description": None,
+                        "date_expression": None,
+                        "time_expression": "晚上七点",
+                        "end_time_expression": None,
+                        "duration_expression": "半个小时",
+                        "target_event_id": "phase-10-3-event",
+                        "evidence": [
+                            {"message_id": "phase-10-3-create", "source_quote": original},
+                            {"message_id": "phase-10-3-update", "source_quote": correction},
+                        ],
+                    },
+                },
+            ]
+        )
+        service = ConversationRouterService(self.store, model, date(2026, 9, 10))
+
+        created = service.submit(self.conversation.id, original, "phase-10-3-create")
+        event = self.store.get_calendar_event(created.operations[0].result["event_id"])
+        self.assertEqual(event.start_at, datetime.fromisoformat("2026-09-10T16:00:00-07:00"))
+        self.assertIsNone(event.end_at)
+        model.decisions[0]["action"]["target_event_id"] = event.id
+
+        updated = service.submit(self.conversation.id, correction, "phase-10-3-update")
+        replay = service.submit(self.conversation.id, correction, "phase-10-3-update")
+        operation = self.store.list_calendar_event_update_operations("phase-10-3-update")[0]
+        event = self.store.get_calendar_event(event.id)
+
+        self.assertEqual(updated.outcome, "calendar_update")
+        self.assertEqual(updated.model_calls, 1)
+        self.assertEqual(replay.model_calls, 0)
+        self.assertEqual(len(self.store.list_calendar_events()), 1)
+        self.assertEqual(event.start_at, datetime.fromisoformat("2026-09-10T19:00:00-07:00"))
+        self.assertEqual(event.end_at, datetime.fromisoformat("2026-09-10T19:30:00-07:00"))
+        self.assertEqual(len(self.store.list_calendar_event_update_operations("phase-10-3-update")), 1)
+        self.assertIsNone(self.store.get_pending_clarification(self.conversation.id))
+        self.assertEqual(self.store.undo_calendar_event_update(operation.id).status, "undone")
+        restored = self.store.get_calendar_event(event.id)
+        self.assertEqual(restored.start_at, datetime.fromisoformat("2026-09-10T16:00:00-07:00"))
+        self.assertIsNone(restored.end_at)
+
+    def test_calendar_end_time_can_cross_midnight(self) -> None:
+        content = "明天 23:30 到 00:30 有发布检查。"
+        model = ScriptedContextualModel(
+            [
+                {
+                    "intent": "calendar_create",
+                    "action": {
+                        "action": "create_event",
+                        "content": "发布检查",
+                        "description": None,
+                        "date_expression": "明天",
+                        "time_expression": "23:30",
+                        "end_time_expression": "00:30",
+                        "duration_expression": None,
+                        "target_event_id": None,
+                        "evidence": [{"message_id": "cross-midnight", "source_quote": content}],
+                    },
+                }
+            ]
+        )
+
+        turn = ConversationRouterService(self.store, model, date(2026, 9, 10)).submit(
+            self.conversation.id, content, "cross-midnight"
+        )
+
+        event = self.store.get_calendar_event(turn.operations[0].result["event_id"])
+        self.assertEqual(event.start_at, datetime.fromisoformat("2026-09-11T23:30:00-07:00"))
+        self.assertEqual(event.end_at, datetime.fromisoformat("2026-09-12T00:30:00-07:00"))
+
+    def test_unsupported_calendar_time_or_duration_creates_a_clarification_without_a_write(self) -> None:
+        source = self.store.save_message(
+            Message(
+                id="unsupported-event-source",
+                conversation_id=self.conversation.id,
+                role="user",
+                content="今天下午四点有工作流会议。",
+            )
+        )
+        event = self.store.save_calendar_event(
+            CalendarEvent(
+                id="unsupported-event",
+                conversation_id=self.conversation.id,
+                title="工作流会议",
+                source_message_id=source.id,
+                source_quote=source.content,
+                start_at=datetime.fromisoformat("2026-09-10T16:00:00-07:00"),
+                all_day=False,
+                timezone="America/Vancouver",
+            )
+        )
+        correction = "这个会议改到晚上七点才开始，持续一会儿。"
+        model = ScriptedContextualModel(
+            [
+                {
+                    "intent": "calendar_update",
+                    "action": {
+                        "action": "update_event",
+                        "content": None,
+                        "description": None,
+                        "date_expression": None,
+                        "time_expression": "晚上七点才开始",
+                        "end_time_expression": None,
+                        "duration_expression": "一会儿",
+                        "target_event_id": event.id,
+                        "evidence": [{"message_id": "unsupported-correction", "source_quote": correction}],
+                    },
+                }
+            ]
+        )
+
+        turn = ConversationRouterService(self.store, model, date(2026, 9, 10)).submit(
+            self.conversation.id, correction, "unsupported-correction"
+        )
+
+        self.assertEqual(turn.outcome, "clarification_created")
+        self.assertEqual(
+            turn.assistant_message.content,
+            "What exact start time should I use for this local event?",
+        )
+        self.assertEqual(self.store.get_calendar_event(event.id), event)
+        self.assertEqual(self.store.list_calendar_event_update_operations("unsupported-correction"), [])
+        pending = self.store.get_pending_clarification(self.conversation.id)
+        self.assertIsNotNone(pending)
+        self.assertEqual(pending.missing_field, "time")
+
+    def test_unsupported_calendar_duration_creates_a_duration_clarification_without_a_write(self) -> None:
+        source = self.store.save_message(
+            Message(
+                id="duration-event-source",
+                conversation_id=self.conversation.id,
+                role="user",
+                content="今天下午四点有工作流会议。",
+            )
+        )
+        event = self.store.save_calendar_event(
+            CalendarEvent(
+                id="duration-event",
+                conversation_id=self.conversation.id,
+                title="工作流会议",
+                source_message_id=source.id,
+                source_quote=source.content,
+                start_at=datetime.fromisoformat("2026-09-10T16:00:00-07:00"),
+                all_day=False,
+                timezone="America/Vancouver",
+            )
+        )
+        correction = "这个会议改到晚上七点，持续一会儿。"
+        model = ScriptedContextualModel(
+            [
+                {
+                    "intent": "calendar_update",
+                    "action": {
+                        "action": "update_event",
+                        "content": None,
+                        "description": None,
+                        "date_expression": None,
+                        "time_expression": "晚上七点",
+                        "end_time_expression": None,
+                        "duration_expression": "一会儿",
+                        "target_event_id": event.id,
+                        "evidence": [{"message_id": "duration-correction", "source_quote": correction}],
+                    },
+                }
+            ]
+        )
+
+        turn = ConversationRouterService(self.store, model, date(2026, 9, 10)).submit(
+            self.conversation.id, correction, "duration-correction"
+        )
+
+        self.assertEqual(turn.outcome, "clarification_created")
+        self.assertEqual(
+            turn.assistant_message.content,
+            "How long should this local event last (for example, 30 minutes)?",
+        )
+        self.assertEqual(self.store.get_calendar_event(event.id), event)
+        self.assertEqual(self.store.list_calendar_event_update_operations("duration-correction"), [])
+        self.assertEqual(
+            self.store.get_pending_clarification(self.conversation.id).missing_field, "duration"
+        )
+
+    def test_prepared_duration_update_resumes_after_reopening_the_database(self) -> None:
+        source = self.store.save_message(
+            Message(
+                id="prepared-update-source",
+                conversation_id=self.conversation.id,
+                role="user",
+                content="今天下午四点有工作流会议。",
+            )
+        )
+        event = self.store.save_calendar_event(
+            CalendarEvent(
+                id="prepared-update-event",
+                conversation_id=self.conversation.id,
+                title="工作流会议",
+                source_message_id=source.id,
+                source_quote=source.content,
+                start_at=datetime.fromisoformat("2026-09-10T16:00:00-07:00"),
+                all_day=False,
+                timezone="America/Vancouver",
+            )
+        )
+        correction = self.store.save_message(
+            Message(
+                id="prepared-update-correction",
+                conversation_id=self.conversation.id,
+                role="user",
+                content="会议延期到晚上七点，缩短到半个小时。",
+            )
+        )
+        updated = event.model_copy(
+            update={
+                "start_at": datetime.fromisoformat("2026-09-10T19:00:00-07:00"),
+                "end_at": datetime.fromisoformat("2026-09-10T19:30:00-07:00"),
+            }
+        )
+        operation = CalendarEventUpdateOperation(
+            id="prepared-duration-update",
+            source_message_id=correction.id,
+            action_index=0,
+            event_id=event.id,
+            before=event,
+            after=updated,
+            status="prepared",
+        )
+        self.store.prepare_calendar_event_update(
+            operation,
+            [
+                EvidenceReference(message_id=source.id, source_quote=source.content),
+                EvidenceReference(message_id=correction.id, source_quote=correction.content),
+            ],
+        )
+        restarted = CaptureStore(self.store.database_path)
+        restarted.initialize()
+        model = ScriptedContextualModel([])
+
+        resumed = ConversationRouterService(restarted, model, date(2026, 9, 10)).submit(
+            self.conversation.id, correction.content, correction.id
+        )
+
+        self.assertEqual(resumed.outcome, "resumed")
+        self.assertEqual(resumed.model_calls, 0)
+        self.assertEqual(model.calls, [])
+        self.assertEqual(restarted.get_calendar_event(event.id), updated)
+        self.assertEqual(
+            restarted.get_calendar_event_update_operation(operation.id).status, "committed"
+        )
 
     def test_tracker_change_uses_current_decision_without_another_model_call(self) -> None:
         content = "排查 ROS 2 发布者-订阅者节点之间的延迟问题。"

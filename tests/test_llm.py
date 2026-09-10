@@ -99,6 +99,8 @@ class OpenAICompatibleModelTests(unittest.TestCase):
         self.assertIn("calendar_create", prompt)
         self.assertIn("tracker_change", prompt)
         self.assertIn("exactly one supplied candidate_events ID", prompt)
+        self.assertIn("duration_expression", prompt)
+        self.assertIn("mutually exclusive", prompt)
         self.assertEqual(payload["current_message"]["message_id"], "message-1")
         self.assertEqual(payload["recent_messages"], recent_messages)
         self.assertEqual(payload["candidate_events"][0]["id"], "event-1")
