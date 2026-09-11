@@ -102,6 +102,8 @@ class OpenAICompatibleModelTests(unittest.TestCase):
         self.assertIn("duration_expression", prompt)
         self.assertIn("mutually exclusive", prompt)
         self.assertIn("deferred_action", prompt)
+        self.assertIn("never kind, content, or rationale", prompt)
+        self.assertIn("is transition_record, not a new record", prompt)
         self.assertIn("One turn commits exactly one local action", prompt)
         self.assertIn("must always quote current_message exactly", prompt)
         self.assertEqual(payload["current_message"]["message_id"], "message-1")
