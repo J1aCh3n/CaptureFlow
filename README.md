@@ -165,6 +165,16 @@ python -m pip install -e .
 streamlit run app.py
 ```
 
+When several checkouts of this repository exist, an editable install of one of
+them shadows the others, and the app then runs the wrong code without any error.
+`scripts/run_local_app.ps1` puts this checkout's `src` first, refuses to start if
+`captureflow` still imports from elsewhere, and runs Streamlit from the
+repository root regardless of the current directory:
+
+```powershell
+.\scripts\run_local_app.ps1
+```
+
 The application stores local data in `data/captureflow.sqlite3`, which is not
 committed. To run the deterministic unit tests:
 
