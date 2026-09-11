@@ -440,6 +440,34 @@ class ConversationRouterServiceTests(unittest.TestCase):
             restarted.get_calendar_event_update_operation(operation.id).status, "committed"
         )
 
+    def test_finished_meeting_is_kept_as_a_note_without_a_calendar_event(self) -> None:
+        content = (
+            "今天中午十二点的会议是关于系统架构与驱动集成，主要分析了ALOHA 遥操作系统的驱动调试。"
+        )
+        model = ScriptedContextualModel(
+            [
+                {
+                    "intent": "save_note",
+                    "action": {
+                        "action": "save_note",
+                        "content": "系统架构与驱动集成会议：主要分析了ALOHA 遥操作系统的驱动调试。",
+                        "evidence": [{"message_id": "minutes-turn", "source_quote": content}],
+                    },
+                }
+            ]
+        )
+
+        turn = ConversationRouterService(self.store, model, date(2026, 9, 11)).submit(
+            self.conversation.id, content, "minutes-turn"
+        )
+        items = self.store.list_saved_items(kinds=("note",))
+
+        self.assertEqual(turn.outcome, "save_note")
+        self.assertEqual(self.store.list_calendar_events(), [])
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].source_message_id, "minutes-turn")
+        self.assertEqual(items[0].source_quote, content)
+
     def _saved_event(self, suffix: str, title: str, start_at: datetime) -> CalendarEvent:
         source = self.store.save_message(
             Message(

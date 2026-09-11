@@ -107,6 +107,39 @@ class OpenAICompatibleModelTests(unittest.TestCase):
         self.assertEqual(payload["candidate_saved_items"][0]["id"], "idea-1")
         self.assertEqual(payload["candidate_project_records"][0]["id"], "record-1")
 
+    def test_contextual_router_keeps_a_finished_meeting_as_a_note(self) -> None:
+        content = "今天中午十二点的会议是关于系统架构与驱动集成，主要分析了驱动调试。"
+        completions = RecordingCompletions(
+            '{"intent":"save_note","action":{"action":"save_note",'
+            '"content":"系统架构与驱动集成会议：主要分析了驱动调试。",'
+            '"description":null,"date_expression":null,"time_expression":null,'
+            '"end_time_expression":null,"duration_expression":null,'
+            '"target_event_id":null,"evidence":[{"message_id":"minutes-message",'
+            f'"source_quote":"{content}"}}]}},"project_changes":[],'
+            '"clarification_question":null,"pending_action":null,"reply":null}'
+        )
+        model = OpenAICompatibleModel.__new__(OpenAICompatibleModel)
+        model.settings = ModelSettings(api_key="test-key", model="gpt-5.6-terra")
+        model.client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+        message = {"message_id": "minutes-message", "role": "user", "content": content}
+
+        decision = model.propose_conversation_decision(
+            current_message=message,
+            recent_messages=[message],
+            candidate_events=[],
+            candidate_saved_items=[],
+            candidate_project_records=[],
+            reference_date="2026-09-11",
+            timezone="America/Vancouver",
+        )
+
+        prompt = completions.kwargs["messages"][0]["content"]
+        self.assertEqual(decision.intent, "save_note")
+        self.assertEqual(decision.action.action, "save_note")
+        self.assertIn("already held or finished", prompt)
+        self.assertIn("Keep its minutes with save_note", prompt)
+        self.assertIn("still going to happen", prompt)
+
     def test_contextual_router_accepts_task_not_calendar_decision(self) -> None:
         completions = RecordingCompletions(
             '{"intent":"tracker_change","action":null,"project_changes":['
