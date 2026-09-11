@@ -468,6 +468,155 @@ class ConversationRouterServiceTests(unittest.TestCase):
         self.assertEqual(items[0].source_message_id, "minutes-turn")
         self.assertEqual(items[0].source_quote, content)
 
+    def test_compound_turn_saves_minutes_then_asks_about_the_stated_deadline(self) -> None:
+        content = (
+            "今天中午十二点的会议是关于系统架构与驱动集成，主要分析了ALOHA 遥操作系统的驱动调试。"
+            "修复需要下周三晚上八点之前提交"
+        )
+        confirmation = "是的，请建下周三的日历。"
+        model = ScriptedContextualModel(
+            [
+                {
+                    "intent": "save_note",
+                    "action": {
+                        "action": "save_note",
+                        "content": "系统架构与驱动集成会议：主要分析了ALOHA 遥操作系统的驱动调试。",
+                        "evidence": [{"message_id": "compound-turn", "source_quote": content}],
+                    },
+                    "deferred_action": {
+                        "action": "create_event",
+                        "content": "提交修复",
+                        "date_expression": "下周三",
+                        "time_expression": "晚上八点",
+                        "evidence": [{"message_id": "compound-turn", "source_quote": content}],
+                    },
+                    "follow_up_question": "Should I also add a local calendar event for 下周三晚上八点?",
+                },
+                {
+                    "intent": "calendar_create",
+                    "action": {
+                        "action": "create_event",
+                        "content": "提交修复",
+                        "date_expression": "下周三",
+                        "time_expression": "晚上八点",
+                        "evidence": [
+                            {"message_id": "compound-turn", "source_quote": content},
+                            {
+                                "message_id": "compound-confirmation",
+                                "source_quote": "请建下周三的日历",
+                            },
+                        ],
+                    },
+                },
+            ]
+        )
+        service = ConversationRouterService(self.store, model, date(2026, 9, 11))
+
+        first = service.submit(self.conversation.id, content, "compound-turn")
+        pending = self.store.get_pending_clarification(self.conversation.id)
+
+        self.assertEqual(first.outcome, "save_note")
+        self.assertEqual(first.model_calls, 1)
+        self.assertEqual(len(self.store.list_saved_items(kinds=("note",))), 1)
+        self.assertEqual(self.store.list_calendar_events(), [])
+        self.assertIsNotNone(pending)
+        self.assertEqual(pending.missing_field, "follow_up")
+        self.assertEqual(pending.original_action["date_expression"], "下周三")
+        self.assertIn(
+            "Should I also add a local calendar event for 下周三晚上八点?",
+            first.assistant_message.content,
+        )
+
+        second = service.submit(self.conversation.id, confirmation, "compound-confirmation")
+        event = self.store.list_calendar_events()[0]
+
+        self.assertEqual(second.outcome, "calendar_create")
+        self.assertEqual(model.calls[1]["pending_clarification"], pending.original_action)
+        self.assertEqual(event.start_at, datetime.fromisoformat("2026-09-16T20:00:00-07:00"))
+        self.assertEqual(
+            self.store.get_pending_clarification(self.conversation.id), None
+        )
+
+    def test_committed_tracker_deadline_can_defer_the_meeting_minutes(self) -> None:
+        content = "今天中午十二点的会议分析了驱动调试。修复需要下周三晚上八点之前提交"
+        model = ScriptedContextualModel(
+            [
+                {
+                    "intent": "tracker_change",
+                    "project_changes": [
+                        {
+                            "action": "create_record",
+                            "kind": "task",
+                            "content": "修复需要下周三晚上八点之前提交",
+                            "source_quote": "修复需要下周三晚上八点之前提交",
+                        }
+                    ],
+                    "deferred_action": {
+                        "action": "save_note",
+                        "content": "今天中午十二点的会议分析了驱动调试。",
+                        "evidence": [{"message_id": "deadline-turn", "source_quote": content}],
+                    },
+                    "follow_up_question": "要我把会议内容保存为会议纪要吗？",
+                },
+                {
+                    "intent": "save_note",
+                    "action": {
+                        "action": "save_note",
+                        "content": "今天中午十二点的会议分析了驱动调试。",
+                        "evidence": [
+                            {"message_id": "deadline-turn", "source_quote": content},
+                            {"message_id": "deadline-confirmation", "source_quote": "是的，请保存。"},
+                        ],
+                    },
+                },
+            ]
+        )
+        service = ConversationRouterService(self.store, model, date(2026, 9, 11))
+
+        turn = service.submit(self.conversation.id, content, "deadline-turn")
+        pending = self.store.get_pending_clarification(self.conversation.id)
+
+        self.assertEqual(turn.outcome, "tracker_change")
+        self.assertEqual(len(self.store.list_project_records(self.project.id)), 1)
+        self.assertEqual(self.store.list_saved_items(kinds=("note",)), [])
+        self.assertIsNotNone(pending)
+        self.assertEqual(pending.missing_field, "follow_up")
+        self.assertEqual(pending.original_action["action"], "save_note")
+        self.assertIn("要我把会议内容保存为会议纪要吗？", turn.assistant_message.content)
+
+        confirmed = service.submit(self.conversation.id, "是的，请保存。", "deadline-confirmation")
+
+        self.assertEqual(confirmed.outcome, "save_note")
+        self.assertEqual(len(self.store.list_saved_items(kinds=("note",))), 1)
+        self.assertIsNone(self.store.get_pending_clarification(self.conversation.id))
+
+    def test_a_deferred_item_without_a_committed_action_is_refused(self) -> None:
+        content = "这条消息只是闲聊，顺便下周三晚上八点提交修复。"
+        model = ScriptedContextualModel(
+            [
+                {
+                    "intent": "reply_only",
+                    "reply": "I cannot take a local action for that.",
+                    "deferred_action": {
+                        "action": "create_event",
+                        "content": "提交修复",
+                        "date_expression": "下周三",
+                        "time_expression": "晚上八点",
+                        "evidence": [{"message_id": "reply-only-turn", "source_quote": content}],
+                    },
+                    "follow_up_question": "Should I also add that deadline?",
+                }
+            ]
+        )
+
+        turn = ConversationRouterService(self.store, model, date(2026, 9, 11)).submit(
+            self.conversation.id, content, "reply-only-turn"
+        )
+
+        self.assertEqual(turn.outcome, "model_or_validation_failure")
+        self.assertIsNone(self.store.get_pending_clarification(self.conversation.id))
+        self.assertEqual(self.store.list_calendar_events(), [])
+
     def _saved_event(self, suffix: str, title: str, start_at: datetime) -> CalendarEvent:
         source = self.store.save_message(
             Message(

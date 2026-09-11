@@ -223,6 +223,54 @@ class ModelTests(unittest.TestCase):
                 ],
             )
 
+    def test_contextual_decision_bounds_a_deferred_second_item(self) -> None:
+        note_evidence = [
+            EvidenceReference(
+                message_id="compound-message",
+                source_quote="今天中午十二点的会议是关于系统架构与驱动集成，修复需要下周三晚上八点之前提交",
+            )
+        ]
+        decision = ConversationDecision(
+            intent="save_note",
+            action=ContextualAction(
+                action="save_note", content="系统架构与驱动集成会议纪要。", evidence=note_evidence
+            ),
+            deferred_action=ContextualAction(
+                action="create_event",
+                content="提交修复",
+                date_expression="下周三",
+                time_expression="晚上八点",
+                evidence=note_evidence,
+            ),
+            follow_up_question="Should I also add that deadline to the local calendar?",
+        )
+
+        self.assertEqual(decision.deferred_action.action, "create_event")
+        with self.assertRaises(ValidationError):
+            ConversationDecision(
+                intent="save_note",
+                action=ContextualAction(
+                    action="save_note", content="会议纪要。", evidence=note_evidence
+                ),
+                deferred_action=ContextualAction(
+                    action="create_event",
+                    content="提交修复",
+                    date_expression="下周三",
+                    evidence=note_evidence,
+                ),
+            )
+        with self.assertRaises(ValidationError):
+            ConversationDecision(
+                intent="save_note",
+                action=ContextualAction(
+                    action="save_note", content="会议纪要。", evidence=note_evidence
+                ),
+                deferred_action=ContextualAction(
+                    action="delete_event", target_event_id="event-1", evidence=note_evidence
+                ),
+                follow_up_question="Should I also delete that meeting?",
+            )
+
     def test_contextual_clarification_retains_an_unresolved_calendar_delete(self) -> None:
         decision = ConversationDecision(
             intent="clarify",

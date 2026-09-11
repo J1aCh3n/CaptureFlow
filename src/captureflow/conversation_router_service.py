@@ -150,8 +150,6 @@ class ConversationRouterService:
                         outcome="clarification_created",
                     )
                 operations, reply = self._create_event(user_message, decision.action)
-                if pending is not None:
-                    self.store.resolve_pending_clarification(pending.id, "resolved")
             elif decision.intent == "calendar_update":
                 if field := self._calendar_clarification_field(decision.action):
                     assistant = self._save_calendar_clarification(user_message, decision.action, field)
@@ -168,12 +166,8 @@ class ConversationRouterService:
                         outcome="clarification_created",
                     )
                 operations, reply = self._update_event(user_message, decision.action)
-                if pending is not None:
-                    self.store.resolve_pending_clarification(pending.id, "resolved")
             elif decision.intent == "calendar_delete":
                 operations, reply = self._delete_event(user_message, decision.action)
-                if pending is not None:
-                    self.store.resolve_pending_clarification(pending.id, "resolved")
             elif decision.intent in {"save_idea", "save_note"}:
                 operations, reply = self._save_item(user_message, decision.action)
             elif decision.intent == "tracker_change":
@@ -230,7 +224,13 @@ class ConversationRouterService:
             )
 
         outcome = decision.intent if decision.intent != "reply_only" or operations else "reply_only"
-        return self._reply(
+        if pending is not None and operations:
+            # Any committed write answers the open question, including a deferred second item.
+            self.store.resolve_pending_clarification(pending.id, "resolved")
+        deferred = self._deferred_second_item(decision, operations, user_message.conversation_id)
+        if deferred is not None:
+            reply = f"{reply}\n\n{decision.follow_up_question}"
+        turn = self._reply(
             user_message,
             reply,
             decision,
@@ -242,6 +242,23 @@ class ConversationRouterService:
             local_seconds=perf_counter() - local_started,
             outcome=outcome,
         )
+        if deferred is not None:
+            self._save_follow_up_clarification(user_message, turn.assistant_message, deferred)
+        return turn
+
+    def _deferred_second_item(
+        self,
+        decision: ConversationDecision,
+        operations: tuple[RouterOperation, ...],
+        conversation_id: str,
+    ) -> ContextualAction | None:
+        """Return the second item to ask about, once this turn has committed its one action."""
+
+        if decision.deferred_action is None or not operations:
+            return None
+        if self.store.get_pending_clarification(conversation_id) is not None:
+            return None
+        return decision.deferred_action
 
     def _create_event(
         self, user_message: Message, action: ContextualAction | None
@@ -486,6 +503,23 @@ class ConversationRouterService:
         )
         return assistant
 
+    def _save_follow_up_clarification(
+        self, user_message: Message, assistant: Message, deferred_action: ContextualAction
+    ) -> PendingClarification:
+        """Keep the unexecuted second item of a compound message as one pending question."""
+
+        return self.store.save_pending_clarification(
+            PendingClarification(
+                id=_stable_id(user_message.id, "contextual-follow-up-clarification"),
+                conversation_id=user_message.conversation_id,
+                source_message_id=user_message.id,
+                assistant_message_id=assistant.id,
+                original_action=deferred_action.model_dump(mode="json"),
+                missing_field="follow_up",
+                created_at=user_message.created_at,
+            )
+        )
+
     def _save_answer_sources(
         self, assistant_message_id: str, decision: ConversationDecision, candidates: RouterCandidates
     ) -> None:
@@ -655,7 +689,7 @@ class ConversationRouterService:
         event_ids = {event.id for event in candidates.events}
         item_ids = {item.id for item in candidates.saved_items}
         record_ids = {record.id for record in candidates.project_records}
-        for action in (decision.action, decision.pending_action):
+        for action in (decision.action, decision.pending_action, decision.deferred_action):
             if action is None:
                 continue
             if action.target_event_id is not None and action.target_event_id not in event_ids:

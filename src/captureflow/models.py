@@ -399,7 +399,7 @@ class PendingClarification(BaseModel):
     source_message_id: str
     assistant_message_id: str
     original_action: dict
-    missing_field: Literal["date", "time", "duration"] = "date"
+    missing_field: Literal["date", "time", "duration", "follow_up"] = "date"
     status: Literal["pending", "resolved", "cancelled"] = "pending"
     created_at: datetime = Field(default_factory=utc_now)
     resolved_at: datetime | None = None
@@ -955,10 +955,12 @@ class ConversationDecision(BaseModel):
     project_changes: list[ProjectChange] = Field(default_factory=list, max_length=3)
     clarification_question: str | None = Field(default=None, max_length=300)
     pending_action: ContextualAction | None = None
+    deferred_action: ContextualAction | None = None
+    follow_up_question: str | None = Field(default=None, max_length=300)
     reply: str | None = Field(default=None, max_length=1_000)
     source_ids: list[str] = Field(default_factory=list, max_length=6)
 
-    @field_validator("clarification_question", "reply")
+    @field_validator("clarification_question", "follow_up_question", "reply")
     @classmethod
     def optional_reply_text_is_not_whitespace(cls, value: str | None) -> str | None:
         if value is None:
@@ -975,6 +977,7 @@ class ConversationDecision(BaseModel):
 
     @model_validator(mode="after")
     def intent_matches_payload(self) -> "ConversationDecision":
+        self._deferred_second_item_is_bounded()
         action_for_intent = {
             "calendar_create": "create_event",
             "calendar_update": "update_event",
@@ -1019,6 +1022,25 @@ class ConversationDecision(BaseModel):
             if not self.reply:
                 raise ValueError("a read-only decision requires a reply")
         return self
+
+    def _deferred_second_item_is_bounded(self) -> None:
+        """One turn still commits one action; a second item may only be asked about."""
+
+        if (self.deferred_action is None) != (self.follow_up_question is None):
+            raise ValueError("a deferred second item needs both an action and a follow-up question")
+        if self.deferred_action is None:
+            return
+        if self.intent not in {
+            "calendar_create",
+            "calendar_update",
+            "calendar_delete",
+            "save_idea",
+            "save_note",
+            "tracker_change",
+        }:
+            raise ValueError("only a committed local action may defer a second item")
+        if self.deferred_action.action not in {"create_event", "save_idea", "save_note"}:
+            raise ValueError("a deferred second item may only create a new local record")
 
 
 class CalendarEventUpdateOperation(BaseModel):

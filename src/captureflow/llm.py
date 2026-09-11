@@ -307,13 +307,24 @@ class OpenAICompatibleModel:
                 "it never carries content, description, or any date, time, or duration expression. If the "
                 "request could name more than one candidate event, or names none of them, use clarify with a "
                 "pending delete_event action instead of guessing which event to remove. "
+                "One turn commits exactly one local action. When the current message clearly states a "
+                "second, different local item as well — for example finished meeting minutes plus a separate "
+                "future deadline — commit one of them, put the remaining item in deferred_action, and ask "
+                "about it in one short follow_up_question. When one of the two items is a tracker change, "
+                "commit that one and defer the other, because a deferred_action may only be create_event, "
+                "save_idea, or save_note, must cite the current message, and is not executed until the user "
+                "confirms it. Leave both fields null when the message states only one item; never invent a "
+                "second item or split one item into two. "
                 "A meeting question is local_answer and must not propose a write. Project status/history "
                 "questions are project_answer and must not propose a write. For local_answer or project_answer, "
                 "list every supplied candidate ID used by the reply in source_ids. Save only an explicit idea or "
                 "note with save_idea or save_note. Use reply_only for unsupported conversation. "
                 "Every local action needs one to three EvidenceReference entries. Each entry must copy an "
                 "exact quote from one supplied recent_messages message and its exact message_id; do not cite "
-                "the same message twice. Any candidate ID you provide may reference only supplied candidates. "
+                "the same message twice. One entry must always quote current_message exactly, even when that "
+                "message only confirms an earlier pending item; cite the earlier message as a second entry "
+                "when the committed content comes from it. "
+                "Any candidate ID you provide may reference only supplied candidates. "
                 "Never invent a source quote, candidate ID, date, time, task, meeting, project "
                 "fact, or external information. If context_truncated is true, do not imply older messages were seen."
             ),
@@ -680,7 +691,7 @@ class OpenAICompatibleModel:
         record_ids = {
             candidate["id"] for candidate in candidate_project_records if "id" in candidate
         }
-        for action in (decision.action, decision.pending_action):
+        for action in (decision.action, decision.pending_action, decision.deferred_action):
             if action is None:
                 continue
             if action.target_event_id is not None and action.target_event_id not in event_ids:

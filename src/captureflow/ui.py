@@ -644,8 +644,14 @@ def render_chat_page(
 
     if pending := store.get_pending_clarification(conversation_id):
         question = store.get_message(pending.assistant_message_id).content
+        follow_up = pending.missing_field == "follow_up"
+        if follow_up:
+            question = question.rsplit("\n\n", 1)[-1]
         st.warning(question)
-        if st.button("Cancel pending event", key=f"cancel-clarification-{pending.id}"):
+        if st.button(
+            "Dismiss suggestion" if follow_up else "Cancel pending event",
+            key=f"cancel-clarification-{pending.id}",
+        ):
             store.resolve_pending_clarification(pending.id, "cancelled")
             st.rerun()
 
