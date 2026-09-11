@@ -227,7 +227,7 @@ class ProjectTrackerService:
                     source_message_id=user_message.id,
                     project_id=project.id,
                     change_index=index,
-                    change=change.model_dump(exclude_none=True),
+                    change=change.model_dump(mode="json", exclude_none=True),
                     target_record_id=change.target_record_id,
                     status="review" if index in review_indexes else "prepared",
                 )

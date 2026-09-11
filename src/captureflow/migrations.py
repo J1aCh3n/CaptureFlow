@@ -484,6 +484,14 @@ MIGRATIONS = (
             """,
         ),
     ),
+    Migration(
+        version=13,
+        name="v2_project_record_due_at",
+        statements=(
+            "ALTER TABLE project_records ADD COLUMN due_at TEXT",
+            "CREATE INDEX project_records_due ON project_records(due_at, state, project_id)",
+        ),
+    ),
 )
 
 LATEST_SCHEMA_VERSION = MIGRATIONS[-1].version

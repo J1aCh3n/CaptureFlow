@@ -460,6 +460,7 @@ class ProjectRecord(BaseModel):
     kind: ProjectRecordKind
     content: str = Field(min_length=1, max_length=4_000)
     rationale: str | None = Field(default=None, max_length=1_000)
+    due_at: date | datetime | None = None
     state: ProjectRecordState
     source_message_id: str
     source_quote: str = Field(min_length=1, max_length=8_000)
@@ -496,6 +497,8 @@ class ProjectRecord(BaseModel):
             raise ValueError(f"{self.kind} cannot use state {self.state}")
         if self.supersedes_record_id and self.kind not in {"decision", "constraint"}:
             raise ValueError("only a decision or constraint may supersede a record")
+        if self.due_at is not None and self.kind != "task":
+            raise ValueError("only a task may carry a deadline")
         return self
 
 
@@ -574,11 +577,14 @@ class ProjectChange(BaseModel):
     kind: ProjectRecordKind | None = None
     content: str | None = Field(default=None, max_length=4_000)
     rationale: str | None = Field(default=None, max_length=1_000)
+    due_date_expression: str | None = Field(default=None, max_length=100)
+    due_time_expression: str | None = Field(default=None, max_length=20)
+    due_at: date | datetime | None = None
     source_quote: str = Field(min_length=1, max_length=8_000)
     target_record_id: str | None = None
     target_state: Literal["completed", "resolved"] | None = None
 
-    @field_validator("content", "rationale")
+    @field_validator("content", "rationale", "due_date_expression", "due_time_expression")
     @classmethod
     def optional_text_is_not_whitespace(cls, value: str | None) -> str | None:
         if value is None:
@@ -588,6 +594,7 @@ class ProjectChange(BaseModel):
 
     @model_validator(mode="after")
     def fields_match_change_action(self) -> "ProjectChange":
+        self._deadline_fields_are_bounded()
         if self.action == "create_record":
             if self.kind is None or self.content is None:
                 raise ValueError("a record creation requires kind and content")
@@ -606,6 +613,21 @@ class ProjectChange(BaseModel):
             if self.target_state is not None:
                 raise ValueError("a supersession cannot supply a transition state")
         return self
+
+    def _deadline_fields_are_bounded(self) -> None:
+        """A deadline belongs to a new task; Python, not the model, resolves it."""
+
+        if self.action != "create_record" or self.kind != "task":
+            if any(
+                value is not None
+                for value in (self.due_date_expression, self.due_time_expression, self.due_at)
+            ):
+                raise ValueError("only a new task may carry a deadline")
+            return
+        if self.due_time_expression is not None and self.due_date_expression is None:
+            raise ValueError("a deadline time needs a deadline date")
+        if self.due_at is not None and self.due_date_expression is None:
+            raise ValueError("a resolved deadline needs the copied deadline date")
 
 
 class ProjectTrackerDecision(ProjectConversationDecision):

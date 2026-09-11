@@ -22,6 +22,7 @@ from .models import (
     LocalContextSourceRef,
     Message,
     PendingClarification,
+    ProjectChange,
     ProjectChangeOperation,
     ProjectRecord,
     SavedItem,
@@ -444,11 +445,12 @@ class ConversationRouterService:
         project = self.store.get_conversation_project(user_message.conversation_id)
         if project is None:
             raise ValueError("assign a project before changing its tracker")
+        changes = [self._resolved_deadline(change) for change in decision.project_changes]
         committed, reviewed = ProjectTrackerService.apply_validated_changes(
             self.store,
             project,
             user_message,
-            decision.project_changes,
+            [change for change, _ in changes],
             list(candidates.project_records),
         )
         operations = tuple([*committed, *reviewed])
@@ -460,7 +462,46 @@ class ConversationRouterService:
             else "Tracker update was not applied."
             for operation in operations
         ]
+        summaries.extend(self._deadline_summaries(changes, committed))
         return operations, "\n".join(summaries) or "No tracker change was applied."
+
+    def _resolved_deadline(self, change: ProjectChange) -> tuple[ProjectChange, bool]:
+        """Resolve a copied deadline expression locally; never guess one."""
+
+        if change.due_date_expression is None:
+            return change, True
+        cleared = {"due_date_expression": None, "due_time_expression": None, "due_at": None}
+        resolution = resolve_relative_date(
+            change.due_date_expression, self.reference_date, self.timezone
+        )
+        if resolution.status != "resolved" or resolution.resolved_date is None:
+            return change.model_copy(update=cleared), False
+        due: date | datetime = resolution.resolved_date
+        if change.due_time_expression is not None:
+            due_time = parse_time(change.due_time_expression)
+            if due_time is None:
+                return change.model_copy(update=cleared), False
+            due = datetime.combine(resolution.resolved_date, due_time, tzinfo=ZoneInfo(self.timezone))
+        return change.model_copy(update={"due_at": due}), True
+
+    def _deadline_summaries(
+        self,
+        changes: list[tuple[ProjectChange, bool]],
+        committed: list[ProjectChangeOperation],
+    ) -> list[str]:
+        summaries = []
+        if any(not resolved for _, resolved in changes):
+            summaries.append(
+                "I could not resolve the stated deadline, so the task has no calendar deadline."
+            )
+        for operation in committed:
+            record_id = (operation.result or {}).get("record_id")
+            if operation.status != "committed" or record_id is None:
+                continue
+            record = self.store.get_project_record(record_id)
+            if record.due_at is not None:
+                summaries.append(f"Deadline on the calendar: {record.due_at.isoformat()}.")
+        return summaries
 
     def _save_clarification(self, user_message: Message, decision: ConversationDecision) -> Message:
         assert decision.pending_action is not None
@@ -705,6 +746,8 @@ class ConversationRouterService:
         if decision.intent in {"calendar_create", "save_idea", "save_note", "calendar_update"}:
             assert decision.action is not None
             ConversationRouterService._current_evidence(decision.action, user_message)
+        if any(change.due_at is not None for change in decision.project_changes):
+            raise ValueError("a tracker deadline must be resolved locally, not supplied by the model")
         if any(
             change.target_record_id is not None and change.target_record_id not in record_ids
             for change in decision.project_changes

@@ -14,6 +14,7 @@ from captureflow.models import (
     MAX_CAPTURE_CHARACTERS,
     Message,
     PendingClarification,
+    ProjectChange,
     SavedItem,
     ToolOperation,
 )
@@ -221,6 +222,42 @@ class ModelTests(unittest.TestCase):
                 evidence=[
                     EvidenceReference(message_id="delete-message", source_quote="删除过期会议")
                 ],
+            )
+
+    def test_only_a_new_task_may_carry_a_deadline(self) -> None:
+        change = ProjectChange(
+            action="create_record",
+            kind="task",
+            content="提交修复",
+            due_date_expression="下周三",
+            due_time_expression="晚上八点",
+            source_quote="修复需要下周三晚上八点之前提交",
+        )
+
+        self.assertIsNone(change.due_at)
+        with self.assertRaises(ValidationError):
+            ProjectChange(
+                action="create_record",
+                kind="blocker",
+                content="驱动没有到货",
+                due_date_expression="下周三",
+                source_quote="驱动没有到货",
+            )
+        with self.assertRaises(ValidationError):
+            ProjectChange(
+                action="create_record",
+                kind="task",
+                content="提交修复",
+                due_time_expression="晚上八点",
+                source_quote="修复需要晚上八点之前提交",
+            )
+        with self.assertRaises(ValidationError):
+            ProjectChange(
+                action="transition_record",
+                target_record_id="record-1",
+                target_state="completed",
+                due_date_expression="下周三",
+                source_quote="这个任务做完了",
             )
 
     def test_contextual_decision_bounds_a_deferred_second_item(self) -> None:

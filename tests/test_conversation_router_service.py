@@ -537,6 +537,123 @@ class ConversationRouterServiceTests(unittest.TestCase):
             self.store.get_pending_clarification(self.conversation.id), None
         )
 
+    def test_task_deadline_is_resolved_locally_and_listed_for_the_calendar(self) -> None:
+        content = "修复需要下周三晚上八点之前提交"
+        model = ScriptedContextualModel(
+            [
+                {
+                    "intent": "tracker_change",
+                    "project_changes": [
+                        {
+                            "action": "create_record",
+                            "kind": "task",
+                            "content": "提交修复",
+                            "due_date_expression": "下周三",
+                            "due_time_expression": "晚上八点",
+                            "source_quote": content,
+                        }
+                    ],
+                }
+            ]
+        )
+
+        turn = ConversationRouterService(self.store, model, date(2026, 9, 11)).submit(
+            self.conversation.id, content, "deadline-record-turn"
+        )
+        record = self.store.list_project_records(self.project.id)[0]
+
+        self.assertEqual(turn.outcome, "tracker_change")
+        self.assertEqual(record.due_at, datetime.fromisoformat("2026-09-16T20:00:00-07:00"))
+        self.assertEqual(self.store.list_task_deadlines(), [record])
+        self.assertIn("2026-09-16T20:00:00-07:00", turn.assistant_message.content)
+
+        self.store.transition_project_record(record.id, "completed")
+
+        self.assertEqual(self.store.list_task_deadlines(), [])
+
+    def test_a_task_deadline_without_a_time_stays_a_calendar_date(self) -> None:
+        content = "文档下周三之前交。"
+        model = ScriptedContextualModel(
+            [
+                {
+                    "intent": "tracker_change",
+                    "project_changes": [
+                        {
+                            "action": "create_record",
+                            "kind": "task",
+                            "content": "交文档",
+                            "due_date_expression": "下周三",
+                            "source_quote": content,
+                        }
+                    ],
+                }
+            ]
+        )
+
+        ConversationRouterService(self.store, model, date(2026, 9, 11)).submit(
+            self.conversation.id, content, "date-only-deadline-turn"
+        )
+        record = self.store.list_project_records(self.project.id)[0]
+
+        self.assertEqual(record.due_at, date(2026, 9, 16))
+        self.assertEqual(self.store.list_task_deadlines(), [record])
+
+    def test_an_unresolvable_deadline_keeps_the_task_without_one(self) -> None:
+        content = "修复要尽快提交。"
+        model = ScriptedContextualModel(
+            [
+                {
+                    "intent": "tracker_change",
+                    "project_changes": [
+                        {
+                            "action": "create_record",
+                            "kind": "task",
+                            "content": "提交修复",
+                            "due_date_expression": "尽快",
+                            "source_quote": content,
+                        }
+                    ],
+                }
+            ]
+        )
+
+        turn = ConversationRouterService(self.store, model, date(2026, 9, 11)).submit(
+            self.conversation.id, content, "vague-deadline-turn"
+        )
+        record = self.store.list_project_records(self.project.id)[0]
+
+        self.assertEqual(turn.outcome, "tracker_change")
+        self.assertIsNone(record.due_at)
+        self.assertEqual(self.store.list_task_deadlines(), [])
+        self.assertIn("could not resolve the stated deadline", turn.assistant_message.content)
+
+    def test_a_model_supplied_deadline_timestamp_is_refused(self) -> None:
+        content = "修复需要下周三晚上八点之前提交"
+        model = ScriptedContextualModel(
+            [
+                {
+                    "intent": "tracker_change",
+                    "project_changes": [
+                        {
+                            "action": "create_record",
+                            "kind": "task",
+                            "content": "提交修复",
+                            "due_date_expression": "下周三",
+                            "due_at": "2026-09-16T20:00:00-07:00",
+                            "source_quote": content,
+                        }
+                    ],
+                }
+            ]
+        )
+
+        turn = ConversationRouterService(self.store, model, date(2026, 9, 11)).submit(
+            self.conversation.id, content, "model-deadline-turn"
+        )
+
+        self.assertEqual(turn.outcome, "model_or_validation_failure")
+        self.assertEqual(self.store.list_project_records(self.project.id), [])
+
     def test_committed_tracker_deadline_can_defer_the_meeting_minutes(self) -> None:
         content = "今天中午十二点的会议分析了驱动调试。修复需要下周三晚上八点之前提交"
         model = ScriptedContextualModel(

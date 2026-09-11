@@ -388,6 +388,29 @@ class CaptureStore:
             ).fetchall()
         return [ProjectRecord(**dict(row)) for row in rows]
 
+    def list_task_deadlines(
+        self, workspace_id: str = DEFAULT_WORKSPACE_ID, states: tuple[str, ...] = ("active",)
+    ) -> list[ProjectRecord]:
+        """Active tracker tasks that carry a deadline, for the read-only Calendar view."""
+
+        if not states:
+            return []
+        placeholders = ", ".join("?" for _ in states)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT project_records.* FROM project_records
+                JOIN projects ON projects.id = project_records.project_id
+                WHERE projects.workspace_id = ?
+                  AND project_records.kind = 'task'
+                  AND project_records.due_at IS NOT NULL
+                  AND project_records.state IN ({placeholders})
+                ORDER BY project_records.due_at ASC, project_records.id ASC
+                """,
+                (workspace_id, *states),
+            ).fetchall()
+        return [ProjectRecord(**dict(row)) for row in rows]
+
     def list_project_records_for_conversation(self, conversation_id: str) -> list[ProjectRecord]:
         with self._connect() as connection:
             rows = connection.execute(
@@ -752,6 +775,7 @@ class CaptureStore:
                     kind=change.kind,
                     content=change.content,
                     rationale=change.rationale,
+                    due_at=change.due_at,
                     state="completed" if change.kind == "milestone" else "active",
                     source_message_id=source.id,
                     source_quote=change.source_quote,
@@ -2061,9 +2085,9 @@ class CaptureStore:
         cursor = connection.execute(
             """
             INSERT OR IGNORE INTO project_records
-            (id, project_id, conversation_id, kind, content, rationale, state,
+            (id, project_id, conversation_id, kind, content, rationale, due_at, state,
              source_message_id, source_quote, supersedes_record_id, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 record.id,
@@ -2072,6 +2096,7 @@ class CaptureStore:
                 record.kind,
                 record.content,
                 record.rationale,
+                None if record.due_at is None else record.due_at.isoformat(),
                 record.state,
                 record.source_message_id,
                 record.source_quote,
