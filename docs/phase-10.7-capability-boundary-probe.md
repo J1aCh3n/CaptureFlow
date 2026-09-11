@@ -69,6 +69,10 @@ active events hits it, and stale past events make it permanent. Candidate
 selection should be anchored near the reference date instead of at the start of
 the table.
 
+**Fixed** in `fix: choose calendar candidates near the reference date`. The same
+probe now deletes `客户电话会` on the first turn. The candidate budget is
+unchanged at three; only which three changed.
+
 ### 2. A stated timezone is dropped without a word
 
 `纽约时间明天上午九点有电话会` stored `2026-09-12T09:00:00-07:00`, in

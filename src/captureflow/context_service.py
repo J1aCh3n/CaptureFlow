@@ -1,6 +1,7 @@
 """Bounded, project-scoped conversation replies for V2 Phase 5."""
 
 from dataclasses import dataclass
+from datetime import date, datetime
 from time import perf_counter
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
@@ -98,6 +99,7 @@ def select_project_context(
 def select_router_candidates(
     store: CaptureStore,
     conversation_id: str,
+    reference_date: date | None = None,
     *,
     max_per_kind: int = MAX_ROUTER_CANDIDATES_PER_KIND,
 ) -> RouterCandidates:
@@ -106,7 +108,11 @@ def select_router_candidates(
     if max_per_kind < 1:
         raise ValueError("router candidate limit must be positive")
     conversation = store.get_conversation(conversation_id)
-    events = tuple(store.list_calendar_events(conversation.workspace_id)[:max_per_kind])
+    events = tuple(
+        _events_nearest(
+            store.list_calendar_events(conversation.workspace_id), reference_date, max_per_kind
+        )
+    )
     project = store.get_conversation_project(conversation_id)
     if project is None:
         return RouterCandidates(
@@ -124,6 +130,34 @@ def select_router_candidates(
             store.list_project_records(project.id, states=("active",))[:max_per_kind]
         ),
     )
+
+
+def _events_nearest(
+    events: list[CalendarEvent], reference_date: date | None, limit: int
+) -> list[CalendarEvent]:
+    """Keep the few events closest to the reference date, preferring an upcoming one.
+
+    The stored order is the whole workspace from its earliest event, so a fixed
+    prefix of it hides everything a conversation is actually about as soon as a
+    few old events accumulate.
+    """
+
+    if reference_date is None:
+        return events[:limit]
+    nearest = sorted(
+        events,
+        key=lambda event: (
+            abs((_event_date(event) - reference_date).days),
+            _event_date(event) < reference_date,
+            _event_date(event),
+            event.id,
+        ),
+    )[:limit]
+    return sorted(nearest, key=lambda event: (_event_date(event), event.id))
+
+
+def _event_date(event: CalendarEvent) -> date:
+    return event.start_at.date() if isinstance(event.start_at, datetime) else event.start_at
 
 
 def _logical_turn_order(messages: list[Message]) -> list[Message]:

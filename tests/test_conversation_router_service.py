@@ -792,6 +792,38 @@ class ConversationRouterServiceTests(unittest.TestCase):
         self.assertEqual(self.store.undo_calendar_event_update(operation.id).status, "undone")
         self.assertEqual(self.store.get_calendar_event(event.id), event)
 
+    def test_stale_events_do_not_hide_the_event_a_turn_is_about(self) -> None:
+        for suffix, title, start_at in (
+            ("stale-1", "上月周会", "2026-08-03T10:00:00-07:00"),
+            ("stale-2", "上月评审", "2026-08-10T10:00:00-07:00"),
+            ("stale-3", "上月复盘", "2026-08-17T10:00:00-07:00"),
+        ):
+            self._saved_event(suffix, title, datetime.fromisoformat(start_at))
+        target = self._saved_event(
+            "call-in", "客户电话会", datetime.fromisoformat("2026-09-12T09:00:00-07:00")
+        )
+        content = "明天的客户电话会取消了，删掉它"
+        model = ScriptedContextualModel(
+            [
+                {
+                    "intent": "calendar_delete",
+                    "action": {
+                        "action": "delete_event",
+                        "target_event_id": target.id,
+                        "evidence": [{"message_id": "stale-crowding-turn", "source_quote": content}],
+                    },
+                }
+            ]
+        )
+
+        turn = ConversationRouterService(self.store, model, date(2026, 9, 11)).submit(
+            self.conversation.id, content, "stale-crowding-turn"
+        )
+
+        self.assertIn(target.id, [event["id"] for event in model.calls[0]["candidate_events"]])
+        self.assertEqual(turn.outcome, "calendar_delete")
+        self.assertEqual(self.store.get_calendar_event(target.id).status, "deleted")
+
     def test_ambiguous_calendar_delete_creates_a_clarification_without_a_write(self) -> None:
         self._saved_event(
             "morning-standup", "站会", datetime.fromisoformat("2026-09-10T09:00:00-07:00")

@@ -1,6 +1,6 @@
 import tempfile
 import unittest
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 from captureflow.context_service import (
@@ -235,6 +235,77 @@ class ProjectConversationServiceTests(unittest.TestCase):
         self.assertEqual([item.id for item in candidates.saved_items], [same_project_item.id])
         self.assertNotIn(other_project_item.id, [item.id for item in candidates.saved_items])
         self.assertEqual([record.id for record in candidates.project_records], [active_record.id])
+
+    def test_router_candidates_follow_the_reference_date_not_the_oldest_events(self) -> None:
+        source = self.store.save_message(
+            Message(
+                id="nearest-source",
+                conversation_id=self.conversation.id,
+                role="user",
+                content="Nearest candidate source.",
+            )
+        )
+        starts = {
+            "stale-1": "2026-08-03T10:00:00-07:00",
+            "stale-2": "2026-08-10T10:00:00-07:00",
+            "stale-3": "2026-08-17T10:00:00-07:00",
+            "yesterday": "2026-09-10T16:00:00-07:00",
+            "tomorrow": "2026-09-12T09:00:00-07:00",
+            "next-week": "2026-09-16T20:00:00-07:00",
+            "far": "2026-12-01T09:00:00-07:00",
+        }
+        for suffix, start_at in starts.items():
+            self.store.save_calendar_event(
+                CalendarEvent(
+                    id=f"nearest-{suffix}",
+                    conversation_id=self.conversation.id,
+                    title=suffix,
+                    source_message_id=source.id,
+                    source_quote=source.content,
+                    start_at=datetime.fromisoformat(start_at),
+                    all_day=False,
+                    timezone="America/Vancouver",
+                )
+            )
+
+        candidates = select_router_candidates(
+            self.store, self.conversation.id, date(2026, 9, 11)
+        )
+
+        self.assertEqual(
+            [event.id for event in candidates.events],
+            ["nearest-yesterday", "nearest-tomorrow", "nearest-next-week"],
+        )
+
+    def test_router_candidates_keep_the_stored_order_without_a_reference_date(self) -> None:
+        source = self.store.save_message(
+            Message(
+                id="ordered-source",
+                conversation_id=self.conversation.id,
+                role="user",
+                content="Ordered candidate source.",
+            )
+        )
+        for suffix, start_at in {
+            "stale": "2026-08-03T10:00:00-07:00",
+            "tomorrow": "2026-09-12T09:00:00-07:00",
+        }.items():
+            self.store.save_calendar_event(
+                CalendarEvent(
+                    id=f"ordered-{suffix}",
+                    conversation_id=self.conversation.id,
+                    title=suffix,
+                    source_message_id=source.id,
+                    source_quote=source.content,
+                    start_at=datetime.fromisoformat(start_at),
+                    all_day=False,
+                    timezone="America/Vancouver",
+                )
+            )
+
+        candidates = select_router_candidates(self.store, self.conversation.id, max_per_kind=1)
+
+        self.assertEqual([event.id for event in candidates.events], ["ordered-stale"])
 
     def test_unassigned_router_candidates_exclude_project_records(self) -> None:
         unassigned = self.store.save_conversation(
