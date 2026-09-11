@@ -138,6 +138,10 @@ tracker. A user who expects `下周三晚上八点` to appear in Calendar will n
 it there. Whether a dated deadline should also create a Calendar event is a
 separate product decision and is not implemented here.
 
+Resolved in [phase-10.6-tracker-deadlines-on-the-calendar.md](phase-10.6-tracker-deadlines-on-the-calendar.md):
+the deadline stays a tracker task and is displayed read-only on the Calendar page
+without becoming an event.
+
 Declining a follow-up question is also not a routed intent yet: an unanswered
 question stays pending until the user answers it or presses **Dismiss
 suggestion**.
