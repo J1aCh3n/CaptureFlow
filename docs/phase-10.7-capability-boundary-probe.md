@@ -80,6 +80,12 @@ unchanged at three; only which three changed.
 says so. Every other unsupported input in this product fails closed; this one
 fabricates a 3-hour error. It should either clarify or refuse.
 
+**Fixed** in `fix: clarify a stated timezone instead of storing it as local time`.
+A bounded vocabulary of named zones is matched deterministically in the message;
+when the named zone is not the configured one, the turn creates a `timezone`
+clarification and writes nothing. CaptureFlow still does not convert between
+zones — it says so and asks for a local time.
+
 ### 3. The credential guard is English-only
 
 `contains_credential_disclosure()` requires `api key|password|secret|access

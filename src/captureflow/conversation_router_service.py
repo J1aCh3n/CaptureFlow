@@ -31,7 +31,7 @@ from .models import (
 )
 from .project_service import ProjectTrackerService
 from .storage import CaptureStore
-from .time_tool import parse_duration, parse_time
+from .time_tool import parse_duration, parse_time, stated_timezone
 
 
 RouterOperation = ToolOperation | CalendarEventUpdateOperation | ProjectChangeOperation
@@ -136,7 +136,7 @@ class ConversationRouterService:
         local_started = perf_counter()
         try:
             if decision.intent == "calendar_create":
-                if field := self._calendar_clarification_field(decision.action):
+                if field := self._calendar_clarification_field(decision.action, user_message):
                     assistant = self._save_calendar_clarification(user_message, decision.action, field)
                     return self._turn(
                         user_message,
@@ -152,7 +152,7 @@ class ConversationRouterService:
                     )
                 operations, reply = self._create_event(user_message, decision.action)
             elif decision.intent == "calendar_update":
-                if field := self._calendar_clarification_field(decision.action):
+                if field := self._calendar_clarification_field(decision.action, user_message):
                     assistant = self._save_calendar_clarification(user_message, decision.action, field)
                     return self._turn(
                         user_message,
@@ -379,10 +379,12 @@ class ConversationRouterService:
         return (committed,), f"Deleted local calendar event: {event.title}. It can be undone."
 
     def _calendar_clarification_field(
-        self, action: ContextualAction | None
+        self, action: ContextualAction | None, user_message: Message | None = None
     ) -> str | None:
         if action is None:
             return None
+        if user_message is not None and self._states_other_timezone(user_message.content):
+            return "timezone"
         if action.date_expression is not None:
             resolution = resolve_relative_date(
                 action.date_expression, self.reference_date, self.timezone
@@ -405,6 +407,14 @@ class ConversationRouterService:
                 if not isinstance(self.store.get_calendar_event(action.target_event_id).start_at, datetime):
                     return "time"
         return None
+
+    def _states_other_timezone(self, content: str) -> str | None:
+        """Notice a message about a timezone this workspace does not store."""
+
+        stated = stated_timezone(content)
+        if stated is None or stated[1] == self.timezone:
+            return None
+        return stated[0]
 
     def _save_item(
         self, user_message: Message, action: ContextualAction | None
@@ -527,6 +537,10 @@ class ConversationRouterService:
             "date": "Which exact date should I use for this local event?",
             "time": "What exact start time should I use for this local event?",
             "duration": "How long should this local event last (for example, 30 minutes)?",
+            "timezone": (
+                f"I only store {self.timezone} times and cannot convert another timezone. "
+                f"What exact {self.timezone} time should I use for this local event?"
+            ),
         }
         assistant = self._assistant_message(
             user_message, questions[missing_field]

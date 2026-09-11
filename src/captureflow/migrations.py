@@ -492,6 +492,45 @@ MIGRATIONS = (
             "CREATE INDEX project_records_due ON project_records(due_at, state, project_id)",
         ),
     ),
+    Migration(
+        version=14,
+        name="v2_timezone_clarification_field",
+        statements=(
+            "DROP INDEX clarifications_conversation_status",
+            "DROP INDEX one_pending_clarification_per_conversation",
+            "ALTER TABLE pending_clarifications RENAME TO pending_clarifications_legacy",
+            """
+            CREATE TABLE pending_clarifications (
+                id TEXT PRIMARY KEY,
+                conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                source_message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+                assistant_message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+                original_action_json TEXT NOT NULL,
+                missing_field TEXT NOT NULL CHECK (
+                    missing_field IN ('date', 'time', 'duration', 'timezone', 'follow_up')
+                ),
+                status TEXT NOT NULL CHECK (status IN ('pending', 'resolved', 'cancelled')),
+                created_at TEXT NOT NULL,
+                resolved_at TEXT
+            )
+            """,
+            """
+            INSERT INTO pending_clarifications
+            (id, conversation_id, source_message_id, assistant_message_id,
+             original_action_json, missing_field, status, created_at, resolved_at)
+            SELECT id, conversation_id, source_message_id, assistant_message_id,
+                   original_action_json, missing_field, status, created_at, resolved_at
+            FROM pending_clarifications_legacy
+            """,
+            "DROP TABLE pending_clarifications_legacy",
+            "CREATE INDEX clarifications_conversation_status ON pending_clarifications(conversation_id, status)",
+            """
+            CREATE UNIQUE INDEX one_pending_clarification_per_conversation
+            ON pending_clarifications(conversation_id)
+            WHERE status = 'pending'
+            """,
+        ),
+    ),
 )
 
 LATEST_SCHEMA_VERSION = MIGRATIONS[-1].version

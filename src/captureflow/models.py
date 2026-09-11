@@ -399,7 +399,7 @@ class PendingClarification(BaseModel):
     source_message_id: str
     assistant_message_id: str
     original_action: dict
-    missing_field: Literal["date", "time", "duration", "follow_up"] = "date"
+    missing_field: Literal["date", "time", "duration", "timezone", "follow_up"] = "date"
     status: Literal["pending", "resolved", "cancelled"] = "pending"
     created_at: datetime = Field(default_factory=utc_now)
     resolved_at: datetime | None = None

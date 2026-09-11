@@ -792,6 +792,62 @@ class ConversationRouterServiceTests(unittest.TestCase):
         self.assertEqual(self.store.undo_calendar_event_update(operation.id).status, "undone")
         self.assertEqual(self.store.get_calendar_event(event.id), event)
 
+    def test_a_stated_foreign_timezone_clarifies_instead_of_storing_local_time(self) -> None:
+        content = "纽约时间明天上午九点有电话会"
+        model = ScriptedContextualModel(
+            [
+                {
+                    "intent": "calendar_create",
+                    "action": {
+                        "action": "create_event",
+                        "content": "电话会",
+                        "date_expression": "明天",
+                        "time_expression": "上午九点",
+                        "evidence": [{"message_id": "foreign-timezone-turn", "source_quote": content}],
+                    },
+                }
+            ]
+        )
+
+        turn = ConversationRouterService(self.store, model, date(2026, 9, 11)).submit(
+            self.conversation.id, content, "foreign-timezone-turn"
+        )
+        pending = self.store.get_pending_clarification(self.conversation.id)
+
+        self.assertEqual(turn.outcome, "clarification_created")
+        self.assertEqual(self.store.list_calendar_events(), [])
+        self.assertIsNotNone(pending)
+        self.assertEqual(pending.missing_field, "timezone")
+        self.assertIn("America/Vancouver", turn.assistant_message.content)
+
+    def test_the_local_timezone_by_name_still_creates_the_event(self) -> None:
+        content = "温哥华时间明天上午九点有电话会"
+        model = ScriptedContextualModel(
+            [
+                {
+                    "intent": "calendar_create",
+                    "action": {
+                        "action": "create_event",
+                        "content": "电话会",
+                        "date_expression": "明天",
+                        "time_expression": "上午九点",
+                        "evidence": [{"message_id": "local-timezone-turn", "source_quote": content}],
+                    },
+                }
+            ]
+        )
+
+        turn = ConversationRouterService(self.store, model, date(2026, 9, 11)).submit(
+            self.conversation.id, content, "local-timezone-turn"
+        )
+
+        self.assertEqual(turn.outcome, "calendar_create")
+        self.assertEqual(
+            self.store.list_calendar_events()[0].start_at,
+            datetime.fromisoformat("2026-09-12T09:00:00-07:00"),
+        )
+        self.assertIsNone(self.store.get_pending_clarification(self.conversation.id))
+
     def test_stale_events_do_not_hide_the_event_a_turn_is_about(self) -> None:
         for suffix, title, start_at in (
             ("stale-1", "上月周会", "2026-08-03T10:00:00-07:00"),

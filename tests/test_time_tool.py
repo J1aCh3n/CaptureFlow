@@ -1,7 +1,7 @@
 import unittest
 from datetime import time, timedelta
 
-from captureflow.time_tool import parse_duration, parse_time
+from captureflow.time_tool import parse_duration, parse_time, stated_timezone
 
 
 class TimeToolTests(unittest.TestCase):
@@ -38,6 +38,30 @@ class TimeToolTests(unittest.TestCase):
         ):
             with self.subTest(expression=expression):
                 self.assertIsNone(parse_time(expression))
+
+    def test_named_timezones_are_recognised_without_false_positives(self) -> None:
+        cases = {
+            "纽约时间明天上午九点有电话会": ("纽约时间", "America/New_York"),
+            "北京时间晚上八点开会": ("北京时间", "Asia/Shanghai"),
+            "温哥华时间下午三点": ("温哥华时间", "America/Vancouver"),
+            "Call at 9 AM PST": ("PST", "America/Los_Angeles"),
+            "Sync at 14:00 UTC": ("UTC", "UTC"),
+        }
+
+        for expression, expected in cases.items():
+            with self.subTest(expression=expression):
+                self.assertEqual(stated_timezone(expression), expected)
+
+        for expression in (
+            "会议时间定在下午三点",
+            "开始时间是明天",
+            "本地时间下午三点",
+            "当地时间下午三点",
+            "PSTN 测试明天下午三点",
+            "上海时间表已经更新",
+        ):
+            with self.subTest(expression=expression):
+                self.assertIsNone(stated_timezone(expression))
 
     def test_supported_durations_are_resolved_deterministically(self) -> None:
         cases = {
