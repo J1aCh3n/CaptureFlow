@@ -12,6 +12,9 @@ class TimeToolTests(unittest.TestCase):
             "晚上七点": time(19),
             "晚上七点半": time(19, 30),
             "上午九点半": time(9, 30),
+            "中午十二点": time(12),
+            "中午12点半": time(12, 30),
+            "凌晨三点": time(3),
             "19:00": time(19),
             "19：30": time(19, 30),
             "7 PM": time(19),
@@ -23,7 +26,16 @@ class TimeToolTests(unittest.TestCase):
                 self.assertEqual(parse_time(expression), expected)
 
     def test_malformed_or_ambiguous_clock_expressions_are_unresolved(self) -> None:
-        for expression in ("晚上七点才开始", "25:00", "下午十三点", "七点"):
+        for expression in (
+            "晚上七点才开始",
+            "25:00",
+            "下午十三点",
+            "七点",
+            "晚上十二点",
+            "上午十二点",
+            "凌晨十二点",
+            "中午三点",
+        ):
             with self.subTest(expression=expression):
                 self.assertIsNone(parse_time(expression))
 

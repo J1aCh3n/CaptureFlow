@@ -61,7 +61,7 @@ def parse_duration(expression: str) -> timedelta | None:
 
 def _parse_chinese_time(value: str) -> time | None:
     match = re.fullmatch(
-        r"(上午|下午|晚上)([0-9]{1,2}|[一二三四五六七八九十两]+)点(?:(半)|([0-9]{1,2})分?)?",
+        r"(凌晨|上午|中午|下午|晚上)([0-9]{1,2}|[一二三四五六七八九十两]+)点(?:(半)|([0-9]{1,2})分?)?",
         value.replace(" ", ""),
     )
     if match is None:
@@ -71,11 +71,23 @@ def _parse_chinese_time(value: str) -> time | None:
     minute = 30 if half else int(minute_text or "0")
     if hour is None or minute > 59:
         return None
-    if period == "上午":
-        hour = 0 if hour == 12 else hour
-    else:
-        hour = 12 if hour == 12 else hour + 12
-    return time(hour, minute)
+    resolved_hour = _period_hour(period, hour)
+    if resolved_hour is None:
+        return None
+    return time(resolved_hour, minute)
+
+
+def _period_hour(period: str, hour: int) -> int | None:
+    """Map one bounded period and a 1-12 clock hour onto the 24-hour clock."""
+
+    if period == "中午":
+        return 12 if hour == 12 else None
+    if hour == 12:
+        # 晚上十二点 and 上午十二点 do not state which calendar day they name.
+        return None
+    if period in {"凌晨", "上午"}:
+        return hour
+    return hour + 12
 
 
 def _chinese_clock_hour(value: str) -> int | None:
