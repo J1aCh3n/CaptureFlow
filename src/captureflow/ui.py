@@ -773,12 +773,13 @@ def _render_operation_card(service: DeterministicChatService, operation_id: str)
 
 def _render_calendar_update_card(service: DeterministicChatService, operation_id: str) -> None:
     operation = service.store.get_calendar_event_update_operation(operation_id)
+    deleted = operation.after.status == "deleted"
+    label = "Local calendar deletion" if deleted else "Local calendar update"
     with st.container(border=True):
-        st.caption(
-            f"Local calendar update: {operation.after.title}; status: {operation.status}"
-        )
+        st.caption(f"{label}: {operation.after.title}; status: {operation.status}")
         if operation.status == "committed" and st.button(
-            "Undo calendar update", key=f"undo-calendar-update-{operation.id}"
+            "Undo calendar deletion" if deleted else "Undo calendar update",
+            key=f"undo-calendar-update-{operation.id}",
         ):
             service.undo(operation.id)
             st.rerun()

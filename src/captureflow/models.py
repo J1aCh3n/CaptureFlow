@@ -848,6 +848,7 @@ class TurnDecision(BaseModel):
 ConversationIntent = Literal[
     "calendar_create",
     "calendar_update",
+    "calendar_delete",
     "save_idea",
     "save_note",
     "tracker_change",
@@ -879,7 +880,7 @@ class ContextualAction(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    action: Literal["create_event", "update_event", "save_idea", "save_note"]
+    action: Literal["create_event", "update_event", "delete_event", "save_idea", "save_note"]
     content: str | None = Field(default=None, max_length=4_000)
     description: str | None = Field(default=None, max_length=4_000)
     date_expression: str | None = Field(default=None, max_length=100)
@@ -931,6 +932,11 @@ class ContextualAction(BaseModel):
         elif self.action == "update_event":
             if not any((self.content, *event_fields)):
                 raise ValueError("an event update requires at least one replacement field")
+        elif self.action == "delete_event":
+            # A committed deletion needs one candidate target; an unresolved one may
+            # still be carried as the pending action of a clarification.
+            if any(value is not None for value in (self.content, *event_fields)):
+                raise ValueError("an event deletion cannot change event fields")
         else:
             if self.content is None:
                 raise ValueError("a saved item requires content")
@@ -972,6 +978,7 @@ class ConversationDecision(BaseModel):
         action_for_intent = {
             "calendar_create": "create_event",
             "calendar_update": "update_event",
+            "calendar_delete": "delete_event",
             "save_idea": "save_idea",
             "save_note": "save_note",
         }
@@ -979,8 +986,11 @@ class ConversationDecision(BaseModel):
         if expected_action is not None:
             if self.action is None or self.action.action != expected_action:
                 raise ValueError(f"{self.intent} requires a {expected_action} action")
-            if self.intent == "calendar_update" and self.action.target_event_id is None:
-                raise ValueError("a calendar update requires a candidate event target")
+            if (
+                self.intent in {"calendar_update", "calendar_delete"}
+                and self.action.target_event_id is None
+            ):
+                raise ValueError(f"a {self.intent.replace('_', ' ')} requires a candidate event target")
             if self.project_changes or self.clarification_question or self.pending_action or self.source_ids:
                 raise ValueError("a local write cannot include tracker or clarification payload")
         elif self.intent == "tracker_change":
@@ -998,6 +1008,7 @@ class ConversationDecision(BaseModel):
             if self.pending_action is None or self.pending_action.action not in {
                 "create_event",
                 "update_event",
+                "delete_event",
             }:
                 raise ValueError("a clarification requires one pending calendar action")
         else:
@@ -1035,15 +1046,19 @@ class CalendarEventUpdateOperation(BaseModel):
             "conversation_id",
             "source_message_id",
             "source_quote",
-            "status",
             "created_at",
         )
+        editable_fields = ("title", "description", "start_at", "end_at", "all_day", "timezone")
         if self.before.id != self.event_id or self.after.id != self.event_id:
             raise ValueError("update snapshots must match the target event")
         if self.before.workspace_id != self.workspace_id or self.after.workspace_id != self.workspace_id:
             raise ValueError("update snapshots must match the target workspace")
-        if self.before.status != "active" or self.after.status != "active":
+        if self.before.status != "active" or self.after.status not in {"active", "deleted"}:
             raise ValueError("only active calendar events can be updated")
+        if self.after.status == "deleted" and any(
+            getattr(self.before, field) != getattr(self.after, field) for field in editable_fields
+        ):
+            raise ValueError("a calendar deletion cannot also change event fields")
         if any(getattr(self.before, field) != getattr(self.after, field) for field in immutable_fields):
             raise ValueError("calendar updates cannot change event identity or original provenance")
         if self.status == "failed" and not self.error:

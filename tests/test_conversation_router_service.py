@@ -440,6 +440,126 @@ class ConversationRouterServiceTests(unittest.TestCase):
             restarted.get_calendar_event_update_operation(operation.id).status, "committed"
         )
 
+    def _saved_event(self, suffix: str, title: str, start_at: datetime) -> CalendarEvent:
+        source = self.store.save_message(
+            Message(
+                id=f"{suffix}-source",
+                conversation_id=self.conversation.id,
+                role="user",
+                content=f"{title} {start_at.isoformat()}",
+            )
+        )
+        return self.store.save_calendar_event(
+            CalendarEvent(
+                id=f"{suffix}-event",
+                conversation_id=self.conversation.id,
+                title=title,
+                source_message_id=source.id,
+                source_quote=source.content,
+                start_at=start_at,
+                all_day=False,
+                timezone="America/Vancouver",
+            )
+        )
+
+    def test_expired_meeting_is_deleted_from_chat_and_can_be_undone(self) -> None:
+        event = self._saved_event(
+            "expired-meeting", "相关的说明会", datetime.fromisoformat("2026-09-10T16:00:00-07:00")
+        )
+        content = "昨天的会议已结束，删除过期会议"
+        model = ScriptedContextualModel(
+            [
+                {
+                    "intent": "calendar_delete",
+                    "action": {
+                        "action": "delete_event",
+                        "target_event_id": event.id,
+                        "evidence": [{"message_id": "delete-turn", "source_quote": content}],
+                    },
+                }
+            ]
+        )
+        service = ConversationRouterService(self.store, model, date(2026, 9, 11))
+
+        turn = service.submit(self.conversation.id, content, "delete-turn")
+        replay = service.submit(self.conversation.id, content, "delete-turn")
+        operation = self.store.list_calendar_event_update_operations("delete-turn")[0]
+
+        self.assertEqual(turn.outcome, "calendar_delete")
+        self.assertEqual(turn.model_calls, 1)
+        self.assertEqual(replay.model_calls, 0)
+        self.assertEqual(self.store.get_calendar_event(event.id).status, "deleted")
+        self.assertEqual(self.store.list_calendar_events(), [])
+        self.assertEqual(len(self.store.list_calendar_event_update_operations("delete-turn")), 1)
+        self.assertEqual(
+            self.store.list_calendar_event_update_sources(operation.id),
+            [EvidenceReference(message_id="delete-turn", source_quote=content)],
+        )
+        self.assertEqual(self.store.undo_calendar_event_update(operation.id).status, "undone")
+        self.assertEqual(self.store.get_calendar_event(event.id), event)
+
+    def test_ambiguous_calendar_delete_creates_a_clarification_without_a_write(self) -> None:
+        self._saved_event(
+            "morning-standup", "站会", datetime.fromisoformat("2026-09-10T09:00:00-07:00")
+        )
+        self._saved_event(
+            "afternoon-briefing", "说明会", datetime.fromisoformat("2026-09-10T16:00:00-07:00")
+        )
+        content = "删除过期会议"
+        model = ScriptedContextualModel(
+            [
+                {
+                    "intent": "clarify",
+                    "clarification_question": "Which local calendar event should I delete?",
+                    "pending_action": {
+                        "action": "delete_event",
+                        "target_event_id": None,
+                        "evidence": [{"message_id": "ambiguous-delete-turn", "source_quote": content}],
+                    },
+                }
+            ]
+        )
+
+        turn = ConversationRouterService(self.store, model, date(2026, 9, 11)).submit(
+            self.conversation.id, content, "ambiguous-delete-turn"
+        )
+        pending = self.store.get_pending_clarification(self.conversation.id)
+
+        self.assertEqual(turn.outcome, "clarification_created")
+        self.assertEqual(len(self.store.list_calendar_events()), 2)
+        self.assertEqual(self.store.list_calendar_event_update_operations("ambiguous-delete-turn"), [])
+        self.assertIsNotNone(pending)
+        self.assertEqual(pending.original_action["action"], "delete_event")
+        self.assertEqual(
+            turn.assistant_message.content, "Which local calendar event should I delete?"
+        )
+
+    def test_calendar_delete_outside_supplied_candidates_changes_nothing(self) -> None:
+        event = self._saved_event(
+            "kept-meeting", "架构评审", datetime.fromisoformat("2026-09-10T16:00:00-07:00")
+        )
+        content = "删除那个会议"
+        model = ScriptedContextualModel(
+            [
+                {
+                    "intent": "calendar_delete",
+                    "action": {
+                        "action": "delete_event",
+                        "target_event_id": "invented-event",
+                        "evidence": [{"message_id": "invalid-delete-turn", "source_quote": content}],
+                    },
+                }
+            ]
+        )
+
+        turn = ConversationRouterService(self.store, model, date(2026, 9, 11)).submit(
+            self.conversation.id, content, "invalid-delete-turn"
+        )
+
+        self.assertEqual(turn.outcome, "model_or_validation_failure")
+        self.assertEqual(self.store.list_calendar_events(), [event])
+        self.assertEqual(self.store.list_calendar_event_update_operations("invalid-delete-turn"), [])
+
     def test_tracker_change_uses_current_decision_without_another_model_call(self) -> None:
         content = "排查 ROS 2 发布者-订阅者节点之间的延迟问题。"
         model = ScriptedContextualModel(

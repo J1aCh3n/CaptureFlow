@@ -187,6 +187,56 @@ class ModelTests(unittest.TestCase):
 
         self.assertEqual(decision.pending_action.action, "update_event")
 
+    def test_contextual_calendar_delete_requires_a_bare_candidate_target(self) -> None:
+        decision = ConversationDecision(
+            intent="calendar_delete",
+            action=ContextualAction(
+                action="delete_event",
+                target_event_id="expired-meeting-event",
+                evidence=[
+                    EvidenceReference(
+                        message_id="delete-message",
+                        source_quote="昨天的会议已结束，删除过期会议",
+                    )
+                ],
+            ),
+        )
+
+        self.assertEqual(decision.action.target_event_id, "expired-meeting-event")
+        with self.assertRaises(ValidationError):
+            ConversationDecision(
+                intent="calendar_delete",
+                action=ContextualAction(
+                    action="delete_event",
+                    evidence=[
+                        EvidenceReference(message_id="delete-message", source_quote="删除过期会议")
+                    ],
+                ),
+            )
+        with self.assertRaises(ValidationError):
+            ContextualAction(
+                action="delete_event",
+                target_event_id="expired-meeting-event",
+                time_expression="下午四点",
+                evidence=[
+                    EvidenceReference(message_id="delete-message", source_quote="删除过期会议")
+                ],
+            )
+
+    def test_contextual_clarification_retains_an_unresolved_calendar_delete(self) -> None:
+        decision = ConversationDecision(
+            intent="clarify",
+            clarification_question="Which local calendar event should I delete?",
+            pending_action=ContextualAction(
+                action="delete_event",
+                evidence=[
+                    EvidenceReference(message_id="delete-message", source_quote="删除过期会议")
+                ],
+            ),
+        )
+
+        self.assertIsNone(decision.pending_action.target_event_id)
+
     def test_contextual_answer_sources_are_unique_and_reply_only_has_none(self) -> None:
         with self.assertRaises(ValidationError):
             ConversationDecision(
@@ -199,6 +249,39 @@ class ModelTests(unittest.TestCase):
                 intent="reply_only",
                 reply="I cannot help with that local action.",
                 source_ids=["record-1"],
+            )
+
+    def test_calendar_delete_operation_only_changes_event_status(self) -> None:
+        before = CalendarEvent(
+            id="event-2",
+            conversation_id="conversation-1",
+            title="Review",
+            source_message_id="message-1",
+            source_quote="Review the current plan.",
+            start_at=date(2026, 9, 15),
+            all_day=True,
+            timezone="America/Vancouver",
+        )
+        operation = CalendarEventUpdateOperation(
+            id="delete-1",
+            source_message_id="message-2",
+            action_index=0,
+            event_id=before.id,
+            before=before,
+            after=before.model_copy(update={"status": "deleted"}),
+            status="prepared",
+        )
+
+        self.assertEqual(operation.after.status, "deleted")
+        with self.assertRaises(ValidationError):
+            CalendarEventUpdateOperation(
+                id="delete-2",
+                source_message_id="message-2",
+                action_index=0,
+                event_id=before.id,
+                before=before,
+                after=before.model_copy(update={"status": "deleted", "title": "Renamed"}),
+                status="prepared",
             )
 
     def test_calendar_update_operation_cannot_rewrite_original_event_provenance(self) -> None:

@@ -170,6 +170,10 @@ class ConversationRouterService:
                 operations, reply = self._update_event(user_message, decision.action)
                 if pending is not None:
                     self.store.resolve_pending_clarification(pending.id, "resolved")
+            elif decision.intent == "calendar_delete":
+                operations, reply = self._delete_event(user_message, decision.action)
+                if pending is not None:
+                    self.store.resolve_pending_clarification(pending.id, "resolved")
             elif decision.intent in {"save_idea", "save_note"}:
                 operations, reply = self._save_item(user_message, decision.action)
             elif decision.intent == "tracker_change":
@@ -333,6 +337,28 @@ class ConversationRouterService:
         saved = self.store.prepare_calendar_event_update(operation, action.evidence)
         committed, event = self.store.commit_prepared_calendar_event_update(saved.id)
         return (committed,), f"Updated local calendar event: {event.title}."
+
+    def _delete_event(
+        self, user_message: Message, action: ContextualAction | None
+    ) -> tuple[tuple[CalendarEventUpdateOperation, ...], str]:
+        assert action is not None and action.target_event_id is not None
+        self._current_evidence(action, user_message)
+        existing = self.store.get_calendar_event(action.target_event_id)
+        operation = CalendarEventUpdateOperation(
+            id=_stable_id(user_message.id, f"contextual-delete-event:{existing.id}"),
+            source_message_id=user_message.id,
+            action_index=0,
+            event_id=existing.id,
+            workspace_id=existing.workspace_id,
+            before=existing,
+            after=existing.model_copy(update={"status": "deleted", "updated_at": utc_now()}),
+            status="prepared",
+            created_at=user_message.created_at,
+            updated_at=user_message.created_at,
+        )
+        saved = self.store.prepare_calendar_event_update(operation, action.evidence)
+        committed, event = self.store.commit_prepared_calendar_event_update(saved.id)
+        return (committed,), f"Deleted local calendar event: {event.title}. It can be undone."
 
     def _calendar_clarification_field(
         self, action: ContextualAction | None
