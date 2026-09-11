@@ -143,7 +143,10 @@ ambiguous delete -> intent clarify, outcome clarification_created, model_calls 1
 This is bounded demonstration evidence for the new intent, not a reliability
 benchmark. Raw model output and credentials are not retained.
 
-## Open question, not implemented here
+## Open question, resolved in Phase 10.5
+
+Resolved by [phase-10.5-compound-turn-follow-up.md](phase-10.5-compound-turn-follow-up.md).
+The analysis below is the state at the time of this round.
 
 The case 1 message is a compound turn. It states a past meeting and its minutes,
 plus a separate deadline (`下周三晚上八点`). After the parser fix it routes to
