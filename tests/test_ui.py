@@ -1,7 +1,7 @@
 import os
 import tempfile
 import unittest
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -364,6 +364,48 @@ class UiTests(unittest.TestCase):
             if button.key == f"cancel-clarification-{clarification.id}"
         ).click().run()
         self.assertIsNone(store.get_pending_clarification(conversation.id))
+
+    def test_calendar_page_shows_tracker_deadlines_without_making_them_events(self) -> None:
+        app = AppTest.from_file("app.py").run()
+        store = CaptureStore(os.environ["CAPTUREFLOW_DATABASE_PATH"])
+        store.initialize()
+        conversation = store.list_conversations()[0]
+        message = store.save_message(
+            Message(
+                id="deadline-user-message",
+                conversation_id=conversation.id,
+                role="user",
+                content="修复需要下周三晚上八点之前提交",
+            )
+        )
+        project = store.save_project(Project(id="deadline-project", name="测试2"))
+        store.assign_conversation_project(conversation.id, project.id)
+        record = store.save_project_record(
+            ProjectRecord(
+                id="deadline-record",
+                project_id=project.id,
+                conversation_id=conversation.id,
+                kind="task",
+                content="提交修复",
+                due_at=datetime.fromisoformat("2026-09-16T20:00:00-07:00"),
+                state="active",
+                source_message_id=message.id,
+                source_quote="修复需要下周三晚上八点之前提交",
+            )
+        )
+
+        self.open_page(app.run(), "Calendar")
+
+        self.assertEqual(app.exception, [])
+        self.assertTrue(any(record.content in element.value for element in app.markdown))
+        self.assertTrue(any("Sep 16 · 20:00" in element.value for element in app.caption))
+        self.assertEqual(store.list_calendar_events(), [])
+        self.assertFalse(any(button.key.startswith("delete-event-") for button in app.button))
+
+        store.transition_project_record(record.id, "completed")
+        app.run()
+
+        self.assertFalse(any(record.content in element.value for element in app.markdown))
 
     def test_tracker_page_renders_a_source_grounded_project_record(self) -> None:
         app = AppTest.from_file("app.py").run()

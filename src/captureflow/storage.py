@@ -326,9 +326,9 @@ class CaptureStore:
             cursor = connection.execute(
                 """
                 INSERT OR IGNORE INTO project_records
-                (id, project_id, conversation_id, kind, content, rationale, state,
+                (id, project_id, conversation_id, kind, content, rationale, due_at, state,
                  source_message_id, source_quote, supersedes_record_id, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.id,
@@ -337,6 +337,7 @@ class CaptureStore:
                     record.kind,
                     record.content,
                     record.rationale,
+                    None if record.due_at is None else record.due_at.isoformat(),
                     record.state,
                     record.source_message_id,
                     record.source_quote,

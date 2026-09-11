@@ -544,16 +544,31 @@ def render_project_snapshot(store: CaptureStore, conversation_id: str) -> None:
             for event in store.list_calendar_events()
             if event.conversation_id in conversation_ids
             and _calendar_event_date(event.start_at) >= reference_date
-        ][:3]
+        ]
+        upcoming_deadlines = [
+            deadline
+            for deadline in store.list_task_deadlines()
+            if deadline.project_id == current_project.id
+            and _calendar_event_date(deadline.due_at) >= reference_date
+        ]
+        upcoming = sorted(
+            [(_calendar_event_date(event.start_at), event) for event in upcoming_events]
+            + [(_calendar_event_date(deadline.due_at), deadline) for deadline in upcoming_deadlines],
+            key=lambda entry: entry[0],
+        )[:3]
         st.markdown("#### Upcoming")
-        if not upcoming_events:
-            st.caption("No upcoming project events.")
-        for event in upcoming_events:
+        if not upcoming:
+            st.caption("No upcoming project events or deadlines.")
+        for _, entry in upcoming:
             with st.container(border=True):
-                st.caption(_format_calendar_timing(event.start_at, event.end_at))
-                st.markdown(f"**{event.title}**")
-                if event.description:
-                    st.caption(event.description)
+                if isinstance(entry, ProjectRecord):
+                    st.caption(f"Due {_format_due_at(entry.due_at)} · deadline")
+                    st.markdown(f"**{entry.content}**")
+                    continue
+                st.caption(_format_calendar_timing(entry.start_at, entry.end_at))
+                st.markdown(f"**{entry.title}**")
+                if entry.description:
+                    st.caption(entry.description)
 
         active_context = [
             record
@@ -602,6 +617,14 @@ def _render_planned_project_views() -> None:
 
 def _calendar_event_date(start_at: date | datetime) -> date:
     return start_at.date() if isinstance(start_at, datetime) else start_at
+
+
+def _format_due_at(due_at: date | datetime) -> str:
+    """A deadline is one instant or one day, never a span."""
+
+    if isinstance(due_at, datetime):
+        return due_at.strftime("%b %d · %H:%M")
+    return due_at.strftime("%b %d")
 
 
 def _format_calendar_timing(start_at: date | datetime, end_at: datetime | None) -> str:
@@ -1026,6 +1049,7 @@ def _validation_message(error: ValidationError | ValueError) -> str:
 def render_calendar_page(store: CaptureStore) -> None:
     st.subheader("Calendar")
     st.caption("Local SQLite events only. Editing preserves the original chat source.")
+    _render_task_deadlines(store)
     events = store.list_calendar_events()
     if not events:
         st.info("No active local events.")
@@ -1073,6 +1097,26 @@ def render_calendar_page(store: CaptureStore) -> None:
                     if st.button("Restore event", key=f"restore-event-{event.id}"):
                         store.set_calendar_event_status(event.id, "active")
                         st.rerun()
+
+
+def _render_task_deadlines(store: CaptureStore) -> None:
+    """Show tracker deadlines read-only; they are not events and hold no time."""
+
+    deadlines = store.list_task_deadlines()
+    if not deadlines:
+        return
+    st.markdown(f"#### Deadlines ({len(deadlines)})")
+    st.caption(
+        "Due times from the project tracker. They are not events and reserve no time; "
+        "complete or delete the task in Tracker to clear one."
+    )
+    for record in deadlines:
+        with st.container(border=True):
+            st.caption(
+                f"Due {_format_due_at(record.due_at)} · {store.get_project(record.project_id).name}"
+            )
+            st.markdown(f"**{record.content}**")
+    st.markdown("#### Events")
 
 
 def _render_calendar_sources(store: CaptureStore, event: CalendarEvent) -> None:
