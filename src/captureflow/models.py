@@ -867,46 +867,6 @@ class ProjectChangeOperation(BaseModel):
         return self
 
 
-class ProposedAction(BaseModel):
-    """An untrusted, source-grounded suggestion from the V2 turn router."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    action: Literal["create_event", "save_idea", "save_note"]
-    content: str = Field(min_length=1, max_length=4_000)
-    description: str | None = Field(default=None, max_length=4_000)
-    source_quote: str = Field(min_length=1)
-    date_expression: str | None = Field(default=None, max_length=100)
-    time_expression: str | None = Field(default=None, max_length=20)
-    end_time_expression: str | None = Field(default=None, max_length=20)
-
-
-class TurnDecision(BaseModel):
-    """The only model output accepted by the bounded V2 chat router."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    route: Literal["execute", "clarify", "reply_only"]
-    actions: list[ProposedAction] = Field(default_factory=list, max_length=3)
-    clarification_question: str | None = Field(default=None, max_length=300)
-    pending_action: ProposedAction | None = None
-    reply: str | None = Field(default=None, max_length=500)
-
-    @model_validator(mode="after")
-    def route_matches_payload(self) -> "TurnDecision":
-        if self.route == "execute":
-            if not self.actions or self.clarification_question or self.pending_action:
-                raise ValueError("execute requires actions and no clarification payload")
-        elif self.route == "clarify":
-            if self.actions or not self.clarification_question or self.pending_action is None:
-                raise ValueError("clarify requires one pending action and one question")
-            if self.pending_action.action != "create_event" or self.pending_action.date_expression:
-                raise ValueError("clarification is only allowed for an event missing a date")
-        elif self.actions or self.clarification_question or self.pending_action:
-            raise ValueError("reply_only cannot contain an action or clarification")
-        return self
-
-
 ConversationIntent = Literal[
     "calendar_create",
     "calendar_update",

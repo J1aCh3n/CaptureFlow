@@ -42,23 +42,6 @@ class OpenAICompatibleModelTests(unittest.TestCase):
         self.assertNotIn("temperature", completions.kwargs)
         self.assertEqual(completions.kwargs["timeout"], 30)
 
-    def test_turn_router_uses_the_bounded_action_prompt(self) -> None:
-        completions = RecordingCompletions('{"route":"reply_only","actions":[],"clarification_question":null,"pending_action":null,"reply":"I can save local records."}')
-        model = OpenAICompatibleModel.__new__(OpenAICompatibleModel)
-        model.settings = ModelSettings(api_key="test-key", model="gpt-5.6-terra")
-        model.client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
-
-        decision = model.route_turn("What is the weather?", "2026-09-08", "America/Vancouver")
-
-        self.assertEqual(decision.route, "reply_only")
-        prompt = completions.kwargs["messages"][0]["content"]
-        self.assertIn("This is not a general chatbot", prompt)
-        self.assertIn("exact, continuous source_quote", prompt)
-        self.assertIn("definite first-person or subjectless statement", prompt)
-        self.assertIn("rather than creating separate notes", prompt)
-        self.assertIn("end_time_expression", prompt)
-        self.assertIn("Never invent a default duration", prompt)
-
     def test_contextual_router_receives_bounded_context_and_candidates_once(self) -> None:
         completions = RecordingCompletions(
             '{"intent":"calendar_create","action":{"action":"create_event",'

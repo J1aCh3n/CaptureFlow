@@ -1889,13 +1889,6 @@ class CaptureStore:
             )
         return self.get_tool_operation(operation.id)
 
-    def list_prepared_tool_operations(self, source_message_id: str) -> list[ToolOperation]:
-        return [
-            operation
-            for operation in self.list_tool_operations(source_message_id)
-            if operation.status == "prepared"
-        ]
-
     def commit_prepared_calendar_event(
         self,
         operation_id: str,
@@ -1992,26 +1985,6 @@ class CaptureStore:
                     raise ValueError("saved item ID already exists with different content")
             self._commit_operation(connection, operation, result)
         return self.get_tool_operation(operation_id), self.get_saved_item(item.id)
-
-    def fail_prepared_tool_operation(self, operation_id: str, error: str) -> ToolOperation:
-        with self._connect() as connection:
-            operation = self._prepared_operation(connection, operation_id)
-            if operation.status == "failed":
-                return operation
-            if operation.status != "prepared":
-                raise ValueError("only a prepared operation can fail")
-            failed = operation.model_copy(
-                update={"status": "failed", "error": error, "updated_at": utc_now()}
-            )
-            connection.execute(
-                """
-                UPDATE tool_operations
-                SET status = ?, error = ?, updated_at = ?
-                WHERE id = ?
-                """,
-                (failed.status, failed.error, failed.updated_at.isoformat(), failed.id),
-            )
-        return self.get_tool_operation(operation_id)
 
     def save_pending_clarification(
         self, clarification: PendingClarification

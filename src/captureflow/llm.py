@@ -18,7 +18,6 @@ from .models import (
     ProjectAnswerDecision,
     ProjectConversationDecision,
     ProjectTrackerDecision,
-    TurnDecision,
 )
 
 
@@ -59,26 +58,6 @@ class MemoryAgentModel(Protocol):
 
 class PhaseThreeModel(PhaseTwoModel, MemoryAgentModel, Protocol):
     """The bounded Phase 2 and Phase 3 model surface."""
-
-
-class TurnRouterModel(Protocol):
-    def route_turn(
-        self,
-        user_message: str,
-        reference_date: str,
-        timezone: str,
-        clarification_context: dict | None = None,
-    ) -> TurnDecision: ...
-
-    def repair_turn(
-        self,
-        user_message: str,
-        reference_date: str,
-        timezone: str,
-        invalid_decision: TurnDecision | str,
-        validation_error: str,
-        clarification_context: dict | None = None,
-    ) -> TurnDecision: ...
 
 
 class ContextualConversationModel(Protocol):
@@ -225,47 +204,6 @@ class OpenAICompatibleModel:
             payload={"source_text": source_text},
         )
 
-    def route_turn(
-        self,
-        user_message: str,
-        reference_date: str,
-        timezone: str,
-        clarification_context: dict | None = None,
-    ) -> TurnDecision:
-        return self._complete(
-            TurnDecision,
-            system=(
-                "You are CaptureFlow's V2 TurnRouter. Return JSON only. This is not a "
-                "general chatbot. Choose execute only for explicit local calendar events, "
-                "ideas, or notes. Choose reply_only for unsupported/general conversation "
-                "and keep the reply short. A definite first-person or subjectless statement "
-                "that the user has a scheduled event is an explicit local calendar event even "
-                "when it is not phrased as a command. Use one create_event action for that "
-                "event; copy surrounding agenda or attendance details into description and keep "
-                "them in the same source_quote rather than creating separate notes. Description "
-                "must be an exact continuous quote from the user message. An execute action needs "
-                "content and an exact, "
-                "continuous source_quote copied from the user message except normalized "
-                "whitespace. create_event also needs an explicit date_expression copied "
-                "from the message; optional time_expression must be an explicit HH:MM, "
-                "H:MM AM/PM, or supported Chinese phrase such as 下午两点, 上午九点半, "
-                "or 晚上八点. For an explicit time range, time_expression is its start and "
-                "end_time_expression is its end; otherwise end_time_expression is null. Never "
-                "invent a default duration. An event lacking a date must choose clarify with no "
-                "actions, one concise clarification_question, and pending_action describing "
-                "the event with no date_expression. save_idea and save_note never include "
-                "description, date_expression, time_expression, or end_time_expression. Do not "
-                "make more than three independent "
-                "actions, do not infer details, and never include private reasoning."
-            ),
-            payload={
-                "user_message": user_message,
-                "reference_date": reference_date,
-                "timezone": timezone,
-                "clarification_context": clarification_context,
-            },
-        )
-
     def propose_conversation_decision(
         self,
         current_message: dict[str, str],
@@ -381,37 +319,6 @@ class OpenAICompatibleModel:
             candidate_project_records,
         )
         return decision
-
-    def repair_turn(
-        self,
-        user_message: str,
-        reference_date: str,
-        timezone: str,
-        invalid_decision: TurnDecision | str,
-        validation_error: str,
-        clarification_context: dict | None = None,
-    ) -> TurnDecision:
-        invalid_payload = (
-            invalid_decision.model_dump(mode="json")
-            if isinstance(invalid_decision, TurnDecision)
-            else invalid_decision
-        )
-        return self._complete(
-            TurnDecision,
-            system=(
-                "You are CaptureFlow's V2 TurnRouter repair pass. Return corrected JSON only. "
-                "Use only execute, clarify, or reply_only. Preserve exact source quotes and "
-                "never invent content, dates, times, or unsupported actions."
-            ),
-            payload={
-                "user_message": user_message,
-                "reference_date": reference_date,
-                "timezone": timezone,
-                "clarification_context": clarification_context,
-                "invalid_decision": invalid_payload,
-                "validation_error": validation_error,
-            },
-        )
 
     def respond_to_project_turn(
         self,
