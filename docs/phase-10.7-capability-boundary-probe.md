@@ -118,11 +118,19 @@ wrote `在 A301 和张伟开会，讨论驱动排期` for a message that said
 `开需求评审`. It is close, but it is model prose stored as if it were the user's
 words — the one field on a Calendar event with no provenance rule.
 
+**Fixed** in `fix: ground stored descriptions and record why a turn stopped`. A
+description is kept only when it is an exact continuous quote from a message the
+action cites, and is dropped otherwise; the prompt now asks for a quote.
+
 ### 5. A clarification's `missing_field` is often wrong
 
 `_save_clarification()` never passes `missing_field`, so every ambiguous-target
 clarification is persisted as `date`, including `delete_event` ones. The stored
 reason does not match the question that was asked.
+
+**Fixed** in the same commit. An unresolved update or delete target is stored as
+`target` (migration 016), alongside the `timezone` and `recurrence` reasons added
+earlier in this round.
 
 ## Fails closed — capability gaps, safe but visible
 
@@ -179,5 +187,12 @@ the recall path.
    and a `set_deadline` change adds the deadline afterwards. That also closes a
    gap this probe did not list — until now nothing, in chat or in the UI, could
    put a deadline on a task that already existed.
-7. Fix the clarification `missing_field` metadata (bug 5) and decide whether
-   `description` needs a provenance rule (bug 4).
+7. ~~Fix the clarification `missing_field` metadata (bug 5) and decide whether
+   `description` needs a provenance rule (bug 4).~~ Done in
+   `fix: ground stored descriptions and record why a turn stopped`.
+
+Everything this probe found is now either fixed or recorded above as a bounded,
+fail-closed limit. What remains unsupported on purpose: recurrence, timezone
+conversion, week arithmetic (`下下周三`), fuzzy horizons (`月底`), range queries
+(`我下周有什么安排？`), bulk actions, relative shifts (`提前一小时`), and Chinese
+numeral dates (`九月二十日`).

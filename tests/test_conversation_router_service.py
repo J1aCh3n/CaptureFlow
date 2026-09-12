@@ -681,6 +681,77 @@ class ConversationRouterServiceTests(unittest.TestCase):
         )
         self.assertIsNone(self.store.get_project_record(record.id).due_at)
 
+    def test_a_description_the_user_did_not_write_is_dropped(self) -> None:
+        content = "明天下午三点在 A301 和张伟开需求评审，讨论驱动排期"
+        model = ScriptedContextualModel(
+            [
+                {
+                    "intent": "calendar_create",
+                    "action": {
+                        "action": "create_event",
+                        "content": "需求评审",
+                        "description": "在 A301 和张伟开会，讨论驱动排期",
+                        "date_expression": "明天",
+                        "time_expression": "下午三点",
+                        "evidence": [{"message_id": "paraphrase-turn", "source_quote": content}],
+                    },
+                },
+                {
+                    "intent": "calendar_create",
+                    "action": {
+                        "action": "create_event",
+                        "content": "需求评审",
+                        "description": "在 A301 和张伟开需求评审，讨论驱动排期",
+                        "date_expression": "明天",
+                        "time_expression": "下午三点",
+                        "evidence": [{"message_id": "quoted-turn", "source_quote": content}],
+                    },
+                },
+            ]
+        )
+        service = ConversationRouterService(self.store, model, date(2026, 9, 11))
+
+        service.submit(self.conversation.id, content, "paraphrase-turn")
+        paraphrased = self.store.list_calendar_events()[0]
+
+        self.assertIsNone(paraphrased.description)
+
+        service.submit(self.conversation.id, content, "quoted-turn")
+        quoted = [event for event in self.store.list_calendar_events() if event.id != paraphrased.id][0]
+
+        self.assertEqual(quoted.description, "在 A301 和张伟开需求评审，讨论驱动排期")
+
+    def test_an_ambiguous_target_is_recorded_as_a_target_clarification(self) -> None:
+        self._saved_event(
+            "standup", "站会", datetime.fromisoformat("2026-09-14T09:00:00-07:00")
+        )
+        self._saved_event(
+            "review", "需求评审", datetime.fromisoformat("2026-09-15T15:00:00-07:00")
+        )
+        content = "把那个会删掉"
+        model = ScriptedContextualModel(
+            [
+                {
+                    "intent": "clarify",
+                    "clarification_question": "Which local calendar event should I delete?",
+                    "pending_action": {
+                        "action": "delete_event",
+                        "evidence": [{"message_id": "target-clarify-turn", "source_quote": content}],
+                    },
+                }
+            ]
+        )
+
+        turn = ConversationRouterService(self.store, model, date(2026, 9, 11)).submit(
+            self.conversation.id, content, "target-clarify-turn"
+        )
+
+        self.assertEqual(turn.outcome, "clarification_created")
+        self.assertEqual(
+            self.store.get_pending_clarification(self.conversation.id).missing_field, "target"
+        )
+        self.assertEqual(len(self.store.list_calendar_events()), 2)
+
     def test_a_repeating_event_says_repeats_are_not_stored(self) -> None:
         content = "每周一下午三点有团队例会"
         model = ScriptedContextualModel(

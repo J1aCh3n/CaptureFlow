@@ -292,7 +292,7 @@ class ConversationRouterService:
             id=_stable_id(user_message.id, "contextual-event"),
             conversation_id=user_message.conversation_id,
             title=action.content or "",
-            description=action.description,
+            description=self._quoted_description(action, user_message),
             source_message_id=source.message_id,
             source_quote=source.source_quote,
             start_at=start_at,
@@ -339,7 +339,9 @@ class ConversationRouterService:
         target_date = self._event_date(existing)
         if action.date_expression is not None:
             target_date = self._resolved_date(action.date_expression)
-        after = self._updated_event(existing, action, target_date)
+        after = self._updated_event(
+            existing, action, target_date, self._quoted_description(action, user_message)
+        )
         operation = CalendarEventUpdateOperation(
             id=_stable_id(user_message.id, f"contextual-update-event:{existing.id}"),
             source_message_id=user_message.id,
@@ -355,6 +357,29 @@ class ConversationRouterService:
         saved = self.store.prepare_calendar_event_update(operation, action.evidence)
         committed, event = self.store.commit_prepared_calendar_event_update(saved.id)
         return (committed,), f"Updated local calendar event: {event.title}."
+
+    def _quoted_description(
+        self, action: ContextualAction, user_message: Message
+    ) -> str | None:
+        """Keep a description only while it is the user's own words.
+
+        `source_quote` is validated everywhere else; `description` was the one stored
+        Calendar field a model could write freely, so an unquoted one is dropped rather
+        than kept as if the user had said it. A clarification answer may still describe
+        the event from the earlier message it cites, so every cited message counts.
+        """
+
+        if action.description is None:
+            return None
+        cited = [user_message.content] + [
+            self.store.get_message(evidence.message_id).content
+            for evidence in action.evidence
+            if evidence.message_id != user_message.id
+        ]
+        normalized = _normalized(action.description)
+        if any(normalized in _normalized(source) for source in cited):
+            return action.description
+        return None
 
     def _delete_event(
         self, user_message: Message, action: ContextualAction | None
@@ -549,10 +574,20 @@ class ConversationRouterService:
             source_message_id=user_message.id,
             assistant_message_id=assistant.id,
             original_action=decision.pending_action.model_dump(mode="json"),
+            missing_field=self._unresolved_field(decision.pending_action),
             created_at=user_message.created_at,
         )
         self.store.save_pending_clarification(clarification)
         return assistant
+
+    @staticmethod
+    def _unresolved_field(pending_action: ContextualAction) -> str:
+        """Record why the turn stopped, rather than defaulting every reason to a date."""
+
+        if pending_action.action in {"update_event", "delete_event"}:
+            if pending_action.target_event_id is None:
+                return "target"
+        return "date"
 
     def _save_calendar_clarification(
         self, user_message: Message, action: ContextualAction | None, missing_field: str
@@ -706,7 +741,11 @@ class ConversationRouterService:
         )
 
     def _updated_event(
-        self, existing: CalendarEvent, action: ContextualAction, target_date: date
+        self,
+        existing: CalendarEvent,
+        action: ContextualAction,
+        target_date: date,
+        description: str | None,
     ) -> CalendarEvent:
         start_at = existing.start_at
         end_at = existing.end_at
@@ -746,7 +785,7 @@ class ConversationRouterService:
         return existing.model_copy(
             update={
                 "title": action.content if action.content is not None else existing.title,
-                "description": action.description if action.description is not None else existing.description,
+                "description": description if description is not None else existing.description,
                 "start_at": start_at,
                 "end_at": end_at,
                 "all_day": all_day,
