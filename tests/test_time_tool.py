@@ -1,7 +1,13 @@
 import unittest
 from datetime import time, timedelta
 
-from captureflow.time_tool import parse_duration, parse_end_time, parse_time, stated_timezone
+from captureflow.time_tool import (
+    parse_duration,
+    parse_end_time,
+    parse_time,
+    stated_timezone,
+    with_stated_period,
+)
 
 
 class TimeToolTests(unittest.TestCase):
@@ -38,6 +44,15 @@ class TimeToolTests(unittest.TestCase):
         ):
             with self.subTest(expression=expression):
                 self.assertIsNone(parse_time(expression))
+
+    def test_a_period_written_before_a_copied_bare_hour_is_restored(self) -> None:
+        message = "把这场会议改到明天下午两点到三点。"
+
+        self.assertEqual(with_stated_period("两点", message), "下午两点")
+        self.assertEqual(with_stated_period("三点", message), "三点")
+        self.assertEqual(with_stated_period("下午两点", message), "下午两点")
+        self.assertEqual(with_stated_period("两点", "上午开会，两点结束"), "两点")
+        self.assertIsNone(with_stated_period(None, message))
 
     def test_a_bare_range_end_shares_the_period_stated_on_its_start(self) -> None:
         cases = {

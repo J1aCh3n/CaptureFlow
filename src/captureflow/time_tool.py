@@ -92,6 +92,20 @@ def parse_time(expression: str) -> time | None:
     return _parse_chinese_time(value)
 
 
+def with_stated_period(expression: str | None, message: str) -> str | None:
+    """Restore a period the message wrote directly before a copied bare hour.
+
+    For `明天下午两点到三点` a model may copy the date as `明天` and the time as
+    `两点`, dropping the `下午` between them. The message states the period, so
+    reattaching it is reading the message rather than guessing a part of the day.
+    """
+
+    if expression is None or parse_time(expression) is not None:
+        return expression
+    stated = re.search(r"(凌晨|上午|中午|下午|晚上)\s*" + re.escape(expression.strip()), message)
+    return expression if stated is None else stated.group(1) + expression.strip()
+
+
 def parse_end_time(end_expression: str, start_expression: str | None) -> time | None:
     """Resolve a range end, letting a bare hour share the period stated on its start.
 

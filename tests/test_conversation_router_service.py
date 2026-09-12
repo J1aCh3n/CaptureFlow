@@ -384,6 +384,36 @@ class ConversationRouterServiceTests(unittest.TestCase):
         self.assertNotEqual(current.id, replaced.id)
         self.assertEqual(self.store.list_calendar_events(), [])
 
+    def test_a_period_the_model_split_away_from_the_hour_is_restored(self) -> None:
+        event = self._saved_event(
+            "split-period", "算法优化与代码审查会议", datetime.fromisoformat("2026-09-10T16:00:00-07:00")
+        )
+        content = "把这场会议改到明天下午两点到三点。"
+        model = ScriptedContextualModel(
+            [
+                {
+                    "intent": "calendar_update",
+                    "action": {
+                        "action": "update_event",
+                        "date_expression": "明天",
+                        "time_expression": "两点",
+                        "end_time_expression": "三点",
+                        "target_event_id": event.id,
+                        "evidence": [{"message_id": "split-period-turn", "source_quote": content}],
+                    },
+                }
+            ]
+        )
+
+        turn = ConversationRouterService(self.store, model, date(2026, 9, 9)).submit(
+            self.conversation.id, content, "split-period-turn"
+        )
+        updated = self.store.get_calendar_event(event.id)
+
+        self.assertEqual(turn.outcome, "calendar_update")
+        self.assertEqual(updated.start_at, datetime.fromisoformat("2026-09-10T14:00:00-07:00"))
+        self.assertEqual(updated.end_at, datetime.fromisoformat("2026-09-10T15:00:00-07:00"))
+
     def test_a_range_end_without_a_period_uses_the_start_period(self) -> None:
         content = "我明天下午四点到五点有一场算法优化与代码审查会议。"
         model = ScriptedContextualModel(

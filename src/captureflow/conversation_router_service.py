@@ -32,7 +32,7 @@ from .models import (
 )
 from .project_service import ProjectTrackerService
 from .storage import CaptureStore
-from .time_tool import parse_duration, parse_end_time, parse_time, stated_timezone
+from .time_tool import parse_duration, parse_end_time, parse_time, stated_timezone, with_stated_period
 
 
 RouterOperation = ToolOperation | CalendarEventUpdateOperation | ProjectChangeOperation
@@ -143,6 +143,10 @@ class ConversationRouterService:
 
         model_seconds = perf_counter() - started
         local_started = perf_counter()
+        if decision.action is not None and decision.intent in {"calendar_create", "calendar_update"}:
+            decision = decision.model_copy(
+                update={"action": self._with_stated_periods(decision.action, user_message)}
+            )
         try:
             if decision.intent == "calendar_create":
                 if field := self._calendar_clarification_field(decision.action, user_message):
@@ -478,6 +482,17 @@ class ConversationRouterService:
                 if not isinstance(self.store.get_calendar_event(action.target_event_id).start_at, datetime):
                     return "time"
         return None
+
+    @staticmethod
+    def _with_stated_periods(action: ContextualAction, user_message: Message) -> ContextualAction:
+        return action.model_copy(
+            update={
+                "time_expression": with_stated_period(action.time_expression, user_message.content),
+                "end_time_expression": with_stated_period(
+                    action.end_time_expression, user_message.content
+                ),
+            }
+        )
 
     def _target_is_ungrounded(
         self, action: ContextualAction, user_message: Message, context_window: ProjectContextWindow
