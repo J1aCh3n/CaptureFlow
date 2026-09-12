@@ -77,6 +77,13 @@ exists to give. The options are recorded for a decision:
 - Separately, treat an update that changes nothing as a no-op reply instead of an
   audited `Updated` operation.
 
+### Run 3 — `runs/phase10-live-20260912-c`, commit `8e8052e`
+
+Re-run after `fix: choose tracker candidates by relevance to the message`, which
+changes candidate selection on every turn. The result is identical to run 2: 15
+of 16, with only `ambiguous_correction_effect` failing for the reason above. The
+candidate change introduced no regression.
+
 ## Phase 8 tracker acceptance
 
 `runs/phase8-live-20260912`, commit `7ff17e1`: all 12 assertions passed with no
@@ -88,7 +95,7 @@ the recorded 2026-09-08 result, so the Phase 10.6–10.7 tracker changes
 
 ## Deterministic suite
 
-252 tests pass at `7ff17e1`.
+252 tests pass at `7ff17e1`, and 254 at `8e8052e`.
 
 ## Claim boundary
 
