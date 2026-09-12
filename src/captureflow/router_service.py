@@ -1,6 +1,5 @@
 """Bounded V2 model routing; models propose, deterministic code commits."""
 
-import re
 from dataclasses import dataclass
 from datetime import date, datetime
 from time import perf_counter
@@ -11,6 +10,7 @@ from pydantic import ValidationError
 
 from .date_tool import resolve_relative_date
 from .llm import InvalidStructuredOutput, ModelError, TurnRouterModel
+from .memory import contains_credential_disclosure
 from .models import (
     CalendarEvent,
     Message,
@@ -22,11 +22,6 @@ from .models import (
 )
 from .storage import CaptureStore
 from .time_tool import parse_time as _parse_time
-
-
-_CREDENTIAL_PATTERN = re.compile(
-    r"(?i)\b(?:api[_ -]?key|password|secret|token)\b\s*[:=]"
-)
 
 
 @dataclass(frozen=True)
@@ -71,7 +66,7 @@ class BoundedChatService:
             )
         if prepared := self.store.list_prepared_tool_operations(user_message.id):
             return self._resume_prepared(user_message, prepared)
-        if _CREDENTIAL_PATTERN.search(user_message.content):
+        if contains_credential_disclosure(user_message.content):
             return self._reply_only(
                 user_message,
                 "I did not save that message because it appears to contain a credential.",

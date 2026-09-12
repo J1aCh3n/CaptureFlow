@@ -792,6 +792,19 @@ class ConversationRouterServiceTests(unittest.TestCase):
         self.assertEqual(self.store.undo_calendar_event_update(operation.id).status, "undone")
         self.assertEqual(self.store.get_calendar_event(event.id), event)
 
+    def test_a_chinese_credential_disclosure_never_reaches_the_model(self) -> None:
+        model = ScriptedContextualModel([])
+
+        turn = ConversationRouterService(self.store, model, date(2026, 9, 11)).submit(
+            self.conversation.id, "我的密钥是 sk-test-1234567890abcdef", "credential-turn"
+        )
+
+        self.assertEqual(turn.outcome, "blocked_credential")
+        self.assertEqual(turn.model_calls, 0)
+        self.assertEqual(model.calls, [])
+        self.assertEqual(self.store.list_calendar_events(), [])
+        self.assertEqual(self.store.list_saved_items(kinds=("note", "idea")), [])
+
     def test_a_stated_foreign_timezone_clarifies_instead_of_storing_local_time(self) -> None:
         content = "纽约时间明天上午九点有电话会"
         model = ScriptedContextualModel(

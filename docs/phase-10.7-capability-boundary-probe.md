@@ -105,6 +105,12 @@ The model happened to reply sensibly ("撤销并重新生成"), but the guard ex
 precisely so that text never leaves the machine. In a bilingual product the
 pattern must cover `是`, bare `token`, and the common Chinese nouns.
 
+**Fixed** in `fix: detect credential disclosures in Chinese and by key shape`.
+The noun vocabulary now covers both languages, the separators include `是`, `为`,
+and the full-width colon, well-known key shapes are caught with no noun at all,
+and the legacy Phase 3 router shares the same guard instead of its own weaker
+pattern. The probe message is now blocked before any model call.
+
 ### 4. `description` is never checked against the source
 
 Python validates `source_quote` but not `description`. In the probe the model
