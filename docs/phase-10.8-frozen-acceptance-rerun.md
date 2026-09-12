@@ -127,6 +127,11 @@ history sources, project isolation, and prepared-operation resume. This matches
 the recorded 2026-09-08 result, so the Phase 10.6–10.7 tracker changes
 (`due_at`, `set_deadline`) did not regress the Phase 6–7 services.
 
+Phase 8 was not re-run after `7ff17e1`: every later change is in the contextual
+router, candidate selection, or time parsing, none of which the Phase 6–7
+`ProjectTrackerService` and `ProjectRetrievalService` paths exercised by that
+fixture use.
+
 ## Deterministic suite
 
 252 tests pass at `7ff17e1`, 254 at `8e8052e`, and 262 at `6e0dcc7`.
@@ -134,10 +139,5 @@ the recorded 2026-09-08 result, so the Phase 10.6–10.7 tracker changes
 ## Claim boundary
 
 Each run is one fixed-sequence demonstration with one model. They show that the
-accepted behavior is intact apart from the case explained above; they are not a
-reliability measurement.
-
-Phase 8 was not re-run after `7ff17e1`: every later change is in the contextual
-router, candidate selection, or time parsing, none of which the Phase 6–7
-`ProjectTrackerService` and `ProjectRetrievalService` paths exercised by that
-fixture use.
+accepted behavior is intact and that the final rules absorb the model variants
+observed; they are not a reliability measurement.
