@@ -8,6 +8,7 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 from pydantic import ValidationError
 
 from .llm import ModelError, ProjectConversationModel
+from .local_context_service import match_terms
 from .models import (
     CalendarEvent,
     Message,
@@ -100,6 +101,7 @@ def select_router_candidates(
     store: CaptureStore,
     conversation_id: str,
     reference_date: date | None = None,
+    message: str | None = None,
     *,
     max_per_kind: int = MAX_ROUTER_CANDIDATES_PER_KIND,
 ) -> RouterCandidates:
@@ -117,19 +119,49 @@ def select_router_candidates(
     if project is None:
         return RouterCandidates(
             events=events,
-            saved_items=tuple(store.list_saved_items(conversation.workspace_id)[:max_per_kind]),
+            saved_items=tuple(
+                _most_relevant(
+                    store.list_saved_items(conversation.workspace_id), message, max_per_kind
+                )
+            ),
             project_records=(),
         )
 
     return RouterCandidates(
         events=events,
         saved_items=tuple(
-            store.list_saved_items_for_project(project.id, conversation.workspace_id)[:max_per_kind]
+            _most_relevant(
+                store.list_saved_items_for_project(project.id, conversation.workspace_id),
+                message,
+                max_per_kind,
+            )
         ),
         project_records=tuple(
-            store.list_project_records(project.id, states=("active",))[:max_per_kind]
+            _most_relevant(
+                store.list_project_records(project.id, states=("active",)), message, max_per_kind
+            )
         ),
     )
+
+
+def _most_relevant(
+    records: list[ProjectRecord] | list[SavedItem], message: str | None, limit: int
+) -> list:
+    """Keep the records a message is most likely about, most recently updated on a tie.
+
+    The stored order is recency, so a fixed prefix of it hides an older task the
+    moment a project holds more active records than the budget. A message that
+    shares no terms with any record keeps exactly the old recency order.
+    """
+
+    if not message:
+        return records[:limit]
+    terms = match_terms(message)
+    scored = [
+        (len(terms & match_terms(f"{record.content} {record.source_quote}")), position, record)
+        for position, record in enumerate(records)
+    ]
+    return [record for _, _, record in sorted(scored, key=lambda item: (-item[0], item[1]))[:limit]]
 
 
 def _events_nearest(

@@ -70,7 +70,9 @@ class ConversationRouterService:
         self, conversation_id: str, content: str, message_id: str | None = None) -> ConversationRouterTurn:
         user_message = self._user_message(conversation_id, content, message_id)
         context_window = select_project_context(self.store.list_messages(conversation_id))
-        candidates = select_router_candidates(self.store, conversation_id, self.reference_date)
+        candidates = select_router_candidates(
+            self.store, conversation_id, self.reference_date, user_message.content
+        )
         if existing_reply := self.store.get_assistant_reply(user_message.id):
             return self._turn(
                 user_message,

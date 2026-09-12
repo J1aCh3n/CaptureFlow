@@ -1,6 +1,6 @@
 import tempfile
 import unittest
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from captureflow.context_service import (
@@ -275,6 +275,53 @@ class ProjectConversationServiceTests(unittest.TestCase):
         self.assertEqual(
             [event.id for event in candidates.events],
             ["nearest-yesterday", "nearest-tomorrow", "nearest-next-week"],
+        )
+
+    def _active_tasks(self, contents: list[str]) -> list[ProjectRecord]:
+        records = []
+        for index, content in enumerate(contents):
+            source = self.store.save_message(
+                Message(
+                    id=f"relevance-source-{index}",
+                    conversation_id=self.conversation.id,
+                    role="user",
+                    content=content,
+                )
+            )
+            records.append(
+                self.store.save_project_record(
+                    ProjectRecord(
+                        id=f"relevance-task-{index}",
+                        project_id=self.project.id,
+                        conversation_id=self.conversation.id,
+                        kind="task",
+                        content=content,
+                        state="active",
+                        source_message_id=source.id,
+                        source_quote=content,
+                        updated_at=datetime(2026, 9, 1 + index, tzinfo=timezone.utc),
+                    )
+                )
+            )
+        return records
+
+    def test_router_record_candidates_follow_the_message_not_only_recency(self) -> None:
+        self._active_tasks(
+            ["完成驱动调试", "完成代码审查", "整理会议纪要", "更新部署文档", "修复登录页样式"]
+        )
+
+        about_oldest = select_router_candidates(
+            self.store, self.conversation.id, message="驱动调试的任务已经做完了"
+        )
+        unrelated = select_router_candidates(
+            self.store, self.conversation.id, message="hello"
+        )
+
+        self.assertEqual(about_oldest.project_records[0].id, "relevance-task-0")
+        self.assertEqual(len(about_oldest.project_records), 3)
+        self.assertEqual(
+            [record.id for record in unrelated.project_records],
+            ["relevance-task-4", "relevance-task-3", "relevance-task-2"],
         )
 
     def test_router_candidates_keep_the_stored_order_without_a_reference_date(self) -> None:

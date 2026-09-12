@@ -577,15 +577,17 @@ def _event_date(event: CalendarEvent) -> date:
 
 
 def _rank(query: str, candidates: list, text_for_candidate) -> list:
-    terms = _terms(query)
+    terms = match_terms(query)
     ranked = [
-        (len(terms & _terms(text_for_candidate(candidate))), candidate)
+        (len(terms & match_terms(text_for_candidate(candidate))), candidate)
         for candidate in candidates
     ]
     return [candidate for score, candidate in sorted(ranked, key=lambda item: (item[0], item[1].id), reverse=True) if score]
 
 
-def _terms(value: str) -> set[str]:
+def match_terms(value: str) -> set[str]:
+    """Deterministic CJK-aware terms: Latin words plus individual Chinese characters."""
+
     ignored_words = {"a", "an", "the", "and", "for", "is", "of", "to", "what", "when", "where", "my"}
     words = set(re.findall(r"[a-z0-9]+", value.casefold())) - ignored_words
     ignored = set("我你他她它的是了在有和与或为把将要做什么明天今天请帮问")

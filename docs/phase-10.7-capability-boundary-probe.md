@@ -161,7 +161,12 @@ the recall path.
 - Candidates: 3 per kind (`MAX_ROUTER_CANDIDATES_PER_KIND`). Events are the 3
   earliest in the workspace; saved items and project records are the 3 most
   recently updated, so the same invisibility applies to a project with more than
-  three active records.
+  three active records. **Both fixed**: events are now the 3 nearest the reference
+  date, and records and saved items are the 3 sharing the most terms with the
+  current message, most recently updated on a tie. A live repro with five active
+  tasks failed to complete the oldest before
+  `fix: choose tracker candidates by relevance to the message` and completed it
+  after.
 - Calendar events are workspace-scoped; saved items and tracker records are
   project-scoped.
 - Only a task may carry a deadline. There is no personal, project-less task: a

@@ -1,6 +1,6 @@
 import tempfile
 import unittest
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from captureflow.conversation_router_service import ConversationRouterService
@@ -1106,6 +1106,59 @@ class ConversationRouterServiceTests(unittest.TestCase):
             datetime.fromisoformat("2026-09-12T09:00:00-07:00"),
         )
         self.assertIsNone(self.store.get_pending_clarification(self.conversation.id))
+
+    def test_an_older_task_is_reachable_once_a_project_has_many(self) -> None:
+        for index, content in enumerate(
+            ["完成驱动调试", "完成代码审查", "整理会议纪要", "更新部署文档", "修复登录页样式"]
+        ):
+            source = self.store.save_message(
+                Message(
+                    id=f"many-tasks-source-{index}",
+                    conversation_id=self.conversation.id,
+                    role="user",
+                    content=content,
+                )
+            )
+            self.store.save_project_record(
+                ProjectRecord(
+                    id=f"many-tasks-{index}",
+                    project_id=self.project.id,
+                    conversation_id=self.conversation.id,
+                    kind="task",
+                    content=content,
+                    state="active",
+                    source_message_id=source.id,
+                    source_quote=content,
+                    updated_at=datetime(2026, 9, 1 + index, tzinfo=timezone.utc),
+                )
+            )
+        content = "驱动调试的任务已经做完了"
+        model = ScriptedContextualModel(
+            [
+                {
+                    "intent": "tracker_change",
+                    "project_changes": [
+                        {
+                            "action": "transition_record",
+                            "target_record_id": "many-tasks-0",
+                            "target_state": "completed",
+                            "source_quote": content,
+                        }
+                    ],
+                }
+            ]
+        )
+
+        turn = ConversationRouterService(self.store, model, date(2026, 9, 12)).submit(
+            self.conversation.id, content, "complete-oldest-task"
+        )
+
+        self.assertIn(
+            "many-tasks-0",
+            [record["id"] for record in model.calls[0]["candidate_project_records"]],
+        )
+        self.assertEqual(turn.outcome, "tracker_change")
+        self.assertEqual(self.store.get_project_record("many-tasks-0").state, "completed")
 
     def test_stale_events_do_not_hide_the_event_a_turn_is_about(self) -> None:
         for suffix, title, start_at in (
