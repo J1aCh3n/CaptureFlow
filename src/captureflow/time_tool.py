@@ -92,6 +92,27 @@ def parse_time(expression: str) -> time | None:
     return _parse_chinese_time(value)
 
 
+def parse_end_time(end_expression: str, start_expression: str | None) -> time | None:
+    """Resolve a range end, letting a bare hour share the period stated on its start.
+
+    `下午四点到五点` states 下午 once for the whole range, so `五点` is 17:00, not a
+    guess. The shared period is used only when it yields an end after the start;
+    `晚上十一点到一点` stays unresolved rather than becoming 13:00.
+    """
+
+    end = parse_time(end_expression)
+    if end is not None or start_expression is None:
+        return end
+    start = parse_time(start_expression)
+    period = re.match(r"\s*(凌晨|上午|中午|下午|晚上)", start_expression)
+    if start is None or period is None:
+        return None
+    inherited = parse_time(period.group(1) + end_expression.strip())
+    if inherited is None or inherited <= start:
+        return None
+    return inherited
+
+
 def parse_duration(expression: str) -> timedelta | None:
     """Resolve one exact, positive, bounded duration without model arithmetic."""
 

@@ -1,7 +1,7 @@
 import unittest
 from datetime import time, timedelta
 
-from captureflow.time_tool import parse_duration, parse_time, stated_timezone
+from captureflow.time_tool import parse_duration, parse_end_time, parse_time, stated_timezone
 
 
 class TimeToolTests(unittest.TestCase):
@@ -38,6 +38,28 @@ class TimeToolTests(unittest.TestCase):
         ):
             with self.subTest(expression=expression):
                 self.assertIsNone(parse_time(expression))
+
+    def test_a_bare_range_end_shares_the_period_stated_on_its_start(self) -> None:
+        cases = {
+            ("五点", "下午四点"): time(17),
+            ("三点", "下午两点"): time(15),
+            ("十一点半", "上午十点"): time(11, 30),
+            ("下午五点", "下午四点"): time(17),
+            ("17:00", "下午四点"): time(17),
+        }
+
+        for (end, start), expected in cases.items():
+            with self.subTest(end=end, start=start):
+                self.assertEqual(parse_end_time(end, start), expected)
+
+        for end, start in (
+            ("一点", "晚上十一点"),
+            ("三点", "下午四点"),
+            ("五点", "16:00"),
+            ("五点", None),
+        ):
+            with self.subTest(end=end, start=start):
+                self.assertIsNone(parse_end_time(end, start))
 
     def test_named_timezones_are_recognised_without_false_positives(self) -> None:
         cases = {

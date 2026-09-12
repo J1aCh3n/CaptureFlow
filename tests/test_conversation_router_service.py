@@ -232,6 +232,34 @@ class ConversationRouterServiceTests(unittest.TestCase):
         self.assertEqual(restored.start_at, datetime.fromisoformat("2026-09-10T16:00:00-07:00"))
         self.assertIsNone(restored.end_at)
 
+    def test_a_range_end_without_a_period_uses_the_start_period(self) -> None:
+        content = "我明天下午四点到五点有一场算法优化与代码审查会议。"
+        model = ScriptedContextualModel(
+            [
+                {
+                    "intent": "calendar_create",
+                    "action": {
+                        "action": "create_event",
+                        "content": "算法优化与代码审查会议",
+                        "date_expression": "明天",
+                        "time_expression": "下午四点",
+                        "end_time_expression": "五点",
+                        "evidence": [{"message_id": "bare-end-turn", "source_quote": content}],
+                    },
+                }
+            ]
+        )
+
+        turn = ConversationRouterService(self.store, model, date(2026, 9, 9)).submit(
+            self.conversation.id, content, "bare-end-turn"
+        )
+        event = self.store.list_calendar_events()[0]
+
+        self.assertEqual(turn.outcome, "calendar_create")
+        self.assertEqual(event.start_at, datetime.fromisoformat("2026-09-10T16:00:00-07:00"))
+        self.assertEqual(event.end_at, datetime.fromisoformat("2026-09-10T17:00:00-07:00"))
+        self.assertIsNone(self.store.get_pending_clarification(self.conversation.id))
+
     def test_calendar_end_time_can_cross_midnight(self) -> None:
         content = "明天 23:30 到 00:30 有发布检查。"
         model = ScriptedContextualModel(

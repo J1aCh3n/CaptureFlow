@@ -31,7 +31,7 @@ from .models import (
 )
 from .project_service import ProjectTrackerService
 from .storage import CaptureStore
-from .time_tool import parse_duration, parse_time, stated_timezone
+from .time_tool import parse_duration, parse_end_time, parse_time, stated_timezone
 
 
 RouterOperation = ToolOperation | CalendarEventUpdateOperation | ProjectChangeOperation
@@ -277,7 +277,7 @@ class ConversationRouterService:
             start_at = datetime.combine(resolved_date, start_time, tzinfo=ZoneInfo(self.timezone))
             all_day = False
             if action.end_time_expression is not None:
-                end_time = parse_time(action.end_time_expression)
+                end_time = parse_end_time(action.end_time_expression, action.time_expression)
                 if end_time is None:
                     raise ValueError("event end time is not valid")
                 end_at = datetime.combine(resolved_date, end_time, tzinfo=ZoneInfo(self.timezone))
@@ -420,7 +420,7 @@ class ConversationRouterService:
                 return "date"
         if action.time_expression is not None and parse_time(action.time_expression) is None:
             return "time"
-        if action.end_time_expression is not None and parse_time(action.end_time_expression) is None:
+        if action.end_time_expression is not None and parse_end_time(action.end_time_expression, action.time_expression) is None:
             return "time"
         if action.action == "create_event" and action.end_time_expression is not None and action.time_expression is None:
             return "time"
@@ -769,7 +769,7 @@ class ConversationRouterService:
         if action.end_time_expression is not None:
             if not isinstance(start_at, datetime):
                 raise ValueError("event end time requires a start time")
-            end_time = parse_time(action.end_time_expression)
+            end_time = parse_end_time(action.end_time_expression, action.time_expression)
             if end_time is None:
                 raise ValueError("event end time is not valid")
             end_at = datetime.combine(start_at.date(), end_time, tzinfo=ZoneInfo(existing.timezone))
