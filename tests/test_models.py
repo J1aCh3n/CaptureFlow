@@ -253,13 +253,29 @@ class ModelTests(unittest.TestCase):
                 ],
             )
 
+    def test_a_stored_pre_phase_11_deadline_change_still_validates(self) -> None:
+        stored = {
+            "action": "create_record",
+            "kind": "task",
+            "content": "提交修复",
+            "due_date_expression": "下周三",
+            "due_time_expression": "晚上八点",
+            "due_at": "2026-09-16T20:00:00-07:00",
+            "source_quote": "修复需要下周三晚上八点之前提交",
+        }
+
+        change = ProjectChange.model_validate(stored)
+
+        self.assertEqual((change.due_date, change.due_time), ("2026-09-16", "20:00"))
+        self.assertEqual(change.due_at, datetime.fromisoformat("2026-09-16T20:00:00-07:00"))
+
     def test_only_a_new_task_may_carry_a_deadline(self) -> None:
         change = ProjectChange(
             action="create_record",
             kind="task",
             content="提交修复",
-            due_date_expression="下周三",
-            due_time_expression="晚上八点",
+            due_date="2026-09-16",
+            due_time="20:00",
             source_quote="修复需要下周三晚上八点之前提交",
         )
 
@@ -269,7 +285,7 @@ class ModelTests(unittest.TestCase):
                 action="create_record",
                 kind="blocker",
                 content="驱动没有到货",
-                due_date_expression="下周三",
+                due_date="2026-09-16",
                 source_quote="驱动没有到货",
             )
         with self.assertRaises(ValidationError):
@@ -277,7 +293,7 @@ class ModelTests(unittest.TestCase):
                 action="create_record",
                 kind="task",
                 content="提交修复",
-                due_time_expression="晚上八点",
+                due_time="20:00",
                 source_quote="修复需要晚上八点之前提交",
             )
         with self.assertRaises(ValidationError):
@@ -285,7 +301,7 @@ class ModelTests(unittest.TestCase):
                 action="transition_record",
                 target_record_id="record-1",
                 target_state="completed",
-                due_date_expression="下周三",
+                due_date="2026-09-16",
                 source_quote="这个任务做完了",
             )
 

@@ -816,7 +816,7 @@ class ConversationRouterServiceTests(unittest.TestCase):
             self.store.get_pending_clarification(self.conversation.id), None
         )
 
-    def test_task_deadline_is_resolved_locally_and_listed_for_the_calendar(self) -> None:
+    def test_a_normalized_task_deadline_is_listed_for_the_calendar(self) -> None:
         content = "修复需要下周三晚上八点之前提交"
         model = ScriptedContextualModel(
             [
@@ -827,8 +827,8 @@ class ConversationRouterServiceTests(unittest.TestCase):
                             "action": "create_record",
                             "kind": "task",
                             "content": "提交修复",
-                            "due_date_expression": "下周三",
-                            "due_time_expression": "晚上八点",
+                            "due_date": "2026-09-16",
+                            "due_time": "20:00",
                             "source_quote": content,
                         }
                     ],
@@ -861,7 +861,7 @@ class ConversationRouterServiceTests(unittest.TestCase):
                             "action": "create_record",
                             "kind": "task",
                             "content": "交文档",
-                            "due_date_expression": "下周三",
+                            "due_date": "2026-09-16",
                             "source_quote": content,
                         }
                     ],
@@ -877,7 +877,7 @@ class ConversationRouterServiceTests(unittest.TestCase):
         self.assertEqual(record.due_at, date(2026, 9, 16))
         self.assertEqual(self.store.list_task_deadlines(), [record])
 
-    def test_an_unresolvable_deadline_keeps_the_task_and_names_the_expression(self) -> None:
+    def test_an_implausible_deadline_keeps_the_task_without_one(self) -> None:
         content = "修复要尽快提交。"
         model = ScriptedContextualModel(
             [
@@ -888,7 +888,7 @@ class ConversationRouterServiceTests(unittest.TestCase):
                             "action": "create_record",
                             "kind": "task",
                             "content": "提交修复",
-                            "due_date_expression": "尽快",
+                            "due_date": "2031-01-01",
                             "source_quote": content,
                         }
                     ],
@@ -903,10 +903,10 @@ class ConversationRouterServiceTests(unittest.TestCase):
 
         self.assertEqual(turn.outcome, "tracker_change")
         self.assertIsNone(record.due_at)
-        self.assertIn('deadline date "尽快"', turn.assistant_message.content)
+        self.assertIn("outside the planning horizon", turn.assistant_message.content)
         self.assertIn("no deadline yet", turn.assistant_message.content)
 
-    def test_an_ambiguous_hour_keeps_the_task_then_a_follow_up_sets_the_deadline(self) -> None:
+    def test_a_follow_up_sets_a_deadline_on_an_existing_task(self) -> None:
         content = "提醒我明天十点交材料。"
         answer = "上午十点"
         model = ScriptedContextualModel(
@@ -918,8 +918,6 @@ class ConversationRouterServiceTests(unittest.TestCase):
                             "action": "create_record",
                             "kind": "task",
                             "content": "交材料",
-                            "due_date_expression": "明天",
-                            "due_time_expression": "十点",
                             "source_quote": content,
                         }
                     ],
@@ -930,8 +928,8 @@ class ConversationRouterServiceTests(unittest.TestCase):
                         {
                             "action": "set_deadline",
                             "target_record_id": None,
-                            "due_date_expression": "明天",
-                            "due_time_expression": "上午十点",
+                            "due_date": "2026-09-12",
+                            "due_time": "10:00",
                             "source_quote": answer,
                         }
                     ],
@@ -946,7 +944,6 @@ class ConversationRouterServiceTests(unittest.TestCase):
 
         self.assertEqual(first.outcome, "tracker_change")
         self.assertIsNone(record.due_at)
-        self.assertIn('deadline time "十点"', first.assistant_message.content)
 
         second = service.submit(self.conversation.id, answer, "bare-hour-answer")
         updated = self.store.get_project_record(record.id)
@@ -1070,7 +1067,8 @@ class ConversationRouterServiceTests(unittest.TestCase):
                             "action": "create_record",
                             "kind": "task",
                             "content": "交周报",
-                            "due_date_expression": "每周三",
+                            "due_date": "2026-09-16",
+                            "recurring": True,
                             "source_quote": content,
                         }
                     ],
@@ -1098,7 +1096,7 @@ class ConversationRouterServiceTests(unittest.TestCase):
                             "action": "create_record",
                             "kind": "task",
                             "content": "提交修复",
-                            "due_date_expression": "下周三",
+                            "due_date": "2026-09-16",
                             "due_at": "2026-09-16T20:00:00-07:00",
                             "source_quote": content,
                         }

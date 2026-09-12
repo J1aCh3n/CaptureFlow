@@ -102,6 +102,8 @@ class OpenAICompatibleModelTests(unittest.TestCase):
         self.assertIn("duration_minutes", prompt)
         self.assertIn("calendar table", prompt)
         self.assertIn("never write a UTC offset", prompt)
+        self.assertIn("due_date is YYYY-MM-DD", prompt)
+        self.assertNotIn("_expression", prompt)
         self.assertIn("mutually exclusive", prompt)
         self.assertIn("deferred_action", prompt)
         self.assertIn("never kind, content, or rationale", prompt)

@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 from pydantic import ValidationError
 
 from .context_service import ProjectContextWindow, RouterCandidates, select_project_context, select_router_candidates
-from .date_tool import calendar_reference, resolve_relative_date, states_recurrence
+from .date_tool import calendar_reference
 from .llm import InvalidStructuredOutput, ModelError, ContextualConversationModel
 from .local_context_service import LocalContextService
 from .memory import contains_credential_disclosure
@@ -32,7 +32,6 @@ from .models import (
 )
 from .project_service import ProjectTrackerService
 from .storage import CaptureStore
-from .time_tool import parse_time
 
 
 RouterOperation = ToolOperation | CalendarEventUpdateOperation | ProjectChangeOperation
@@ -576,37 +575,27 @@ class ConversationRouterService:
         return operations, "\n".join(summaries) or "No tracker change was applied."
 
     def _resolved_deadline(self, change: ProjectChange) -> tuple[ProjectChange | None, str | None]:
-        """Resolve a copied deadline locally; never guess one, and never drop it silently.
+        """Attach the configured timezone to a model-normalized deadline.
 
-        Returns the change to apply and the sentence explaining an unresolved deadline.
-        A task whose deadline could not be resolved is still created without one, and the
-        user can set it afterwards with an ordinary follow-up message.
+        Returns the change to apply and the sentence explaining a deadline that was not
+        kept. A task is still created without its deadline, and the user can set it
+        afterwards with an ordinary follow-up message.
         """
 
-        if change.due_date_expression is None:
+        if change.recurring:
+            return self._deadline_not_set(
+                change, "I cannot store a repeating deadline, only a single dated one."
+            )
+        if change.due_date is None:
             return change, None
-        if repeat := states_recurrence(change.due_date_expression):
+        due_date = date.fromisoformat(change.due_date)
+        if not self._plausible_date(due_date):
             return self._deadline_not_set(
-                change,
-                f'I cannot store a repeating deadline such as "{repeat}", only a single dated one.',
+                change, f"The deadline date {change.due_date} is outside the planning horizon."
             )
-        resolution = resolve_relative_date(
-            change.due_date_expression, self.reference_date, self.timezone
-        )
-        if resolution.status != "resolved" or resolution.resolved_date is None:
-            return self._deadline_not_set(
-                change, f'I could not resolve the deadline date "{change.due_date_expression}".'
-            )
-        due: date | datetime = resolution.resolved_date
-        if change.due_time_expression is not None:
-            due_time = parse_time(change.due_time_expression)
-            if due_time is None:
-                return self._deadline_not_set(
-                    change,
-                    f'I could not resolve the deadline time "{change.due_time_expression}"'
-                    " (for example 上午十点 or 晚上十点).",
-                )
-            due = datetime.combine(resolution.resolved_date, due_time, tzinfo=ZoneInfo(self.timezone))
+        due: date | datetime = due_date
+        if change.due_time is not None:
+            due = self._local_datetime(due_date, change.due_time)
         return change.model_copy(update={"due_at": due}), None
 
     @staticmethod
@@ -615,7 +604,7 @@ class ConversationRouterService:
 
         if change.action != "create_record":
             return None, f"{reason} No deadline was set."
-        cleared = {"due_date_expression": None, "due_time_expression": None, "due_at": None}
+        cleared = {"due_date": None, "due_time": None, "due_at": None, "recurring": False}
         return change.model_copy(update=cleared), (
             f"{reason} The task has no deadline yet; tell me an exact date or time and I will add it."
         )

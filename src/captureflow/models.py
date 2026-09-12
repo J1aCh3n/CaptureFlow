@@ -579,20 +579,49 @@ class ProjectChange(BaseModel):
     kind: ProjectRecordKind | None = None
     content: str | None = Field(default=None, max_length=4_000)
     rationale: str | None = Field(default=None, max_length=1_000)
-    due_date_expression: str | None = Field(default=None, max_length=100)
-    due_time_expression: str | None = Field(default=None, max_length=20)
+    due_date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    due_time: str | None = Field(default=None, pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    recurring: bool = False
     due_at: date | datetime | None = None
     source_quote: str = Field(min_length=1, max_length=8_000)
     target_record_id: str | None = None
     target_state: Literal["completed", "resolved"] | None = None
 
-    @field_validator("content", "rationale", "due_date_expression", "due_time_expression")
+    @model_validator(mode="before")
+    @classmethod
+    def drop_retired_deadline_expressions(cls, value: object) -> object:
+        # Operations stored before Phase 11 still carry the copied expressions, and they
+        # are re-validated on commit and undo. Their resolved value already lives in due_at.
+        if not isinstance(value, dict) or not (
+            "due_date_expression" in value or "due_time_expression" in value
+        ):
+            return value
+        current = {
+            key: item
+            for key, item in value.items()
+            if key not in {"due_date_expression", "due_time_expression"}
+        }
+        stored_due_at = current.get("due_at")
+        if isinstance(stored_due_at, str) and "due_date" not in current:
+            current["due_date"] = stored_due_at[:10]
+            if "T" in stored_due_at:
+                current["due_time"] = stored_due_at[11:16]
+        return current
+
+    @field_validator("content", "rationale")
     @classmethod
     def optional_text_is_not_whitespace(cls, value: str | None) -> str | None:
         if value is None:
             return None
         value = value.strip()
         return value or None
+
+    @field_validator("due_date")
+    @classmethod
+    def due_date_is_a_real_calendar_day(cls, value: str | None) -> str | None:
+        if value is not None:
+            date.fromisoformat(value)
+        return value
 
     @model_validator(mode="after")
     def fields_match_change_action(self) -> "ProjectChange":
@@ -608,7 +637,7 @@ class ProjectChange(BaseModel):
             if any(value is not None for value in (self.kind, self.content, self.rationale)):
                 raise ValueError("a transition cannot create replacement content")
         elif self.action == "set_deadline":
-            if self.target_record_id is None or self.due_date_expression is None:
+            if self.target_record_id is None or (self.due_date is None and not self.recurring):
                 raise ValueError("a deadline change requires a target task and a deadline date")
             if any(
                 value is not None
@@ -628,20 +657,17 @@ class ProjectChange(BaseModel):
         """A deadline belongs to a task; Python, not the model, resolves it."""
 
         if self.action == "set_deadline":
-            if self.due_time_expression is not None and self.due_date_expression is None:
+            if self.due_time is not None and self.due_date is None:
                 raise ValueError("a deadline time needs a deadline date")
             return
         if self.action != "create_record" or self.kind != "task":
-            if any(
-                value is not None
-                for value in (self.due_date_expression, self.due_time_expression, self.due_at)
-            ):
+            if any(value is not None for value in (self.due_date, self.due_time, self.due_at)) or self.recurring:
                 raise ValueError("only a new task may carry a deadline")
             return
-        if self.due_time_expression is not None and self.due_date_expression is None:
+        if self.due_time is not None and self.due_date is None:
             raise ValueError("a deadline time needs a deadline date")
-        if self.due_at is not None and self.due_date_expression is None:
-            raise ValueError("a resolved deadline needs the copied deadline date")
+        if self.due_at is not None and self.due_date is None:
+            raise ValueError("a resolved deadline needs its normalized date")
 
 
 class ProjectTrackerDecision(ProjectConversationDecision):
