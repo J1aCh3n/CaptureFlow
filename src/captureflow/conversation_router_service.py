@@ -252,6 +252,8 @@ class ConversationRouterService:
             )
 
         outcome = decision.intent if decision.intent != "reply_only" or operations else "reply_only"
+        if decision.intent == "calendar_update" and not operations:
+            outcome = "calendar_unchanged"
         if pending is not None and operations:
             # Any committed write answers the open question, including a deferred second item.
             self.store.resolve_pending_clarification(pending.id, "resolved")
@@ -369,6 +371,12 @@ class ConversationRouterService:
         after = self._updated_event(
             existing, action, target_date, self._quoted_description(action, user_message)
         )
+        if after.model_copy(update={"updated_at": existing.updated_at}) == existing:
+            # An update that changes nothing is not a change; do not audit it as one.
+            return (), (
+                f"Local calendar event {existing.title} is already {_event_schedule(existing)}; "
+                "nothing was changed."
+            )
         operation = CalendarEventUpdateOperation(
             id=_stable_id(user_message.id, f"contextual-update-event:{existing.id}"),
             source_message_id=user_message.id,

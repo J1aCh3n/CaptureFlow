@@ -250,6 +250,23 @@ class ConversationRouterServiceTests(unittest.TestCase):
             },
         }
 
+    def test_an_update_that_changes_nothing_writes_nothing(self) -> None:
+        event = self._saved_event(
+            "already-thursday", "架构评审", datetime.fromisoformat("2026-09-10T14:00:00-07:00")
+        )
+        content = "架构评审改到周四。"
+        model = ScriptedContextualModel([self._update_decision(event.id, "no-op-update", content)])
+
+        turn = ConversationRouterService(self.store, model, date(2026, 9, 9)).submit(
+            self.conversation.id, content, "no-op-update"
+        )
+
+        self.assertEqual(turn.outcome, "calendar_unchanged")
+        self.assertEqual(turn.operations, ())
+        self.assertEqual(self.store.list_calendar_event_update_operations("no-op-update"), [])
+        self.assertEqual(self.store.get_calendar_event(event.id).updated_at, event.updated_at)
+        self.assertIn("nothing was changed", turn.assistant_message.content)
+
     def test_a_demonstrative_in_a_new_conversation_asks_which_event(self) -> None:
         event = self._saved_event(
             "review-meeting",
