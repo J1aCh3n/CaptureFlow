@@ -184,6 +184,10 @@ class ModelTests(unittest.TestCase):
         ):
             with self.subTest(invalid=invalid), self.assertRaises(ValidationError):
                 ContextualAction(action="create_event", content="评审会", evidence=evidence, **invalid)
+        repeating = ContextualAction(
+            action="create_event", content="团队例会", start_time="15:00", recurring=True, evidence=evidence
+        )
+        self.assertIsNone(repeating.date)
         with self.assertRaises(ValidationError):
             ContextualAction(action="save_note", content="纪要", recurring=True, evidence=evidence)
 

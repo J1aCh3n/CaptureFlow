@@ -992,7 +992,8 @@ class ContextualAction(BaseModel):
                 raise ValueError("an event creation requires title content")
             if self.target_event_id is not None:
                 raise ValueError("an event creation cannot target an existing event")
-            if self.start_time is not None and self.date is None:
+            # A repeating schedule has a time but no single date; Python refuses it by policy.
+            if self.start_time is not None and self.date is None and not self.recurring:
                 raise ValueError("an event start time needs a date")
             if (self.end_time is not None or self.duration_minutes is not None) and self.start_time is None:
                 raise ValueError("an event end or duration needs a start time")

@@ -1067,7 +1067,7 @@ class ConversationRouterServiceTests(unittest.TestCase):
                     "action": {
                         "action": "create_event",
                         "content": "团队例会",
-                        "date": "2026-09-14",
+                        "date": None,
                         "recurring": True,
                         "start_time": "15:00",
                         "evidence": [{"message_id": "recurring-turn", "source_quote": content}],
