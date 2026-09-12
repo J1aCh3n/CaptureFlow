@@ -61,6 +61,28 @@ _CHINESE_WEEKDAYS = {
     "天": 6,
 }
 
+_WEEKDAY_NAMES = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+_CHINESE_WEEKDAY_NAMES = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+
+
+def calendar_reference(
+    reference_date: date, days_before: int = 7, days_after: int = 27
+) -> list[dict[str, str]]:
+    """A bounded date table so a model looks weekday phrases up instead of computing them."""
+
+    return [
+        {
+            "date": day.isoformat(),
+            "weekday": _WEEKDAY_NAMES[day.weekday()],
+            "weekday_zh": _CHINESE_WEEKDAY_NAMES[day.weekday()],
+        }
+        for day in (
+            reference_date + timedelta(days=offset)
+            for offset in range(-days_before, days_after + 1)
+        )
+    ]
+
+
 _RECURRENCE_PATTERN = re.compile(
     r"每天|每日|每周|每星期|每礼拜|每个?月|每年|每隔|隔周|双周|逢周|逢星期"
     r"|(?<![A-Za-z])(?:every|each)\s+(?:other\s+)?"

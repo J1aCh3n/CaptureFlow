@@ -93,6 +93,7 @@ class ContextualConversationModel(Protocol):
         timezone: str,
         pending_clarification: dict | None = None,
         context_truncated: bool = False,
+        calendar: list[dict[str, str]] | None = None,
     ) -> ConversationDecision: ...
 
 
@@ -275,6 +276,7 @@ class OpenAICompatibleModel:
         timezone: str,
         pending_clarification: dict | None = None,
         context_truncated: bool = False,
+        calendar: list[dict[str, str]] | None = None,
     ) -> ConversationDecision:
         """Make one untrusted, context-aware routing proposal; storage remains downstream."""
 
@@ -355,6 +357,7 @@ class OpenAICompatibleModel:
                 "timezone": timezone,
                 "pending_clarification": pending_clarification,
                 "context_truncated": context_truncated,
+                "calendar": calendar or [],
             },
         )
         self._validate_contextual_references(

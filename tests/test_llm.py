@@ -111,6 +111,7 @@ class OpenAICompatibleModelTests(unittest.TestCase):
         self.assertEqual(payload["candidate_events"][0]["id"], "event-1")
         self.assertEqual(payload["candidate_saved_items"][0]["id"], "idea-1")
         self.assertEqual(payload["candidate_project_records"][0]["id"], "record-1")
+        self.assertEqual(payload["calendar"], [])
 
     def test_contextual_router_keeps_a_finished_meeting_as_a_note(self) -> None:
         content = "今天中午十二点的会议是关于系统架构与驱动集成，主要分析了驱动调试。"

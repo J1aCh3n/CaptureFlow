@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 from pydantic import ValidationError
 
 from .context_service import ProjectContextWindow, RouterCandidates, select_project_context, select_router_candidates
-from .date_tool import resolve_relative_date, states_recurrence
+from .date_tool import calendar_reference, resolve_relative_date, states_recurrence
 from .llm import InvalidStructuredOutput, ModelError, ContextualConversationModel
 from .local_context_service import LocalContextService
 from .memory import contains_credential_disclosure
@@ -136,6 +136,7 @@ class ConversationRouterService:
                     timezone=self.timezone,
                     pending_clarification=None if pending is None else pending.original_action,
                     context_truncated=context_window.truncated,
+                    calendar=calendar_reference(self.reference_date),
                 )
             )
             self._validate_decision(decision, user_message, context_window, candidates)

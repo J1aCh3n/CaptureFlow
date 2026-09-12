@@ -80,6 +80,7 @@ class ConversationRouterServiceTests(unittest.TestCase):
         )
         self.assertEqual(self.store.list_project_records(self.project.id), [])
         self.assertEqual(model.calls[0]["candidate_events"], [])
+        self.assertEqual(model.calls[0]["calendar"][7]["date"], "2026-09-09")
         self.assertEqual(replay.model_calls, 0)
         self.assertEqual(len(model.calls), 1)
 

@@ -1,7 +1,7 @@
 import unittest
 from datetime import date
 
-from captureflow.date_tool import resolve_relative_date, states_recurrence
+from captureflow.date_tool import calendar_reference, resolve_relative_date, states_recurrence
 
 
 class DateToolTests(unittest.TestCase):
@@ -104,6 +104,20 @@ class DateToolTests(unittest.TestCase):
                 result = resolve_relative_date(expression, reference, "America/Vancouver")
                 self.assertEqual(result.status, "resolved")
                 self.assertEqual(result.resolved_date, expected)
+
+    def test_calendar_reference_spans_last_week_to_four_weeks_ahead(self) -> None:
+        table = calendar_reference(date(2026, 9, 12))
+
+        self.assertEqual(len(table), 35)
+        self.assertEqual(
+            table[0], {"date": "2026-09-05", "weekday": "Saturday", "weekday_zh": "周六"}
+        )
+        self.assertEqual(
+            table[7], {"date": "2026-09-12", "weekday": "Saturday", "weekday_zh": "周六"}
+        )
+        self.assertEqual(
+            table[-1], {"date": "2026-10-09", "weekday": "Friday", "weekday_zh": "周五"}
+        )
 
     def test_repeating_expressions_are_recognised_as_recurrence(self) -> None:
         for expression in ("每周一", "每天", "每个月", "每月15号", "every Monday", "weekly", "biweekly"):
