@@ -251,6 +251,36 @@ class ConversationRouterServiceTests(unittest.TestCase):
             },
         }
 
+    def test_the_model_asking_which_date_an_update_means_is_kept_as_a_question(self) -> None:
+        event = self._saved_event(
+            "which-thursday", "算法优化与代码审查会议", datetime.fromisoformat("2026-09-10T14:00:00-07:00")
+        )
+        content = "这个会议改到周四。"
+        model = ScriptedContextualModel(
+            [
+                {
+                    "intent": "clarify",
+                    "clarification_question": "你是指 9月10日（明天）还是 9月17日的周四？",
+                    "pending_action": {
+                        "action": "update_event",
+                        "date": None,
+                        "target_event_id": event.id,
+                        "evidence": [{"message_id": "which-thursday-turn", "source_quote": content}],
+                    },
+                }
+            ]
+        )
+
+        turn = ConversationRouterService(self.store, model, date(2026, 9, 9)).submit(
+            self.conversation.id, content, "which-thursday-turn"
+        )
+
+        self.assertEqual(turn.outcome, "clarification_created")
+        self.assertEqual(self.store.get_calendar_event(event.id), event)
+        self.assertEqual(
+            self.store.get_pending_clarification(self.conversation.id).missing_field, "date"
+        )
+
     def test_an_update_that_changes_nothing_writes_nothing(self) -> None:
         event = self._saved_event(
             "already-thursday", "架构评审", datetime.fromisoformat("2026-09-10T14:00:00-07:00")

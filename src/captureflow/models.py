@@ -997,8 +997,9 @@ class ContextualAction(BaseModel):
             if (self.end_time is not None or self.duration_minutes is not None) and self.start_time is None:
                 raise ValueError("an event end or duration needs a start time")
         elif self.action == "update_event":
-            if not any(value is not None for value in (self.content, self.description, *schedule)):
-                raise ValueError("an event update requires at least one replacement field")
+            # A committed update needs a replacement field; that is checked on the decision,
+            # because a pending update may be waiting for exactly the field it lacks.
+            pass
         elif self.action == "delete_event":
             # A committed deletion needs one candidate target; an unresolved one may
             # still be carried as the pending action of a clarification.
@@ -1015,6 +1016,19 @@ class ContextualAction(BaseModel):
             ) or self.recurring:
                 raise ValueError("a saved item cannot include calendar fields or an event target")
         return self
+
+    def has_replacement(self) -> bool:
+        return any(
+            value is not None
+            for value in (
+                self.content,
+                self.description,
+                self.date,
+                self.start_time,
+                self.end_time,
+                self.duration_minutes,
+            )
+        )
 
 
 class ConversationDecision(BaseModel):
@@ -1066,6 +1080,8 @@ class ConversationDecision(BaseModel):
                 and self.action.target_event_id is None
             ):
                 raise ValueError(f"a {self.intent.replace('_', ' ')} requires a candidate event target")
+            if self.intent == "calendar_update" and not self.action.has_replacement():
+                raise ValueError("an event update requires at least one replacement field")
             if self.project_changes or self.clarification_question or self.pending_action or self.source_ids:
                 raise ValueError("a local write cannot include tracker or clarification payload")
         elif self.intent == "tracker_change":

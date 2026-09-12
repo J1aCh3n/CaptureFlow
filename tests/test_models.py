@@ -199,6 +199,25 @@ class ModelTests(unittest.TestCase):
                 evidence=[EvidenceReference(message_id="message-1", source_quote="代码审查")],
             )
 
+    def test_a_pending_update_may_lack_the_field_it_is_asking_for(self) -> None:
+        evidence = [EvidenceReference(message_id="correction", source_quote="这个会议改到周四。")]
+        decision = ConversationDecision(
+            intent="clarify",
+            clarification_question="你是指 9月10日还是 9月17日的周四？",
+            pending_action=ContextualAction(
+                action="update_event", target_event_id="event-1", evidence=evidence
+            ),
+        )
+
+        self.assertIsNone(decision.pending_action.date)
+        with self.assertRaises(ValidationError):
+            ConversationDecision(
+                intent="calendar_update",
+                action=ContextualAction(
+                    action="update_event", target_event_id="event-1", evidence=evidence
+                ),
+            )
+
     def test_contextual_clarification_retains_an_unresolved_calendar_update(self) -> None:
         decision = ConversationDecision(
             intent="clarify",
