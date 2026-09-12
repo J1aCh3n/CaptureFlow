@@ -399,7 +399,9 @@ class PendingClarification(BaseModel):
     source_message_id: str
     assistant_message_id: str
     original_action: dict
-    missing_field: Literal["date", "time", "duration", "timezone", "follow_up"] = "date"
+    missing_field: Literal[
+        "date", "time", "duration", "timezone", "recurrence", "follow_up"
+    ] = "date"
     status: Literal["pending", "resolved", "cancelled"] = "pending"
     created_at: datetime = Field(default_factory=utc_now)
     resolved_at: datetime | None = None
@@ -573,7 +575,7 @@ class ProjectChange(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    action: Literal["create_record", "transition_record", "supersede_record"]
+    action: Literal["create_record", "transition_record", "supersede_record", "set_deadline"]
     kind: ProjectRecordKind | None = None
     content: str | None = Field(default=None, max_length=4_000)
     rationale: str | None = Field(default=None, max_length=1_000)
@@ -605,6 +607,14 @@ class ProjectChange(BaseModel):
                 raise ValueError("a transition requires a target record and target state")
             if any(value is not None for value in (self.kind, self.content, self.rationale)):
                 raise ValueError("a transition cannot create replacement content")
+        elif self.action == "set_deadline":
+            if self.target_record_id is None or self.due_date_expression is None:
+                raise ValueError("a deadline change requires a target task and a deadline date")
+            if any(
+                value is not None
+                for value in (self.kind, self.content, self.rationale, self.target_state)
+            ):
+                raise ValueError("a deadline change cannot alter record content or state")
         else:
             if self.target_record_id is None or self.kind not in {"decision", "constraint"}:
                 raise ValueError("a supersession requires a decision or constraint target")
@@ -615,8 +625,12 @@ class ProjectChange(BaseModel):
         return self
 
     def _deadline_fields_are_bounded(self) -> None:
-        """A deadline belongs to a new task; Python, not the model, resolves it."""
+        """A deadline belongs to a task; Python, not the model, resolves it."""
 
+        if self.action == "set_deadline":
+            if self.due_time_expression is not None and self.due_date_expression is None:
+                raise ValueError("a deadline time needs a deadline date")
+            return
         if self.action != "create_record" or self.kind != "task":
             if any(
                 value is not None

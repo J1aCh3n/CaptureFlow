@@ -61,6 +61,26 @@ _CHINESE_WEEKDAYS = {
     "天": 6,
 }
 
+_RECURRENCE_PATTERN = re.compile(
+    r"每天|每日|每周|每星期|每礼拜|每个?月|每年|每隔|隔周|双周|逢周|逢星期"
+    r"|(?<![A-Za-z])(?:every|each)\s+(?:other\s+)?"
+    r"(?:day|week|month|year|morning|monday|tuesday|wednesday|thursday|friday|saturday|sunday)"
+    r"|(?<![A-Za-z])(?:daily|weekly|biweekly|monthly|yearly|annually)(?![A-Za-z])",
+    re.IGNORECASE,
+)
+
+
+def states_recurrence(expression: str) -> str | None:
+    """Return the repeating phrase in an expression, if it states one.
+
+    CaptureFlow stores single dated events only. Recognising a repeat lets it say
+    so instead of asking for an exact date it was never going to get.
+    """
+
+    match = _RECURRENCE_PATTERN.search(expression)
+    return None if match is None else match.group(0)
+
+
 def resolve_relative_date(expression: str, reference_date: date, timezone: str) -> DateResolution:
     """Resolve a small, explicit v0 vocabulary with future bare weekdays."""
 

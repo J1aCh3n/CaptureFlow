@@ -134,8 +134,8 @@ write nothing. They are missing vocabulary, not defects.
 | ~~Bare Chinese month-day~~ | `9月20日上午十点有体检` | **fixed**: `9月20日`, `9月20号`, and English month names now resolve to the next occurrence |
 | Week arithmetic | `下下周三下午三点有架构评审会` | asks for an exact date |
 | Fuzzy horizon | `月底之前要把报告交上去` | task created, deadline explicitly not resolved |
-| Recurrence | `每周一下午三点有团队例会` | asks for an exact date; never says recurrence is unsupported |
-| Bare hour | `提醒我明天十点吃药` | task created, deadline dropped (`十点` needs 上午/下午/晚上/中午/凌晨) |
+| ~~Recurrence~~ | `每周一下午三点有团队例会` | **fixed**: says repeats are not stored and asks for one exact date |
+| ~~Bare hour~~ | `提醒我明天十点吃药` | **fixed**: the task is kept, the reply names the unresolved `十点`, and a follow-up such as `上午十点` sets the deadline through the new `set_deadline` change |
 | ~~Duration words~~ | `开一个半小时`, `for an hour` | **fixed**: 个小时, 个半小时, 钟头, decimals, `an hour`, and `an hour and a half` now resolve |
 | Relative shift | `把站会提前一小时` | asks for an exact start time; no arithmetic on an existing time |
 | Range query | `我下周有什么安排？` | `insufficient_context`; recall needs an expression resolving to one date |
@@ -172,7 +172,12 @@ the recall path.
    `feat: accept bare month-day dates and common duration wordings`. Chinese
    numeral dates such as `九月二十日`, week arithmetic such as `下下周三`, and
    fuzzy horizons such as `月底` remain unsupported on purpose.
-5. Say "recurring events are not supported" instead of asking for a date.
-6. Decide whether a bare `十点` should clarify rather than drop the deadline.
+5. ~~Say "recurring events are not supported" instead of asking for a date.~~ Done
+   in `feat: answer that repeats are not stored and let a deadline be set later`.
+6. ~~Decide whether a bare `十点` should clarify rather than drop the deadline.~~
+   Done in the same commit: the task is kept, the unresolved expression is named,
+   and a `set_deadline` change adds the deadline afterwards. That also closes a
+   gap this probe did not list — until now nothing, in chat or in the UI, could
+   put a deadline on a task that already existed.
 7. Fix the clarification `missing_field` metadata (bug 5) and decide whether
    `description` needs a provenance rule (bug 4).

@@ -787,6 +787,35 @@ class CaptureStore:
                     "previous_state": None,
                     "new_state": record.state,
                 }
+            elif change.action == "set_deadline":
+                record = self._project_record_in_connection(connection, change.target_record_id)
+                self._validate_project_change_target(record, operation.project_id, change.target_record_id)
+                if record.kind != "task":
+                    raise ValueError("only a task can carry a deadline")
+                previous_due_at = None if record.due_at is None else record.due_at.isoformat()
+                self._write_project_record_due_at(connection, record.id, change.due_at)
+                self._save_project_record_event_in_connection(
+                    connection,
+                    ProjectRecordEvent(
+                        project_record_id=record.id,
+                        action="edited",
+                        source_message_id=source.id,
+                        previous_state=record.state,
+                        new_state=record.state,
+                        details={
+                            "origin": "project_change_operation",
+                            "operation_id": operation.id,
+                            "previous_due_at": previous_due_at,
+                            "due_at": None if change.due_at is None else change.due_at.isoformat(),
+                        },
+                    ),
+                )
+                result = {
+                    "record_id": record.id,
+                    "previous_state": record.state,
+                    "new_state": record.state,
+                    "previous_due_at": previous_due_at,
+                }
             elif change.action == "transition_record":
                 record = self._project_record_in_connection(connection, change.target_record_id)
                 action = self._transition_action(record, change.target_state)
@@ -917,6 +946,25 @@ class CaptureStore:
                     raise ValueError("project record changed after this operation and cannot be undone")
                 self._set_project_record_state_in_connection(
                     connection, record, "deleted", "deleted", source.id, operation.id
+                )
+            elif change.action == "set_deadline":
+                record = self._project_record_in_connection(connection, operation.result["record_id"])
+                if record.due_at != change.due_at:
+                    raise ValueError("project record changed after this operation and cannot be undone")
+                previous = operation.result.get("previous_due_at")
+                self._write_project_record_due_at(
+                    connection, record.id, None if previous is None else _parse_due_at(previous)
+                )
+                self._save_project_record_event_in_connection(
+                    connection,
+                    ProjectRecordEvent(
+                        project_record_id=record.id,
+                        action="edited",
+                        source_message_id=source.id,
+                        previous_state=record.state,
+                        new_state=record.state,
+                        details={"reverted_action": "set_deadline", "operation_id": operation.id},
+                    ),
                 )
             elif change.action == "transition_record":
                 record = self._project_record_in_connection(connection, operation.result["record_id"])
@@ -2080,6 +2128,19 @@ class CaptureStore:
         if record.id != target_record_id or record.project_id != project_id or record.state != "active":
             raise ValueError("project change target must be an active supplied record in the same project")
 
+    @staticmethod
+    def _write_project_record_due_at(
+        connection: sqlite3.Connection, record_id: str, due_at: date | datetime | None
+    ) -> None:
+        connection.execute(
+            "UPDATE project_records SET due_at = ?, updated_at = ? WHERE id = ?",
+            (
+                None if due_at is None else due_at.isoformat(),
+                utc_now().isoformat(),
+                record_id,
+            ),
+        )
+
     def _insert_project_record_in_connection(
         self, connection: sqlite3.Connection, record: ProjectRecord
     ) -> None:
@@ -2428,6 +2489,11 @@ class CaptureStore:
             raise
         finally:
             connection.close()
+
+
+def _parse_due_at(value: str) -> date | datetime:
+    # datetime.fromisoformat accepts a bare date, so keep an all-day deadline a date.
+    return datetime.fromisoformat(value) if "T" in value else date.fromisoformat(value)
 
 
 def _decode_run(serialized: str) -> CaptureRun:

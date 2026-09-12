@@ -1,7 +1,7 @@
 import unittest
 from datetime import date
 
-from captureflow.date_tool import resolve_relative_date
+from captureflow.date_tool import resolve_relative_date, states_recurrence
 
 
 class DateToolTests(unittest.TestCase):
@@ -104,6 +104,15 @@ class DateToolTests(unittest.TestCase):
                 result = resolve_relative_date(expression, reference, "America/Vancouver")
                 self.assertEqual(result.status, "resolved")
                 self.assertEqual(result.resolved_date, expected)
+
+    def test_repeating_expressions_are_recognised_as_recurrence(self) -> None:
+        for expression in ("每周一", "每天", "每个月", "每月15号", "every Monday", "weekly", "biweekly"):
+            with self.subTest(expression=expression):
+                self.assertIsNotNone(states_recurrence(expression))
+
+        for expression in ("下周一", "周一", "monday", "2026年9月20日", "明天"):
+            with self.subTest(expression=expression):
+                self.assertIsNone(states_recurrence(expression))
 
     def test_impossible_and_unsupported_dates_stay_unresolved(self) -> None:
         for expression in ("2月30日", "13月1日", "下下周三", "月底", "九月二十日"):

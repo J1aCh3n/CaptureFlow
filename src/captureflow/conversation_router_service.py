@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 from pydantic import ValidationError
 
 from .context_service import ProjectContextWindow, RouterCandidates, select_project_context, select_router_candidates
-from .date_tool import resolve_relative_date
+from .date_tool import resolve_relative_date, states_recurrence
 from .llm import InvalidStructuredOutput, ModelError, ContextualConversationModel
 from .local_context_service import LocalContextService
 from .memory import contains_credential_disclosure
@@ -385,6 +385,8 @@ class ConversationRouterService:
             return None
         if user_message is not None and self._states_other_timezone(user_message.content):
             return "timezone"
+        if action.date_expression is not None and states_recurrence(action.date_expression):
+            return "recurrence"
         if action.date_expression is not None:
             resolution = resolve_relative_date(
                 action.date_expression, self.reference_date, self.timezone
@@ -455,12 +457,16 @@ class ConversationRouterService:
         project = self.store.get_conversation_project(user_message.conversation_id)
         if project is None:
             raise ValueError("assign a project before changing its tracker")
-        changes = [self._resolved_deadline(change) for change in decision.project_changes]
+        resolved = [self._resolved_deadline(change) for change in decision.project_changes]
+        deadline_notes = [note for _, note in resolved if note is not None]
+        changes = [change for change, _ in resolved if change is not None]
+        if not changes:
+            return (), "\n".join(deadline_notes) or "No tracker change was applied."
         committed, reviewed = ProjectTrackerService.apply_validated_changes(
             self.store,
             project,
             user_message,
-            [change for change, _ in changes],
+            changes,
             list(candidates.project_records),
         )
         operations = tuple([*committed, *reviewed])
@@ -472,38 +478,57 @@ class ConversationRouterService:
             else "Tracker update was not applied."
             for operation in operations
         ]
-        summaries.extend(self._deadline_summaries(changes, committed))
+        summaries.extend(deadline_notes)
+        summaries.extend(self._deadline_summaries(committed))
         return operations, "\n".join(summaries) or "No tracker change was applied."
 
-    def _resolved_deadline(self, change: ProjectChange) -> tuple[ProjectChange, bool]:
-        """Resolve a copied deadline expression locally; never guess one."""
+    def _resolved_deadline(self, change: ProjectChange) -> tuple[ProjectChange | None, str | None]:
+        """Resolve a copied deadline locally; never guess one, and never drop it silently.
+
+        Returns the change to apply and the sentence explaining an unresolved deadline.
+        A task whose deadline could not be resolved is still created without one, and the
+        user can set it afterwards with an ordinary follow-up message.
+        """
 
         if change.due_date_expression is None:
-            return change, True
-        cleared = {"due_date_expression": None, "due_time_expression": None, "due_at": None}
+            return change, None
+        if repeat := states_recurrence(change.due_date_expression):
+            return self._deadline_not_set(
+                change,
+                f'I cannot store a repeating deadline such as "{repeat}", only a single dated one.',
+            )
         resolution = resolve_relative_date(
             change.due_date_expression, self.reference_date, self.timezone
         )
         if resolution.status != "resolved" or resolution.resolved_date is None:
-            return change.model_copy(update=cleared), False
+            return self._deadline_not_set(
+                change, f'I could not resolve the deadline date "{change.due_date_expression}".'
+            )
         due: date | datetime = resolution.resolved_date
         if change.due_time_expression is not None:
             due_time = parse_time(change.due_time_expression)
             if due_time is None:
-                return change.model_copy(update=cleared), False
+                return self._deadline_not_set(
+                    change,
+                    f'I could not resolve the deadline time "{change.due_time_expression}"'
+                    " (for example 上午十点 or 晚上十点).",
+                )
             due = datetime.combine(resolution.resolved_date, due_time, tzinfo=ZoneInfo(self.timezone))
-        return change.model_copy(update={"due_at": due}), True
+        return change.model_copy(update={"due_at": due}), None
 
-    def _deadline_summaries(
-        self,
-        changes: list[tuple[ProjectChange, bool]],
-        committed: list[ProjectChangeOperation],
-    ) -> list[str]:
+    @staticmethod
+    def _deadline_not_set(change: ProjectChange, reason: str) -> tuple[ProjectChange | None, str]:
+        """Keep a new task without its deadline; a deadline-only change has nothing left to do."""
+
+        if change.action != "create_record":
+            return None, f"{reason} No deadline was set."
+        cleared = {"due_date_expression": None, "due_time_expression": None, "due_at": None}
+        return change.model_copy(update=cleared), (
+            f"{reason} The task has no deadline yet; tell me an exact date or time and I will add it."
+        )
+
+    def _deadline_summaries(self, committed: list[ProjectChangeOperation]) -> list[str]:
         summaries = []
-        if any(not resolved for _, resolved in changes):
-            summaries.append(
-                "I could not resolve the stated deadline, so the task has no calendar deadline."
-            )
         for operation in committed:
             record_id = (operation.result or {}).get("record_id")
             if operation.status != "committed" or record_id is None:
@@ -533,7 +558,31 @@ class ConversationRouterService:
         self, user_message: Message, action: ContextualAction | None, missing_field: str
     ) -> Message:
         assert action is not None
-        questions = {
+        return self._save_pending_question(
+            user_message, missing_field, action.model_dump(mode="json")
+        )
+
+    def _save_pending_question(
+        self, user_message: Message, missing_field: str, action: dict
+    ) -> Message:
+        """Ask one bounded question and keep the unexecuted action, writing nothing."""
+
+        assistant = self._assistant_message(user_message, self._question(missing_field))
+        self.store.save_pending_clarification(
+            PendingClarification(
+                id=_stable_id(user_message.id, f"contextual-calendar-{missing_field}-clarification"),
+                conversation_id=user_message.conversation_id,
+                source_message_id=user_message.id,
+                assistant_message_id=assistant.id,
+                original_action=action,
+                missing_field=missing_field,
+                created_at=user_message.created_at,
+            )
+        )
+        return assistant
+
+    def _question(self, missing_field: str) -> str:
+        return {
             "date": "Which exact date should I use for this local event?",
             "time": "What exact start time should I use for this local event?",
             "duration": "How long should this local event last (for example, 30 minutes)?",
@@ -541,22 +590,11 @@ class ConversationRouterService:
                 f"I only store {self.timezone} times and cannot convert another timezone. "
                 f"What exact {self.timezone} time should I use for this local event?"
             ),
-        }
-        assistant = self._assistant_message(
-            user_message, questions[missing_field]
-        )
-        self.store.save_pending_clarification(
-            PendingClarification(
-                id=_stable_id(user_message.id, f"contextual-calendar-{missing_field}-clarification"),
-                conversation_id=user_message.conversation_id,
-                source_message_id=user_message.id,
-                assistant_message_id=assistant.id,
-                original_action=action.model_dump(mode="json"),
-                missing_field=missing_field,
-                created_at=user_message.created_at,
-            )
-        )
-        return assistant
+            "recurrence": (
+                "I cannot store a repeating schedule, only single dated records. "
+                "Which one exact date should I use?"
+            ),
+        }[missing_field]
 
     def _save_follow_up_clarification(
         self, user_message: Message, assistant: Message, deferred_action: ContextualAction

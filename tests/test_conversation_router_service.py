@@ -598,7 +598,7 @@ class ConversationRouterServiceTests(unittest.TestCase):
         self.assertEqual(record.due_at, date(2026, 9, 16))
         self.assertEqual(self.store.list_task_deadlines(), [record])
 
-    def test_an_unresolvable_deadline_keeps_the_task_without_one(self) -> None:
+    def test_an_unresolvable_deadline_keeps_the_task_and_names_the_expression(self) -> None:
         content = "修复要尽快提交。"
         model = ScriptedContextualModel(
             [
@@ -624,8 +624,117 @@ class ConversationRouterServiceTests(unittest.TestCase):
 
         self.assertEqual(turn.outcome, "tracker_change")
         self.assertIsNone(record.due_at)
-        self.assertEqual(self.store.list_task_deadlines(), [])
-        self.assertIn("could not resolve the stated deadline", turn.assistant_message.content)
+        self.assertIn('deadline date "尽快"', turn.assistant_message.content)
+        self.assertIn("no deadline yet", turn.assistant_message.content)
+
+    def test_an_ambiguous_hour_keeps_the_task_then_a_follow_up_sets_the_deadline(self) -> None:
+        content = "提醒我明天十点交材料。"
+        answer = "上午十点"
+        model = ScriptedContextualModel(
+            [
+                {
+                    "intent": "tracker_change",
+                    "project_changes": [
+                        {
+                            "action": "create_record",
+                            "kind": "task",
+                            "content": "交材料",
+                            "due_date_expression": "明天",
+                            "due_time_expression": "十点",
+                            "source_quote": content,
+                        }
+                    ],
+                },
+                {
+                    "intent": "tracker_change",
+                    "project_changes": [
+                        {
+                            "action": "set_deadline",
+                            "target_record_id": None,
+                            "due_date_expression": "明天",
+                            "due_time_expression": "上午十点",
+                            "source_quote": answer,
+                        }
+                    ],
+                },
+            ]
+        )
+        service = ConversationRouterService(self.store, model, date(2026, 9, 11))
+
+        first = service.submit(self.conversation.id, content, "bare-hour-turn")
+        record = self.store.list_project_records(self.project.id)[0]
+        model.decisions[0]["project_changes"][0]["target_record_id"] = record.id
+
+        self.assertEqual(first.outcome, "tracker_change")
+        self.assertIsNone(record.due_at)
+        self.assertIn('deadline time "十点"', first.assistant_message.content)
+
+        second = service.submit(self.conversation.id, answer, "bare-hour-answer")
+        updated = self.store.get_project_record(record.id)
+        operation = self.store.list_project_change_operations("bare-hour-answer")[0]
+
+        self.assertEqual(second.outcome, "tracker_change")
+        self.assertEqual(updated.due_at, datetime.fromisoformat("2026-09-12T10:00:00-07:00"))
+        self.assertEqual(self.store.list_task_deadlines(), [updated])
+        self.assertEqual(
+            self.store.undo_project_change_operation(operation.id).status, "undone"
+        )
+        self.assertIsNone(self.store.get_project_record(record.id).due_at)
+
+    def test_a_repeating_event_says_repeats_are_not_stored(self) -> None:
+        content = "每周一下午三点有团队例会"
+        model = ScriptedContextualModel(
+            [
+                {
+                    "intent": "calendar_create",
+                    "action": {
+                        "action": "create_event",
+                        "content": "团队例会",
+                        "date_expression": "每周一",
+                        "time_expression": "下午三点",
+                        "evidence": [{"message_id": "recurring-turn", "source_quote": content}],
+                    },
+                }
+            ]
+        )
+
+        turn = ConversationRouterService(self.store, model, date(2026, 9, 11)).submit(
+            self.conversation.id, content, "recurring-turn"
+        )
+        pending = self.store.get_pending_clarification(self.conversation.id)
+
+        self.assertEqual(turn.outcome, "clarification_created")
+        self.assertEqual(self.store.list_calendar_events(), [])
+        self.assertEqual(pending.missing_field, "recurrence")
+        self.assertIn("cannot store a repeating schedule", turn.assistant_message.content)
+
+    def test_a_repeating_deadline_keeps_the_task_without_one(self) -> None:
+        content = "每周三之前要交周报。"
+        model = ScriptedContextualModel(
+            [
+                {
+                    "intent": "tracker_change",
+                    "project_changes": [
+                        {
+                            "action": "create_record",
+                            "kind": "task",
+                            "content": "交周报",
+                            "due_date_expression": "每周三",
+                            "source_quote": content,
+                        }
+                    ],
+                }
+            ]
+        )
+
+        turn = ConversationRouterService(self.store, model, date(2026, 9, 11)).submit(
+            self.conversation.id, content, "recurring-deadline-turn"
+        )
+        record = self.store.list_project_records(self.project.id)[0]
+
+        self.assertEqual(turn.outcome, "tracker_change")
+        self.assertIsNone(record.due_at)
+        self.assertIn("repeating deadline", turn.assistant_message.content)
 
     def test_a_model_supplied_deadline_timestamp_is_refused(self) -> None:
         content = "修复需要下周三晚上八点之前提交"

@@ -204,6 +204,10 @@ class ProjectTrackerService:
                 }
                 if (record.kind, change.target_state) not in allowed:
                     raise ValueError("invalid project record lifecycle transition")
+            elif change.action == "set_deadline":
+                record = candidate_by_id.get(change.target_record_id or "")
+                if record is None or record.kind != "task":
+                    raise ValueError("a deadline must target a supplied active task")
             else:
                 record = candidate_by_id.get(change.target_record_id or "")
                 if record is None or record.kind != change.kind or record.kind not in {
