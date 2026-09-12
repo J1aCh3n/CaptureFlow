@@ -232,6 +232,44 @@ class ConversationRouterServiceTests(unittest.TestCase):
         self.assertEqual(restored.start_at, datetime.fromisoformat("2026-09-10T16:00:00-07:00"))
         self.assertIsNone(restored.end_at)
 
+    def test_a_second_unanswered_calendar_question_replaces_the_first(self) -> None:
+        first = "周末有个会"
+        second = "下下周三下午三点有评审会"
+        model = ScriptedContextualModel(
+            [
+                {
+                    "intent": "calendar_create",
+                    "action": {
+                        "action": "create_event",
+                        "content": "会",
+                        "date_expression": "周末",
+                        "evidence": [{"message_id": "first-question-turn", "source_quote": first}],
+                    },
+                },
+                {
+                    "intent": "calendar_create",
+                    "action": {
+                        "action": "create_event",
+                        "content": "评审会",
+                        "date_expression": "下下周三",
+                        "time_expression": "下午三点",
+                        "evidence": [{"message_id": "second-question-turn", "source_quote": second}],
+                    },
+                },
+            ]
+        )
+        service = ConversationRouterService(self.store, model, date(2026, 9, 11))
+
+        service.submit(self.conversation.id, first, "first-question-turn")
+        replaced = self.store.get_pending_clarification(self.conversation.id)
+        turn = service.submit(self.conversation.id, second, "second-question-turn")
+        current = self.store.get_pending_clarification(self.conversation.id)
+
+        self.assertEqual(turn.outcome, "clarification_created")
+        self.assertEqual(current.source_message_id, "second-question-turn")
+        self.assertNotEqual(current.id, replaced.id)
+        self.assertEqual(self.store.list_calendar_events(), [])
+
     def test_a_range_end_without_a_period_uses_the_start_period(self) -> None:
         content = "我明天下午四点到五点有一场算法优化与代码审查会议。"
         model = ScriptedContextualModel(

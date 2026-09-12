@@ -602,6 +602,10 @@ class ConversationRouterService:
     ) -> Message:
         """Ask one bounded question and keep the unexecuted action, writing nothing."""
 
+        stale = self.store.get_pending_clarification(user_message.conversation_id)
+        if stale is not None and stale.source_message_id != user_message.id:
+            # Only one question may be pending; a newer one replaces a question left unanswered.
+            self.store.resolve_pending_clarification(stale.id, "cancelled")
         assistant = self._assistant_message(user_message, self._question(missing_field))
         self.store.save_pending_clarification(
             PendingClarification(
