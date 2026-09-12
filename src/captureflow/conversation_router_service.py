@@ -37,6 +37,17 @@ from .time_tool import parse_duration, parse_end_time, parse_time, stated_timezo
 
 RouterOperation = ToolOperation | CalendarEventUpdateOperation | ProjectChangeOperation
 
+# The committed intents that answer a pending question about each kind of action.
+_CALENDAR_WRITES = {"calendar_create", "calendar_update", "calendar_delete"}
+_SAVED_ITEM_WRITES = {"save_idea", "save_note"}
+_ANSWERING_INTENTS = {
+    "create_event": _CALENDAR_WRITES,
+    "update_event": _CALENDAR_WRITES,
+    "delete_event": _CALENDAR_WRITES,
+    "save_idea": _SAVED_ITEM_WRITES,
+    "save_note": _SAVED_ITEM_WRITES,
+}
+
 # Words that point at "a meeting" without saying which one.
 _GENERIC_EVENT_TERMS = {
     "会议", "例会", "开会", "这个", "那个", "这场", "那场", "这次", "那次", "日程", "安排", "活动",
@@ -258,10 +269,13 @@ class ConversationRouterService:
         outcome = decision.intent if decision.intent != "reply_only" or operations else "reply_only"
         if decision.intent == "calendar_update" and not operations:
             outcome = "calendar_unchanged"
-        if pending is not None and operations:
-            # Any committed write answers the open question, including a deferred second item.
+        if pending is not None and operations and decision.intent in _ANSWERING_INTENTS.get(
+            pending.original_action.get("action"), set()
+        ):
+            # Only a write of the pending kind answers it; an unrelated task must not
+            # silently discard a calendar event that is still waiting for its time.
             self.store.resolve_pending_clarification(pending.id, "resolved")
-        deferred = self._deferred_second_item(decision, operations, user_message.conversation_id)
+        deferred = self._deferred_second_item(decision, operations)
         if deferred is not None:
             reply = f"{reply}\n\n{decision.follow_up_question}"
         turn = self._reply(
@@ -280,17 +294,13 @@ class ConversationRouterService:
             self._save_follow_up_clarification(user_message, turn.assistant_message, deferred)
         return turn
 
+    @staticmethod
     def _deferred_second_item(
-        self,
-        decision: ConversationDecision,
-        operations: tuple[RouterOperation, ...],
-        conversation_id: str,
+        decision: ConversationDecision, operations: tuple[RouterOperation, ...]
     ) -> ContextualAction | None:
         """Return the second item to ask about, once this turn has committed its one action."""
 
         if decision.deferred_action is None or not operations:
-            return None
-        if self.store.get_pending_clarification(conversation_id) is not None:
             return None
         return decision.deferred_action
 
@@ -681,10 +691,7 @@ class ConversationRouterService:
     ) -> Message:
         """Ask one bounded question and keep the unexecuted action, writing nothing."""
 
-        stale = self.store.get_pending_clarification(user_message.conversation_id)
-        if stale is not None and stale.source_message_id != user_message.id:
-            # Only one question may be pending; a newer one replaces a question left unanswered.
-            self.store.resolve_pending_clarification(stale.id, "cancelled")
+        self._replace_unanswered_question(user_message)
         assistant = self._assistant_message(user_message, self._question(missing_field))
         self.store.save_pending_clarification(
             PendingClarification(
@@ -718,11 +725,19 @@ class ConversationRouterService:
             ),
         }[missing_field]
 
+    def _replace_unanswered_question(self, user_message: Message) -> None:
+        """Only one question may be pending; a newer one replaces a question left unanswered."""
+
+        stale = self.store.get_pending_clarification(user_message.conversation_id)
+        if stale is not None and stale.source_message_id != user_message.id:
+            self.store.resolve_pending_clarification(stale.id, "cancelled")
+
     def _save_follow_up_clarification(
         self, user_message: Message, assistant: Message, deferred_action: ContextualAction
     ) -> PendingClarification:
         """Keep the unexecuted second item of a compound message as one pending question."""
 
+        self._replace_unanswered_question(user_message)
         return self.store.save_pending_clarification(
             PendingClarification(
                 id=_stable_id(user_message.id, "contextual-follow-up-clarification"),

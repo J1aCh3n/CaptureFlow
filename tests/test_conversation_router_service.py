@@ -346,6 +346,89 @@ class ConversationRouterServiceTests(unittest.TestCase):
         self.assertEqual(turn.outcome, "clarification_created")
         self.assertEqual(self.store.get_calendar_event(event.id).status, "active")
 
+    def _pending_time_question(self) -> None:
+        content = "明天有个评审会"
+        ConversationRouterService(
+            self.store,
+            ScriptedContextualModel(
+                [
+                    {
+                        "intent": "calendar_create",
+                        "action": {
+                            "action": "create_event",
+                            "content": "评审会",
+                            "date_expression": "明天",
+                            "time_expression": "九点",
+                            "evidence": [{"message_id": "pending-time-turn", "source_quote": content}],
+                        },
+                    }
+                ]
+            ),
+            date(2026, 9, 11),
+        ).submit(self.conversation.id, content, "pending-time-turn")
+
+    def test_an_unrelated_task_does_not_discard_a_pending_calendar_question(self) -> None:
+        self._pending_time_question()
+        content = "我需要排查 ROS 2 节点延迟。"
+        model = ScriptedContextualModel(
+            [
+                {
+                    "intent": "tracker_change",
+                    "project_changes": [
+                        {
+                            "action": "create_record",
+                            "kind": "task",
+                            "content": "排查 ROS 2 节点延迟",
+                            "source_quote": content,
+                        }
+                    ],
+                }
+            ]
+        )
+
+        turn = ConversationRouterService(self.store, model, date(2026, 9, 11)).submit(
+            self.conversation.id, content, "unrelated-task-turn"
+        )
+        pending = self.store.get_pending_clarification(self.conversation.id)
+
+        self.assertEqual(turn.outcome, "tracker_change")
+        self.assertIsNotNone(pending)
+        self.assertEqual(pending.source_message_id, "pending-time-turn")
+
+    def test_a_follow_up_question_replaces_an_unanswered_calendar_question(self) -> None:
+        self._pending_time_question()
+        content = "会议分析了驱动调试。修复需要下周三之前提交"
+        model = ScriptedContextualModel(
+            [
+                {
+                    "intent": "tracker_change",
+                    "project_changes": [
+                        {
+                            "action": "create_record",
+                            "kind": "task",
+                            "content": "提交修复",
+                            "source_quote": "修复需要下周三之前提交",
+                        }
+                    ],
+                    "deferred_action": {
+                        "action": "save_note",
+                        "content": "会议分析了驱动调试。",
+                        "evidence": [{"message_id": "follow-up-over-stale", "source_quote": content}],
+                    },
+                    "follow_up_question": "要保存会议纪要吗？",
+                }
+            ]
+        )
+
+        turn = ConversationRouterService(self.store, model, date(2026, 9, 11)).submit(
+            self.conversation.id, content, "follow-up-over-stale"
+        )
+        pending = self.store.get_pending_clarification(self.conversation.id)
+
+        self.assertIn("要保存会议纪要吗？", turn.assistant_message.content)
+        self.assertEqual(pending.missing_field, "follow_up")
+        self.assertEqual(pending.source_message_id, "follow-up-over-stale")
+
     def test_a_second_unanswered_calendar_question_replaces_the_first(self) -> None:
         first = "周末有个会"
         second = "下下周三下午三点有评审会"
