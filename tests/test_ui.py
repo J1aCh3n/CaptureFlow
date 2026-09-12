@@ -1,7 +1,7 @@
 import os
 import tempfile
 import unittest
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -29,6 +29,7 @@ class _CalendarRoutingUiModel:
         *,
         current_message: dict[str, str],
         candidate_events: list[dict],
+        reference_date: str,
         **_: object,
     ) -> dict:
         evidence = [
@@ -43,7 +44,7 @@ class _CalendarRoutingUiModel:
                 "action": {
                     "action": "update_event",
                     "target_event_id": candidate_events[0]["id"],
-                    "time_expression": "15:00",
+                    "start_time": "15:00",
                     "evidence": evidence,
                 },
             }
@@ -53,9 +54,9 @@ class _CalendarRoutingUiModel:
                 "action": "create_event",
                 "content": "Algorithm review",
                 "description": "Discuss the algorithm bottleneck.",
-                "date_expression": "tomorrow",
-                "time_expression": "14:00",
-                "end_time_expression": "15:00",
+                "date": (date.fromisoformat(reference_date) + timedelta(days=1)).isoformat(),
+                "start_time": "14:00",
+                "end_time": "15:00",
                 "evidence": evidence,
             },
         }

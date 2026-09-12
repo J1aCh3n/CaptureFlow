@@ -912,34 +912,40 @@ class EvidenceReference(BaseModel):
 
 
 class ContextualAction(BaseModel):
-    """One untrusted local action with one or more persisted-message citations."""
+    """One untrusted local action with one or more persisted-message citations.
+
+    Dates and times arrive already normalized by the model. Python checks their
+    structure and attaches the configured timezone; it does not interpret wording.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     action: Literal["create_event", "update_event", "delete_event", "save_idea", "save_note"]
     content: str | None = Field(default=None, max_length=4_000)
     description: str | None = Field(default=None, max_length=4_000)
-    date_expression: str | None = Field(default=None, max_length=100)
-    time_expression: str | None = Field(default=None, max_length=20)
-    end_time_expression: str | None = Field(default=None, max_length=20)
-    duration_expression: str | None = Field(default=None, max_length=20)
+    date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    start_time: str | None = Field(default=None, pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    end_time: str | None = Field(default=None, pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    duration_minutes: int | None = Field(default=None, ge=1, le=720)
+    timezone: str | None = Field(default=None, min_length=1, max_length=100)
+    recurring: bool = False
     target_event_id: str | None = Field(default=None, min_length=1)
     evidence: list[EvidenceReference] = Field(min_length=1, max_length=3)
 
-    @field_validator(
-        "content",
-        "description",
-        "date_expression",
-        "time_expression",
-        "end_time_expression",
-        "duration_expression",
-    )
+    @field_validator("content", "description", "timezone")
     @classmethod
     def optional_text_is_not_whitespace(cls, value: str | None) -> str | None:
         if value is None:
             return None
         value = value.strip()
         return value or None
+
+    @field_validator("date")
+    @classmethod
+    def date_is_a_real_calendar_day(cls, value: str | None) -> str | None:
+        if value is not None:
+            date.fromisoformat(value)
+        return value
 
     @field_validator("evidence")
     @classmethod
@@ -951,32 +957,36 @@ class ContextualAction(BaseModel):
 
     @model_validator(mode="after")
     def action_fields_match_kind(self) -> "ContextualAction":
-        event_fields = (
-            self.description,
-            self.date_expression,
-            self.time_expression,
-            self.end_time_expression,
-            self.duration_expression,
-        )
-        if self.end_time_expression is not None and self.duration_expression is not None:
+        schedule = (self.date, self.start_time, self.end_time, self.duration_minutes)
+        if self.end_time is not None and self.duration_minutes is not None:
             raise ValueError("an event cannot have both an end time and a duration")
         if self.action == "create_event":
-            if self.content is None or self.date_expression is None:
-                raise ValueError("an event creation requires title content and a date expression")
+            # A creation may lack its date; Python then asks for it instead of guessing.
+            if self.content is None:
+                raise ValueError("an event creation requires title content")
             if self.target_event_id is not None:
                 raise ValueError("an event creation cannot target an existing event")
+            if self.start_time is not None and self.date is None:
+                raise ValueError("an event start time needs a date")
+            if (self.end_time is not None or self.duration_minutes is not None) and self.start_time is None:
+                raise ValueError("an event end or duration needs a start time")
         elif self.action == "update_event":
-            if not any((self.content, *event_fields)):
+            if not any(value is not None for value in (self.content, self.description, *schedule)):
                 raise ValueError("an event update requires at least one replacement field")
         elif self.action == "delete_event":
             # A committed deletion needs one candidate target; an unresolved one may
             # still be carried as the pending action of a clarification.
-            if any(value is not None for value in (self.content, *event_fields)):
+            if any(value is not None for value in (self.content, self.description, *schedule, self.timezone)):
                 raise ValueError("an event deletion cannot change event fields")
+            if self.recurring:
+                raise ValueError("an event deletion cannot be recurring")
         else:
             if self.content is None:
                 raise ValueError("a saved item requires content")
-            if any(value is not None for value in (*event_fields, self.target_event_id)):
+            if any(
+                value is not None
+                for value in (self.description, *schedule, self.timezone, self.target_event_id)
+            ) or self.recurring:
                 raise ValueError("a saved item cannot include calendar fields or an event target")
         return self
 

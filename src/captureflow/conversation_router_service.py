@@ -2,7 +2,7 @@
 
 import re
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from time import perf_counter
 from uuid import NAMESPACE_URL, uuid4, uuid5
 from zoneinfo import ZoneInfo
@@ -32,7 +32,7 @@ from .models import (
 )
 from .project_service import ProjectTrackerService
 from .storage import CaptureStore
-from .time_tool import parse_duration, parse_end_time, parse_time, stated_timezone, with_stated_period
+from .time_tool import parse_time
 
 
 RouterOperation = ToolOperation | CalendarEventUpdateOperation | ProjectChangeOperation
@@ -155,10 +155,6 @@ class ConversationRouterService:
 
         model_seconds = perf_counter() - started
         local_started = perf_counter()
-        if decision.action is not None and decision.intent in {"calendar_create", "calendar_update"}:
-            decision = decision.model_copy(
-                update={"action": self._with_stated_periods(decision.action, user_message)}
-            )
         try:
             if decision.intent == "calendar_create":
                 if field := self._calendar_clarification_field(decision.action, user_message):
@@ -310,28 +306,15 @@ class ConversationRouterService:
     ) -> tuple[tuple[ToolOperation, ...], str]:
         assert action is not None
         source = self._current_evidence(action, user_message)
-        resolved_date = self._resolved_date(action.date_expression)
-        start_at: date | datetime = resolved_date
+        if action.date is None:
+            raise ValueError("calendar date needs clarification")
+        event_date = date.fromisoformat(action.date)
+        start_at: date | datetime = event_date
         end_at: datetime | None = None
-        all_day = True
-        if action.time_expression is not None:
-            start_time = parse_time(action.time_expression)
-            if start_time is None:
-                raise ValueError("event start time is not valid")
-            start_at = datetime.combine(resolved_date, start_time, tzinfo=ZoneInfo(self.timezone))
-            all_day = False
-            if action.end_time_expression is not None:
-                end_time = parse_end_time(action.end_time_expression, action.time_expression)
-                if end_time is None:
-                    raise ValueError("event end time is not valid")
-                end_at = datetime.combine(resolved_date, end_time, tzinfo=ZoneInfo(self.timezone))
-                if end_at <= start_at:
-                    end_at += timedelta(days=1)
-            elif action.duration_expression is not None:
-                duration = parse_duration(action.duration_expression)
-                if duration is None:
-                    raise ValueError("event duration is not valid")
-                end_at = start_at + duration
+        all_day = action.start_time is None
+        if action.start_time is not None:
+            start_at = self._local_datetime(event_date, action.start_time)
+            end_at = self._end_at(start_at, action)
         event = CalendarEvent(
             id=_stable_id(user_message.id, "contextual-event"),
             conversation_id=user_message.conversation_id,
@@ -381,8 +364,8 @@ class ConversationRouterService:
         self._current_evidence(action, user_message)
         existing = self.store.get_calendar_event(action.target_event_id)
         target_date = self._event_date(existing)
-        if action.date_expression is not None:
-            target_date = self._resolved_date(action.date_expression)
+        if action.date is not None:
+            target_date = date.fromisoformat(action.date)
         after = self._updated_event(
             existing, action, target_date, self._quoted_description(action, user_message)
         )
@@ -406,7 +389,7 @@ class ConversationRouterService:
         )
         saved = self.store.prepare_calendar_event_update(operation, action.evidence)
         committed, event = self.store.commit_prepared_calendar_event_update(saved.id)
-        return (committed,), f"Updated local calendar event: {event.title}."
+        return (committed,), f"Updated local calendar event: {event.title} — {_event_schedule(event)}."
 
     def _quoted_description(
         self, action: ContextualAction, user_message: Message
@@ -467,43 +450,46 @@ class ConversationRouterService:
             and self._target_is_ungrounded(action, user_message, context_window)
         ):
             return "target"
-        if user_message is not None and self._states_other_timezone(user_message.content):
+        if action.timezone is not None and action.timezone != self.timezone:
             return "timezone"
-        if action.date_expression is not None and states_recurrence(action.date_expression):
+        if action.recurring:
             return "recurrence"
-        if action.date_expression is not None:
-            resolution = resolve_relative_date(
-                action.date_expression, self.reference_date, self.timezone
-            )
-            if resolution.status != "resolved":
-                return "date"
-        if action.time_expression is not None and parse_time(action.time_expression) is None:
+        if action.action == "create_event" and action.date is None:
+            return "date"
+        if action.date is not None and not self._plausible_date(date.fromisoformat(action.date)):
+            return "date"
+        if (
+            action.action == "update_event"
+            and action.start_time is None
+            and (action.end_time is not None or action.duration_minutes is not None)
+            and action.target_event_id is not None
+            and not isinstance(self.store.get_calendar_event(action.target_event_id).start_at, datetime)
+        ):
+            # A new end or length for an all-day event still needs a start time.
             return "time"
-        if action.end_time_expression is not None and parse_end_time(action.end_time_expression, action.time_expression) is None:
-            return "time"
-        if action.action == "create_event" and action.end_time_expression is not None and action.time_expression is None:
-            return "time"
-        if action.duration_expression is not None:
-            if parse_duration(action.duration_expression) is None:
-                return "duration"
-            if action.time_expression is None:
-                if action.action == "create_event":
-                    return "time"
-                assert action.target_event_id is not None
-                if not isinstance(self.store.get_calendar_event(action.target_event_id).start_at, datetime):
-                    return "time"
         return None
 
-    @staticmethod
-    def _with_stated_periods(action: ContextualAction, user_message: Message) -> ContextualAction:
-        return action.model_copy(
-            update={
-                "time_expression": with_stated_period(action.time_expression, user_message.content),
-                "end_time_expression": with_stated_period(
-                    action.end_time_expression, user_message.content
-                ),
-            }
-        )
+    def _plausible_date(self, value: date) -> bool:
+        """A model-normalized date far outside the planning horizon is more likely a misread."""
+
+        earliest = self.reference_date - timedelta(days=366)
+        latest = self.reference_date + timedelta(days=731)
+        return earliest <= value <= latest
+
+    def _local_datetime(self, day: date, clock: str) -> datetime:
+        """Attach the configured timezone; zoneinfo picks the offset that date actually has."""
+
+        return datetime.combine(day, time.fromisoformat(clock), tzinfo=ZoneInfo(self.timezone))
+
+    def _end_at(self, start_at: datetime, action: ContextualAction) -> datetime | None:
+        if action.end_time is not None:
+            end_at = datetime.combine(
+                start_at.date(), time.fromisoformat(action.end_time), tzinfo=start_at.tzinfo
+            )
+            return end_at + timedelta(days=1) if end_at <= start_at else end_at
+        if action.duration_minutes is not None:
+            return start_at + timedelta(minutes=action.duration_minutes)
+        return None
 
     def _target_is_ungrounded(
         self, action: ContextualAction, user_message: Message, context_window: ProjectContextWindow
@@ -524,14 +510,6 @@ class ConversationRouterService:
             return False
         title = self.store.get_calendar_event(action.target_event_id).title
         return not (_distinctive_terms(user_message.content) & _distinctive_terms(title))
-
-    def _states_other_timezone(self, content: str) -> str | None:
-        """Notice a message about a timezone this workspace does not store."""
-
-        stated = stated_timezone(content)
-        if stated is None or stated[1] == self.timezone:
-            return None
-        return stated[0]
 
     def _save_item(
         self, user_message: Message, action: ContextualAction | None
@@ -853,14 +831,13 @@ class ConversationRouterService:
         start_at = existing.start_at
         end_at = existing.end_at
         all_day = existing.all_day
-        if action.time_expression is not None:
-            start_time = parse_time(action.time_expression)
-            if start_time is None:
-                raise ValueError("event start time is not valid")
-            start_at = datetime.combine(target_date, start_time, tzinfo=ZoneInfo(existing.timezone))
+        if action.start_time is not None:
+            start_at = datetime.combine(
+                target_date, time.fromisoformat(action.start_time), tzinfo=ZoneInfo(existing.timezone)
+            )
             all_day = False
             end_at = None
-        elif action.date_expression is not None:
+        elif action.date is not None:
             if isinstance(existing.start_at, datetime):
                 start_at = datetime.combine(
                     target_date, existing.start_at.timetz(), tzinfo=existing.start_at.tzinfo
@@ -869,22 +846,10 @@ class ConversationRouterService:
                     end_at = start_at + (existing.end_at - existing.start_at)
             else:
                 start_at = target_date
-        if action.end_time_expression is not None:
+        if action.end_time is not None or action.duration_minutes is not None:
             if not isinstance(start_at, datetime):
                 raise ValueError("event end time requires a start time")
-            end_time = parse_end_time(action.end_time_expression, action.time_expression)
-            if end_time is None:
-                raise ValueError("event end time is not valid")
-            end_at = datetime.combine(start_at.date(), end_time, tzinfo=ZoneInfo(existing.timezone))
-            if end_at <= start_at:
-                end_at += timedelta(days=1)
-        elif action.duration_expression is not None:
-            if not isinstance(start_at, datetime):
-                raise ValueError("event duration requires a start time")
-            duration = parse_duration(action.duration_expression)
-            if duration is None:
-                raise ValueError("event duration is not valid")
-            end_at = start_at + duration
+            end_at = self._end_at(start_at, action)
         return existing.model_copy(
             update={
                 "title": action.content if action.content is not None else existing.title,
@@ -895,12 +860,6 @@ class ConversationRouterService:
                 "updated_at": utc_now(),
             }
         )
-
-    def _resolved_date(self, expression: str | None) -> date:
-        resolution = resolve_relative_date(expression or "", self.reference_date, self.timezone)
-        if resolution.status != "resolved" or resolution.resolved_date is None:
-            raise ValueError("calendar date needs clarification")
-        return resolution.resolved_date
 
     @staticmethod
     def _event_date(event: CalendarEvent) -> date:

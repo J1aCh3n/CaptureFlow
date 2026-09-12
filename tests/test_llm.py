@@ -63,8 +63,8 @@ class OpenAICompatibleModelTests(unittest.TestCase):
         completions = RecordingCompletions(
             '{"intent":"calendar_create","action":{"action":"create_event",'
             '"content":"Algorithm & Code Review","description":"讨论前缀树与最小堆。",'
-            '"date_expression":"这周四","time_expression":"下午四点",'
-            '"end_time_expression":"下午五点","target_event_id":null,'
+            '"date":"2026-09-10","start_time":"16:00",'
+            '"end_time":"17:00","target_event_id":null,'
             '"evidence":[{"message_id":"message-1",'
             '"source_quote":"我这周四下午四点到五点有算法优化与代码审查会议。"}]},'
             '"project_changes":[],"clarification_question":null,'
@@ -99,7 +99,9 @@ class OpenAICompatibleModelTests(unittest.TestCase):
         self.assertIn("calendar_create", prompt)
         self.assertIn("tracker_change", prompt)
         self.assertIn("exactly one supplied candidate_events ID", prompt)
-        self.assertIn("duration_expression", prompt)
+        self.assertIn("duration_minutes", prompt)
+        self.assertIn("calendar table", prompt)
+        self.assertIn("never write a UTC offset", prompt)
         self.assertIn("mutually exclusive", prompt)
         self.assertIn("deferred_action", prompt)
         self.assertIn("never kind, content, or rationale", prompt)
@@ -118,8 +120,8 @@ class OpenAICompatibleModelTests(unittest.TestCase):
         completions = RecordingCompletions(
             '{"intent":"save_note","action":{"action":"save_note",'
             '"content":"系统架构与驱动集成会议：主要分析了驱动调试。",'
-            '"description":null,"date_expression":null,"time_expression":null,'
-            '"end_time_expression":null,"duration_expression":null,'
+            '"description":null,"date":null,"start_time":null,'
+            '"end_time":null,"duration_minutes":null,'
             '"target_event_id":null,"evidence":[{"message_id":"minutes-message",'
             f'"source_quote":"{content}"}}]}},"project_changes":[],'
             '"clarification_question":null,"pending_action":null,"reply":null}'
@@ -180,8 +182,8 @@ class OpenAICompatibleModelTests(unittest.TestCase):
     def test_contextual_router_rejects_an_event_outside_its_candidates(self) -> None:
         completions = RecordingCompletions(
             '{"intent":"calendar_update","action":{"action":"update_event",'
-            '"content":null,"description":null,"date_expression":null,'
-            '"time_expression":"14:00","end_time_expression":null,'
+            '"content":null,"description":null,"date":null,'
+            '"start_time":"14:00","end_time":null,'
             '"target_event_id":"foreign-event","evidence":[{"message_id":"message-1",'
             '"source_quote":"这个会议改到下午两点。"}]},"project_changes":[],'
             '"clarification_question":null,"pending_action":null,"reply":null}'

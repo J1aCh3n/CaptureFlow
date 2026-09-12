@@ -51,9 +51,9 @@ class ConversationRouterServiceTests(unittest.TestCase):
                         "action": "create_event",
                         "content": "算法优化与代码审查",
                         "description": "讨论前缀树与最小堆性能瓶颈。",
-                        "date_expression": "这周四",
-                        "time_expression": "下午四点",
-                        "end_time_expression": "下午五点",
+                        "date": "2026-09-10",
+                        "start_time": "16:00",
+                        "end_time": "17:00",
                         "target_event_id": None,
                         "evidence": [{"message_id": "event-turn", "source_quote": content}],
                     },
@@ -94,9 +94,9 @@ class ConversationRouterServiceTests(unittest.TestCase):
                         "action": "create_event",
                         "content": "架构评审",
                         "description": None,
-                        "date_expression": "周五",
-                        "time_expression": "下午两点",
-                        "end_time_expression": None,
+                        "date": "2026-09-11",
+                        "start_time": "14:00",
+                        "end_time": None,
                         "target_event_id": None,
                         "evidence": [{"message_id": "bare-weekday-turn", "source_quote": content}],
                     },
@@ -144,9 +144,9 @@ class ConversationRouterServiceTests(unittest.TestCase):
                         "action": "update_event",
                         "content": None,
                         "description": None,
-                        "date_expression": "这周四",
-                        "time_expression": "14:00",
-                        "end_time_expression": "15:00",
+                        "date": "2026-09-10",
+                        "start_time": "14:00",
+                        "end_time": "15:00",
                         "target_event_id": event.id,
                         "evidence": [
                             {"message_id": "existing-event-source", "source_quote": source.content},
@@ -169,7 +169,7 @@ class ConversationRouterServiceTests(unittest.TestCase):
         self.assertEqual(len(self.store.list_calendar_event_update_operations("correction-turn")), 1)
         self.assertEqual(len(model.calls), 1)
 
-    def test_calendar_update_resolves_chinese_time_and_explicit_duration(self) -> None:
+    def test_calendar_update_applies_a_new_start_and_duration(self) -> None:
         original = "今天开始进行A测，下午三点钟要准备好，四点有个相关的说明会"
         correction = "会议延期了，时间也被缩短到半个小时，现在晚上七点才开始"
         model = ScriptedContextualModel(
@@ -180,10 +180,10 @@ class ConversationRouterServiceTests(unittest.TestCase):
                         "action": "create_event",
                         "content": "相关的说明会",
                         "description": "今天开始进行A测，下午三点钟要准备好",
-                        "date_expression": "今天",
-                        "time_expression": "下午四点",
-                        "end_time_expression": None,
-                        "duration_expression": None,
+                        "date": "2026-09-10",
+                        "start_time": "16:00",
+                        "end_time": None,
+                        "duration_minutes": None,
                         "target_event_id": None,
                         "evidence": [{"message_id": "phase-10-3-create", "source_quote": original}],
                     },
@@ -194,10 +194,10 @@ class ConversationRouterServiceTests(unittest.TestCase):
                         "action": "update_event",
                         "content": None,
                         "description": None,
-                        "date_expression": None,
-                        "time_expression": "晚上七点",
-                        "end_time_expression": None,
-                        "duration_expression": "半个小时",
+                        "date": None,
+                        "start_time": "19:00",
+                        "end_time": None,
+                        "duration_minutes": 30,
                         "target_event_id": "phase-10-3-event",
                         "evidence": [
                             {"message_id": "phase-10-3-create", "source_quote": original},
@@ -245,7 +245,7 @@ class ConversationRouterServiceTests(unittest.TestCase):
             "intent": "calendar_update",
             "action": {
                 "action": "update_event",
-                "date_expression": "这周四",
+                "date": "2026-09-10",
                 "target_event_id": event_id,
                 "evidence": [{"message_id": message_id, "source_quote": content}],
             },
@@ -302,8 +302,8 @@ class ConversationRouterServiceTests(unittest.TestCase):
                     "intent": "calendar_update",
                     "action": {
                         "action": "update_event",
-                        "date_expression": "这周四",
-                        "time_expression": "下午三点",
+                        "date": "2026-09-10",
+                        "start_time": "15:00",
                         "target_event_id": event.id,
                         "evidence": [{"message_id": "fresh-named", "source_quote": content}],
                     },
@@ -358,8 +358,6 @@ class ConversationRouterServiceTests(unittest.TestCase):
                         "action": {
                             "action": "create_event",
                             "content": "评审会",
-                            "date_expression": "明天",
-                            "time_expression": "九点",
                             "evidence": [{"message_id": "pending-time-turn", "source_quote": content}],
                         },
                     }
@@ -440,7 +438,6 @@ class ConversationRouterServiceTests(unittest.TestCase):
                     "action": {
                         "action": "create_event",
                         "content": "会",
-                        "date_expression": "周末",
                         "evidence": [{"message_id": "first-question-turn", "source_quote": first}],
                     },
                 },
@@ -449,8 +446,6 @@ class ConversationRouterServiceTests(unittest.TestCase):
                     "action": {
                         "action": "create_event",
                         "content": "评审会",
-                        "date_expression": "下下周三",
-                        "time_expression": "下午三点",
                         "evidence": [{"message_id": "second-question-turn", "source_quote": second}],
                     },
                 },
@@ -468,63 +463,59 @@ class ConversationRouterServiceTests(unittest.TestCase):
         self.assertNotEqual(current.id, replaced.id)
         self.assertEqual(self.store.list_calendar_events(), [])
 
-    def test_a_period_the_model_split_away_from_the_hour_is_restored(self) -> None:
-        event = self._saved_event(
-            "split-period", "算法优化与代码审查会议", datetime.fromisoformat("2026-09-10T16:00:00-07:00")
-        )
-        content = "把这场会议改到明天下午两点到三点。"
-        model = ScriptedContextualModel(
-            [
-                {
-                    "intent": "calendar_update",
-                    "action": {
-                        "action": "update_event",
-                        "date_expression": "明天",
-                        "time_expression": "两点",
-                        "end_time_expression": "三点",
-                        "target_event_id": event.id,
-                        "evidence": [{"message_id": "split-period-turn", "source_quote": content}],
-                    },
-                }
-            ]
-        )
-
-        turn = ConversationRouterService(self.store, model, date(2026, 9, 9)).submit(
-            self.conversation.id, content, "split-period-turn"
-        )
-        updated = self.store.get_calendar_event(event.id)
-
-        self.assertEqual(turn.outcome, "calendar_update")
-        self.assertEqual(updated.start_at, datetime.fromisoformat("2026-09-10T14:00:00-07:00"))
-        self.assertEqual(updated.end_at, datetime.fromisoformat("2026-09-10T15:00:00-07:00"))
-
-    def test_a_range_end_without_a_period_uses_the_start_period(self) -> None:
-        content = "我明天下午四点到五点有一场算法优化与代码审查会议。"
+    def test_python_attaches_the_offset_a_date_actually_has(self) -> None:
+        content = "11月2日下午三点到四点有季度评审。"
         model = ScriptedContextualModel(
             [
                 {
                     "intent": "calendar_create",
                     "action": {
                         "action": "create_event",
-                        "content": "算法优化与代码审查会议",
-                        "date_expression": "明天",
-                        "time_expression": "下午四点",
-                        "end_time_expression": "五点",
-                        "evidence": [{"message_id": "bare-end-turn", "source_quote": content}],
+                        "content": "季度评审",
+                        "date": "2026-11-02",
+                        "start_time": "15:00",
+                        "end_time": "16:00",
+                        "evidence": [{"message_id": "after-dst-turn", "source_quote": content}],
+                    },
+                }
+            ]
+        )
+
+        ConversationRouterService(self.store, model, date(2026, 9, 12)).submit(
+            self.conversation.id, content, "after-dst-turn"
+        )
+        event = self.store.list_calendar_events()[0]
+
+        self.assertEqual(event.start_at, datetime.fromisoformat("2026-11-02T15:00:00-08:00"))
+        self.assertEqual(event.end_at, datetime.fromisoformat("2026-11-02T16:00:00-08:00"))
+
+    def test_an_update_reply_states_the_new_schedule(self) -> None:
+        event = self._saved_event(
+            "echo-meeting", "架构评审", datetime.fromisoformat("2026-09-10T14:00:00-07:00")
+        )
+        content = "架构评审改到下午四点到五点。"
+        model = ScriptedContextualModel(
+            [
+                {
+                    "intent": "calendar_update",
+                    "action": {
+                        "action": "update_event",
+                        "start_time": "16:00",
+                        "end_time": "17:00",
+                        "target_event_id": event.id,
+                        "evidence": [{"message_id": "echo-update", "source_quote": content}],
                     },
                 }
             ]
         )
 
         turn = ConversationRouterService(self.store, model, date(2026, 9, 9)).submit(
-            self.conversation.id, content, "bare-end-turn"
+            self.conversation.id, content, "echo-update"
         )
-        event = self.store.list_calendar_events()[0]
 
-        self.assertEqual(turn.outcome, "calendar_create")
-        self.assertEqual(event.start_at, datetime.fromisoformat("2026-09-10T16:00:00-07:00"))
-        self.assertEqual(event.end_at, datetime.fromisoformat("2026-09-10T17:00:00-07:00"))
-        self.assertIsNone(self.store.get_pending_clarification(self.conversation.id))
+        self.assertEqual(turn.outcome, "calendar_update")
+        self.assertIn("2026-09-10T16:00:00-07:00", turn.assistant_message.content)
+        self.assertIn("2026-09-10T17:00:00-07:00", turn.assistant_message.content)
 
     def test_calendar_end_time_can_cross_midnight(self) -> None:
         content = "明天 23:30 到 00:30 有发布检查。"
@@ -536,10 +527,10 @@ class ConversationRouterServiceTests(unittest.TestCase):
                         "action": "create_event",
                         "content": "发布检查",
                         "description": None,
-                        "date_expression": "明天",
-                        "time_expression": "23:30",
-                        "end_time_expression": "00:30",
-                        "duration_expression": None,
+                        "date": "2026-09-11",
+                        "start_time": "23:30",
+                        "end_time": "00:30",
+                        "duration_minutes": None,
                         "target_event_id": None,
                         "evidence": [{"message_id": "cross-midnight", "source_quote": content}],
                     },
@@ -555,7 +546,7 @@ class ConversationRouterServiceTests(unittest.TestCase):
         self.assertEqual(event.start_at, datetime.fromisoformat("2026-09-11T23:30:00-07:00"))
         self.assertEqual(event.end_at, datetime.fromisoformat("2026-09-12T00:30:00-07:00"))
 
-    def test_unsupported_calendar_time_or_duration_creates_a_clarification_without_a_write(self) -> None:
+    def test_a_malformed_normalized_time_is_refused_without_a_write(self) -> None:
         source = self.store.save_message(
             Message(
                 id="unsupported-event-source",
@@ -585,10 +576,10 @@ class ConversationRouterServiceTests(unittest.TestCase):
                         "action": "update_event",
                         "content": None,
                         "description": None,
-                        "date_expression": None,
-                        "time_expression": "晚上七点才开始",
-                        "end_time_expression": None,
-                        "duration_expression": "一会儿",
+                        "date": None,
+                        "start_time": "7 PM",
+                        "end_time": None,
+                        "duration_minutes": None,
                         "target_event_id": event.id,
                         "evidence": [{"message_id": "unsupported-correction", "source_quote": correction}],
                     },
@@ -600,24 +591,18 @@ class ConversationRouterServiceTests(unittest.TestCase):
             self.conversation.id, correction, "unsupported-correction"
         )
 
-        self.assertEqual(turn.outcome, "clarification_created")
-        self.assertEqual(
-            turn.assistant_message.content,
-            "What exact start time should I use for this local event?",
-        )
+        self.assertEqual(turn.outcome, "model_or_validation_failure")
         self.assertEqual(self.store.get_calendar_event(event.id), event)
         self.assertEqual(self.store.list_calendar_event_update_operations("unsupported-correction"), [])
-        pending = self.store.get_pending_clarification(self.conversation.id)
-        self.assertIsNotNone(pending)
-        self.assertEqual(pending.missing_field, "time")
+        self.assertIsNone(self.store.get_pending_clarification(self.conversation.id))
 
-    def test_unsupported_calendar_duration_creates_a_duration_clarification_without_a_write(self) -> None:
+    def test_a_new_length_for_an_all_day_event_asks_for_a_start_time(self) -> None:
         source = self.store.save_message(
             Message(
                 id="duration-event-source",
                 conversation_id=self.conversation.id,
                 role="user",
-                content="今天下午四点有工作流会议。",
+                content="今天有工作流会议。",
             )
         )
         event = self.store.save_calendar_event(
@@ -627,12 +612,12 @@ class ConversationRouterServiceTests(unittest.TestCase):
                 title="工作流会议",
                 source_message_id=source.id,
                 source_quote=source.content,
-                start_at=datetime.fromisoformat("2026-09-10T16:00:00-07:00"),
-                all_day=False,
+                start_at=date(2026, 9, 10),
+                all_day=True,
                 timezone="America/Vancouver",
             )
         )
-        correction = "这个会议改到晚上七点，持续一会儿。"
+        correction = "这个会议开半个小时。"
         model = ScriptedContextualModel(
             [
                 {
@@ -641,10 +626,10 @@ class ConversationRouterServiceTests(unittest.TestCase):
                         "action": "update_event",
                         "content": None,
                         "description": None,
-                        "date_expression": None,
-                        "time_expression": "晚上七点",
-                        "end_time_expression": None,
-                        "duration_expression": "一会儿",
+                        "date": None,
+                        "start_time": None,
+                        "end_time": None,
+                        "duration_minutes": 30,
                         "target_event_id": event.id,
                         "evidence": [{"message_id": "duration-correction", "source_quote": correction}],
                     },
@@ -659,12 +644,12 @@ class ConversationRouterServiceTests(unittest.TestCase):
         self.assertEqual(turn.outcome, "clarification_created")
         self.assertEqual(
             turn.assistant_message.content,
-            "How long should this local event last (for example, 30 minutes)?",
+            "What exact start time should I use for this local event?",
         )
         self.assertEqual(self.store.get_calendar_event(event.id), event)
         self.assertEqual(self.store.list_calendar_event_update_operations("duration-correction"), [])
         self.assertEqual(
-            self.store.get_pending_clarification(self.conversation.id).missing_field, "duration"
+            self.store.get_pending_clarification(self.conversation.id).missing_field, "time"
         )
 
     def test_prepared_duration_update_resumes_after_reopening_the_database(self) -> None:
@@ -780,8 +765,8 @@ class ConversationRouterServiceTests(unittest.TestCase):
                     "deferred_action": {
                         "action": "create_event",
                         "content": "提交修复",
-                        "date_expression": "下周三",
-                        "time_expression": "晚上八点",
+                        "date": "2026-09-16",
+                        "start_time": "20:00",
                         "evidence": [{"message_id": "compound-turn", "source_quote": content}],
                     },
                     "follow_up_question": "Should I also add a local calendar event for 下周三晚上八点?",
@@ -791,8 +776,8 @@ class ConversationRouterServiceTests(unittest.TestCase):
                     "action": {
                         "action": "create_event",
                         "content": "提交修复",
-                        "date_expression": "下周三",
-                        "time_expression": "晚上八点",
+                        "date": "2026-09-16",
+                        "start_time": "20:00",
                         "evidence": [
                             {"message_id": "compound-turn", "source_quote": content},
                             {
@@ -815,7 +800,7 @@ class ConversationRouterServiceTests(unittest.TestCase):
         self.assertEqual(self.store.list_calendar_events(), [])
         self.assertIsNotNone(pending)
         self.assertEqual(pending.missing_field, "follow_up")
-        self.assertEqual(pending.original_action["date_expression"], "下周三")
+        self.assertEqual(pending.original_action["date"], "2026-09-16")
         self.assertIn(
             "Should I also add a local calendar event for 下周三晚上八点?",
             first.assistant_message.content,
@@ -985,8 +970,8 @@ class ConversationRouterServiceTests(unittest.TestCase):
                         "action": "create_event",
                         "content": "需求评审",
                         "description": "在 A301 和张伟开会，讨论驱动排期",
-                        "date_expression": "明天",
-                        "time_expression": "下午三点",
+                        "date": "2026-09-12",
+                        "start_time": "15:00",
                         "evidence": [{"message_id": "paraphrase-turn", "source_quote": content}],
                     },
                 },
@@ -996,8 +981,8 @@ class ConversationRouterServiceTests(unittest.TestCase):
                         "action": "create_event",
                         "content": "需求评审",
                         "description": "在 A301 和张伟开需求评审，讨论驱动排期",
-                        "date_expression": "明天",
-                        "time_expression": "下午三点",
+                        "date": "2026-09-12",
+                        "start_time": "15:00",
                         "evidence": [{"message_id": "quoted-turn", "source_quote": content}],
                     },
                 },
@@ -1055,8 +1040,9 @@ class ConversationRouterServiceTests(unittest.TestCase):
                     "action": {
                         "action": "create_event",
                         "content": "团队例会",
-                        "date_expression": "每周一",
-                        "time_expression": "下午三点",
+                        "date": "2026-09-14",
+                        "recurring": True,
+                        "start_time": "15:00",
                         "evidence": [{"message_id": "recurring-turn", "source_quote": content}],
                     },
                 }
@@ -1191,8 +1177,8 @@ class ConversationRouterServiceTests(unittest.TestCase):
                     "deferred_action": {
                         "action": "create_event",
                         "content": "提交修复",
-                        "date_expression": "下周三",
-                        "time_expression": "晚上八点",
+                        "date": "2026-09-16",
+                        "start_time": "20:00",
                         "evidence": [{"message_id": "reply-only-turn", "source_quote": content}],
                     },
                     "follow_up_question": "Should I also add that deadline?",
@@ -1288,8 +1274,9 @@ class ConversationRouterServiceTests(unittest.TestCase):
                     "action": {
                         "action": "create_event",
                         "content": "电话会",
-                        "date_expression": "明天",
-                        "time_expression": "上午九点",
+                        "date": "2026-09-12",
+                        "timezone": "America/New_York",
+                        "start_time": "09:00",
                         "evidence": [{"message_id": "foreign-timezone-turn", "source_quote": content}],
                     },
                 }
@@ -1316,8 +1303,9 @@ class ConversationRouterServiceTests(unittest.TestCase):
                     "action": {
                         "action": "create_event",
                         "content": "电话会",
-                        "date_expression": "明天",
-                        "time_expression": "上午九点",
+                        "date": "2026-09-12",
+                        "timezone": "America/Vancouver",
+                        "start_time": "09:00",
                         "evidence": [{"message_id": "local-timezone-turn", "source_quote": content}],
                     },
                 }
@@ -1567,9 +1555,9 @@ class ConversationRouterServiceTests(unittest.TestCase):
                         "action": "update_event",
                         "content": None,
                         "description": None,
-                        "date_expression": None,
-                        "time_expression": "下午两点",
-                        "end_time_expression": None,
+                        "date": None,
+                        "start_time": "14:00",
+                        "end_time": None,
                         "target_event_id": "invented-event",
                         "evidence": [{"message_id": "invalid-target-turn", "source_quote": content}],
                     },
@@ -1584,7 +1572,7 @@ class ConversationRouterServiceTests(unittest.TestCase):
         self.assertEqual(turn.outcome, "model_or_validation_failure")
         self.assertEqual(self.store.list_calendar_events(), [])
 
-    def test_unresolved_update_date_creates_a_pending_clarification_without_a_write(self) -> None:
+    def test_an_implausible_update_date_asks_for_the_date(self) -> None:
         source = self.store.save_message(
             Message(
                 id="ambiguous-event-source",
@@ -1615,9 +1603,9 @@ class ConversationRouterServiceTests(unittest.TestCase):
                         "action": "update_event",
                         "content": None,
                         "description": None,
-                        "date_expression": "周三",
-                        "time_expression": None,
-                        "end_time_expression": None,
+                        "date": "2030-09-10",
+                        "start_time": None,
+                        "end_time": None,
                         "target_event_id": event.id,
                         "evidence": [
                             {
@@ -1639,7 +1627,9 @@ class ConversationRouterServiceTests(unittest.TestCase):
         self.assertEqual(
             self.store.list_calendar_event_update_operations("ambiguous-correction-turn"), []
         )
-        self.assertIsNotNone(self.store.get_pending_clarification(self.conversation.id))
+        self.assertEqual(
+            self.store.get_pending_clarification(self.conversation.id).missing_field, "date"
+        )
 
     def test_unresolved_event_creation_clarifies_then_persists_all_message_sources(self) -> None:
         original = "与 Daohui 碰头，讨论 UR5 交接和 Vention 工装板尺寸。"
@@ -1652,9 +1642,8 @@ class ConversationRouterServiceTests(unittest.TestCase):
                         "action": "create_event",
                         "content": "与 Daohui 碰头",
                         "description": "讨论 UR5 交接和 Vention 工装板尺寸。",
-                        "date_expression": "周四",
-                        "time_expression": None,
-                        "end_time_expression": None,
+                        "start_time": None,
+                        "end_time": None,
                         "target_event_id": None,
                         "evidence": [{"message_id": "initial-event-turn", "source_quote": original}],
                     },
@@ -1665,9 +1654,9 @@ class ConversationRouterServiceTests(unittest.TestCase):
                         "action": "create_event",
                         "content": "与 Daohui 碰头",
                         "description": "讨论 UR5 交接和 Vention 工装板尺寸。",
-                        "date_expression": "2026-09-11",
-                        "time_expression": "下午两点",
-                        "end_time_expression": None,
+                        "date": "2026-09-11",
+                        "start_time": "14:00",
+                        "end_time": None,
                         "target_event_id": None,
                         "evidence": [
                             {"message_id": "initial-event-turn", "source_quote": original},
@@ -1686,7 +1675,7 @@ class ConversationRouterServiceTests(unittest.TestCase):
         self.assertEqual(self.store.list_tool_operations("initial-event-turn"), [])
         pending = self.store.get_pending_clarification(self.conversation.id)
         self.assertIsNotNone(pending)
-        self.assertEqual(pending.original_action["date_expression"], "周四")
+        self.assertEqual(pending.missing_field, "date")
 
         created = service.submit(self.conversation.id, answer, "date-answer-turn")
 

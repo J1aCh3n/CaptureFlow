@@ -110,9 +110,9 @@ class ModelTests(unittest.TestCase):
             intent="calendar_update",
             action=ContextualAction(
                 action="update_event",
-                date_expression="周四",
-                time_expression="14:00",
-                end_time_expression="15:00",
+                date="2026-09-10",
+                start_time="14:00",
+                end_time="15:00",
                 target_event_id="algorithm-review-event",
                 evidence=[
                     EvidenceReference(
@@ -136,7 +136,7 @@ class ModelTests(unittest.TestCase):
                 intent="calendar_update",
                 action=ContextualAction(
                     action="update_event",
-                    time_expression="14:00",
+                    start_time="14:00",
                     evidence=[
                         EvidenceReference(
                             message_id="correction-message",
@@ -151,22 +151,51 @@ class ModelTests(unittest.TestCase):
             ContextualAction(
                 action="create_event",
                 content="代码审查",
-                date_expression="这周四",
+                date="2026-09-10",
                 evidence=[
                     EvidenceReference(message_id="message-1", source_quote="代码审查"),
                     EvidenceReference(message_id="message-1", source_quote="这周四"),
                 ],
             )
 
+    def test_normalized_calendar_fields_are_checked_structurally(self) -> None:
+        evidence = [EvidenceReference(message_id="message-1", source_quote="评审会")]
+        created = ContextualAction(
+            action="create_event",
+            content="评审会",
+            date="2026-09-13",
+            start_time="15:00",
+            end_time="16:00",
+            evidence=evidence,
+        )
+        undated = ContextualAction(action="create_event", content="评审会", evidence=evidence)
+
+        self.assertEqual((created.date, created.start_time, created.end_time), ("2026-09-13", "15:00", "16:00"))
+        self.assertIsNone(undated.date)
+        for invalid in (
+            {"date": "2026-02-30"},
+            {"date": "13 September"},
+            {"date": "2026-09-13", "start_time": "3 PM"},
+            {"date": "2026-09-13", "start_time": "24:00"},
+            {"start_time": "15:00"},
+            {"date": "2026-09-13", "end_time": "16:00"},
+            {"date": "2026-09-13", "start_time": "15:00", "duration_minutes": 0},
+            {"date": "2026-09-13", "start_time": "15:00", "duration_minutes": 721},
+        ):
+            with self.subTest(invalid=invalid), self.assertRaises(ValidationError):
+                ContextualAction(action="create_event", content="评审会", evidence=evidence, **invalid)
+        with self.assertRaises(ValidationError):
+            ContextualAction(action="save_note", content="纪要", recurring=True, evidence=evidence)
+
     def test_contextual_action_rejects_an_end_time_and_duration_together(self) -> None:
         with self.assertRaises(ValidationError):
             ContextualAction(
                 action="create_event",
                 content="代码审查",
-                date_expression="这周四",
-                time_expression="下午四点",
-                end_time_expression="下午五点",
-                duration_expression="一小时",
+                date="2026-09-10",
+                start_time="16:00",
+                end_time="17:00",
+                duration_minutes=60,
                 evidence=[EvidenceReference(message_id="message-1", source_quote="代码审查")],
             )
 
@@ -176,7 +205,7 @@ class ModelTests(unittest.TestCase):
             clarification_question="Which existing meeting should I update?",
             pending_action=ContextualAction(
                 action="update_event",
-                time_expression="14:00",
+                start_time="14:00",
                 evidence=[
                     EvidenceReference(
                         message_id="correction-message",
@@ -218,7 +247,7 @@ class ModelTests(unittest.TestCase):
             ContextualAction(
                 action="delete_event",
                 target_event_id="expired-meeting-event",
-                time_expression="下午四点",
+                start_time="16:00",
                 evidence=[
                     EvidenceReference(message_id="delete-message", source_quote="删除过期会议")
                 ],
@@ -275,8 +304,8 @@ class ModelTests(unittest.TestCase):
             deferred_action=ContextualAction(
                 action="create_event",
                 content="提交修复",
-                date_expression="下周三",
-                time_expression="晚上八点",
+                date="2026-09-16",
+                start_time="20:00",
                 evidence=note_evidence,
             ),
             follow_up_question="Should I also add that deadline to the local calendar?",
@@ -292,7 +321,7 @@ class ModelTests(unittest.TestCase):
                 deferred_action=ContextualAction(
                     action="create_event",
                     content="提交修复",
-                    date_expression="下周三",
+                    date="2026-09-16",
                     evidence=note_evidence,
                 ),
             )
