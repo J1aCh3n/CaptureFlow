@@ -12,11 +12,14 @@ project. Project deletion removes project tracker state and audit links, but
 retains its conversations, messages, calendar events, ideas, and notes as
 unassigned local records.
 
-It is deliberately not a general chatbot. The configured model can propose a
-small, typed tracker change, but Python validates the source quote, project,
-candidate target, lifecycle, duplicate/conflict, and credential rules before
-any SQLite write. It has no external calendar synchronization, email,
-meetings, vector retrieval, or access to external services.
+It is deliberately not a general chatbot. On each ordinary chat turn one model
+call reads the message in its bounded conversation context and returns a typed
+decision — a local calendar event, idea, note, tracker change, answer,
+clarification, or short reply. Python validates the source quote, candidate
+target, lifecycle, duplicate/conflict, and credential rules before any SQLite
+write. The working principle is: understanding belongs to the model;
+authorization stays in Python. It has no external calendar synchronization,
+email, meetings, vector retrieval, or access to external services.
 
 ## Current status
 
@@ -51,10 +54,10 @@ questions may use superseded records and event history. Answer source cards are
 persisted locally. The frozen scripted retrieval fixture reports Recall@6 1.0;
 it is not evidence of general semantic retrieval or live-model answer quality.
 
-The local deterministic/scripted suite passes 151 tests. This verifies the
+The local deterministic/scripted suite passes 270 tests. This verifies the
 database, retrieval, and model-write boundaries. A frozen live Phase 8 run
-against `gpt-5.6-terra` passed its 12 runner assertions on 2026-09-08; its
-reproducibility metadata and limitations are recorded in
+against `gpt-5.6-terra` passed its 12 runner assertions on 2026-09-08 and again
+on 2026-09-12; its reproducibility metadata and limitations are recorded in
 [phase-8-live-evidence.md](docs/phase-8-live-evidence.md). One run is
 demonstration evidence, not a reliability or live-model-quality benchmark.
 
@@ -70,7 +73,7 @@ The completed original sequence was:
 3. Phase 3: cross-conversation memory and a recorded 12/12 fixed acceptance run.
 
 The optional original Phase 4 evaluation is not a prerequisite for V2. V2
-Phases 1–9 are implemented; Phases 1–7 remain regression requirements, and
+Phases 1–11 are implemented; Phases 1–7 remain regression requirements, and
 Phase 8 has both frozen scripted coverage and one recorded live acceptance
 demonstration. Phase 9 adds deterministic, source-backed recall of
 CaptureFlow's own active local Calendar and Ideas & Notes records across
@@ -78,26 +81,55 @@ conversations. Phase 9.1 optionally synthesizes a bounded answer from those
 selected records when a model is configured, while preserving the Phase 9
 deterministic reply when it is not. Neither path creates a local target record.
 
+Phase 10 replaces the default chat path with a contextual router: one model call
+per turn sees the bounded recent conversation and a small candidate list, so a
+follow-up such as `把这场会议改到明天下午两点到三点` can update the event the
+conversation created. It adds audited calendar updates and deletes with Undo,
+tracker deadlines shown on the Calendar without becoming events, one action per
+turn with a follow-up question for a second stated item, finished meetings kept
+as notes, and a clarification when an update or delete names no event the
+conversation identified. The frozen Phase 10 fixture passed 16 of 16 on
+2026-09-09 and again after these changes; see
+[phase-10-live-evidence.md](docs/phase-10-live-evidence.md) and
+[phase-10.8-frozen-acceptance-rerun.md](docs/phase-10.8-frozen-acceptance-rerun.md).
+
+Phase 11 moves date and time understanding to the model. Calendar actions and
+tracker deadlines arrive as normalized `date`, `start_time`, `end_time`,
+`duration_minutes`, `timezone`, and `recurring` fields, resolved against a
+calendar table and the current local date and time supplied on every turn.
+Python attaches the configured timezone, checks structure and plausibility, and
+applies policy; it no longer interprets date or time wording. A stated foreign
+timezone or a repeating schedule is clarified rather than stored, because
+neither is supported. See
+[phase-11-model-normalized-time-design.md](docs/phase-11-model-normalized-time-design.md)
+and [phase-11-evidence.md](docs/phase-11-evidence.md).
+
 ## V2 local chat behavior
 
 With `CAPTUREFLOW_API_KEY` and `CAPTUREFLOW_MODEL` configured, the default Chat
-page sends a bounded routing request to the configured model. The model may
-only propose a local event, idea, note, clarification, short reply, or (for an
-assigned project conversation) a bounded tracker update. For project chat, it
-sees only the bounded recent message window and a finite project-scoped
-candidate-record list. Python validates the proposal and performs SQLite
-writes. The model never writes the database directly.
+page sends each ordinary message to the contextual router. A deterministic
+credential check runs first and blocks the turn without a model call. The model
+then returns one `ConversationDecision`: `calendar_create`, `calendar_update`,
+`calendar_delete`, `save_idea`, `save_note`, `tracker_change` (for an assigned
+project conversation), `local_answer`, `project_answer`, `clarify`, or
+`reply_only`. It sees only the bounded recent message window (at most eight
+messages and 12,000 characters), at most three candidate events, saved items,
+and project records, the reference date and time, and any pending
+clarification. Python validates the decision, cites the source message, and
+performs SQLite writes. The model never writes the database directly.
 
-Before ordinary model routing, a narrow local-context query such as
-`我明天的会议要做什么？` or `When is the calendar meeting?` searches only active
-Calendar and Note/Idea records in the local workspace. With model configuration,
-one bounded Chat Completions call may summarize only those selected records;
-Python validates cited IDs and renders exact event date/time from SQLite.
-Any preparation suggestion is visibly labeled as an inference, never a stored
-task. If configuration, the model request, or output validation fails, the
-deterministic Phase 9 source listing remains available. This lookup works in an
-unassigned conversation. Calendar/Note recall is not external-calendar access,
-general chat memory, or semantic search.
+Known limits: a bare hour such as `明天十点` is resolved to 10:00 without a
+question, and the reply states it; a message that only mentions an event by name
+does not count as identifying it for an update; range questions such as
+`我下周有什么安排？` are not answered.
+
+A local-context question such as `我明天的会议要做什么？` or
+`When is the calendar meeting?` searches only active Calendar and Note/Idea
+records in the local workspace. Python validates cited IDs and renders exact
+event date/time from SQLite. Any preparation suggestion is visibly labeled as an
+inference, never a stored task. This lookup works in an unassigned conversation.
+Calendar/Note recall is not external-calendar access, general chat memory, or
+semantic search.
 
 ## Phase 8 acceptance and demo
 
@@ -128,6 +160,12 @@ python scripts/run_phase8_live_acceptance.py --output-dir runs/phase8-live-YYYYM
 Each run costs model tokens. The recorded 2026-09-08 trace is local and ignored
 by Git; the committed evidence summary intentionally excludes credentials and
 raw model output.
+
+The frozen Phase 10 contextual-router acceptance runs the same way:
+
+```powershell
+python scripts/run_phase10_live_acceptance.py --output-dir runs/phase10-live-YYYYMMDD
+```
 
 These explicit commands remain available without any model call:
 
