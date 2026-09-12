@@ -96,21 +96,56 @@ def parse_duration(expression: str) -> timedelta | None:
     """Resolve one exact, positive, bounded duration without model arithmetic."""
 
     value = "".join(expression.strip().casefold().split())
-    minutes = {"半小时": 30, "半个小时": 30, "一小时": 60, "halfanhour": 30, "halfhour": 30}.get(value)
+    minutes = _fixed_duration(value)
     if minutes is None:
-        chinese_match = re.fullmatch(r"([0-9]+)分钟", value)
-        english_match = re.fullmatch(r"([0-9]+)(minutes?|hours?)", value)
-        chinese_hours_match = re.fullmatch(r"([0-9]+)小时", value)
-        if chinese_match is not None:
-            minutes = int(chinese_match.group(1))
-        elif chinese_hours_match is not None:
-            minutes = int(chinese_hours_match.group(1)) * 60
-        elif english_match is not None:
-            amount, unit = english_match.groups()
-            minutes = int(amount) * (60 if unit.startswith("hour") else 1)
+        minutes = _chinese_duration(value)
+    if minutes is None:
+        minutes = _english_duration(value)
     if minutes is None or not 0 < minutes <= _MAX_DURATION_MINUTES:
         return None
     return timedelta(minutes=minutes)
+
+
+def _fixed_duration(value: str) -> float | None:
+    return {
+        "halfanhour": 30.0,
+        "halfhour": 30.0,
+        "ahalfhour": 30.0,
+        "anhourandahalf": 90.0,
+        "onehourandahalf": 90.0,
+    }.get(value)
+
+
+def _chinese_duration(value: str) -> float | None:
+    """Resolve 半小时, 一个小时, 一个半小时, 2小时, 1.5小时, and N分钟."""
+
+    if minutes_match := re.fullmatch(r"([0-9]+)分钟", value):
+        return float(minutes_match.group(1))
+    match = re.fullmatch(
+        r"(半|[0-9]+(?:\.5)?|[一二三四五六七八九十两]+)个?(半)?(?:小时|钟头)", value
+    )
+    if match is None:
+        return None
+    count_text, half = match.groups()
+    if count_text == "半":
+        return None if half else 30.0
+    if count_text[0].isdigit():
+        hours = float(count_text)
+    else:
+        whole = _CHINESE_CLOCK_HOURS.get(count_text)
+        if whole is None:
+            return None
+        hours = float(whole)
+    return (hours + 0.5 if half else hours) * 60
+
+
+def _english_duration(value: str) -> float | None:
+    match = re.fullmatch(r"(an?|[0-9]+(?:\.5)?)(hours?|minutes?|mins?)", value)
+    if match is None:
+        return None
+    amount, unit = match.groups()
+    count = 1.0 if amount in {"a", "an"} else float(amount)
+    return count * (60 if unit.startswith("hour") else 1)
 
 
 def stated_timezone(text: str) -> tuple[str, str] | None:

@@ -23,6 +23,33 @@ _WEEKDAYS = {
     "sunday": 6,
 }
 
+_MONTH_NAMES = {
+    "january": 1,
+    "jan": 1,
+    "february": 2,
+    "feb": 2,
+    "march": 3,
+    "mar": 3,
+    "april": 4,
+    "apr": 4,
+    "may": 5,
+    "june": 6,
+    "jun": 6,
+    "july": 7,
+    "jul": 7,
+    "august": 8,
+    "aug": 8,
+    "september": 9,
+    "sept": 9,
+    "sep": 9,
+    "october": 10,
+    "oct": 10,
+    "november": 11,
+    "nov": 11,
+    "december": 12,
+    "dec": 12,
+}
+
 _CHINESE_WEEKDAYS = {
     "一": 0,
     "二": 1,
@@ -90,7 +117,7 @@ def resolve_relative_date(expression: str, reference_date: date, timezone: str) 
             resolved_date=reference_date + timedelta(days=3),
             explanation="根据提供的参考日期解析。",
         )
-    if chinese_date := _parse_chinese_date(expression.strip()):
+    if chinese_date := _parse_chinese_date(expression.strip(), reference_date):
         candidate, stated_weekday = chinese_date
         if stated_weekday is not None and candidate.weekday() != stated_weekday:
             return DateResolution(
@@ -117,8 +144,8 @@ def resolve_relative_date(expression: str, reference_date: date, timezone: str) 
             status="resolved",
             resolved_date=month_day,
             explanation=(
-                "Resolved M/D using the reference year, or the following year when that date "
-                "has already passed."
+                "Resolved a month and day using the reference year, or the following year when "
+                "that date has already passed."
             ),
         )
     if match := re.fullmatch(r"next (monday|tuesday|wednesday|thursday|friday|saturday|sunday)", normalized):
@@ -208,34 +235,62 @@ def _parse_iso_date(value: str) -> date | None:
 
 
 def _parse_month_day(value: str, reference_date: date) -> date | None:
-    match = re.fullmatch(r"(\d{1,2})/(\d{1,2})", value)
-    if not match:
+    month_day = _numeric_month_day(value) or _named_month_day(value)
+    if month_day is None:
         return None
-    month, day = (int(part) for part in match.groups())
-    try:
-        candidate = date(reference_date.year, month, day)
-    except ValueError:
+    month, day = month_day
+    candidate = _calendar_date(reference_date.year, month, day)
+    if candidate is None:
         return None
     if candidate < reference_date:
-        try:
-            return date(reference_date.year + 1, month, day)
-        except ValueError:
-            return None
+        return _calendar_date(reference_date.year + 1, month, day)
     return candidate
 
 
-def _parse_chinese_date(value: str) -> tuple[date, int | None] | None:
+def _numeric_month_day(value: str) -> tuple[int, int] | None:
+    match = re.fullmatch(r"(\d{1,2})/(\d{1,2})", value)
+    if match is None:
+        return None
+    return int(match.group(1)), int(match.group(2))
+
+
+def _named_month_day(value: str) -> tuple[int, int] | None:
+    names = "|".join(_MONTH_NAMES)
+    match = re.fullmatch(rf"({names})\.?\s+(\d{{1,2}})(?:st|nd|rd|th)?", value) or re.fullmatch(
+        rf"(\d{{1,2}})(?:st|nd|rd|th)?\s+(?:of\s+)?({names})\.?", value
+    )
+    if match is None:
+        return None
+    first, second = match.groups()
+    month_text, day_text = (first, second) if first in _MONTH_NAMES else (second, first)
+    return _MONTH_NAMES[month_text], int(day_text)
+
+
+def _parse_chinese_date(value: str, reference_date: date) -> tuple[date, int | None] | None:
     match = re.fullmatch(
-        r"(\d{4})年(\d{1,2})月(\d{1,2})日"
+        r"(?:(\d{4})年)?(\d{1,2})月(\d{1,2})[日号]"
         r"(?:\s*[（(](?:周|星期|礼拜)([一二三四五六日天])[）)])?",
         value,
     )
     if match is None:
         return None
     year, month, day, weekday_text = match.groups()
-    try:
-        candidate = date(int(year), int(month), int(day))
-    except ValueError:
+    candidate = _calendar_date(
+        reference_date.year if year is None else int(year), int(month), int(day)
+    )
+    if candidate is None:
         return None
+    if year is None and candidate < reference_date:
+        # A bare 9月20日 names the next time that day comes around.
+        candidate = _calendar_date(reference_date.year + 1, int(month), int(day))
+        if candidate is None:
+            return None
     stated_weekday = None if weekday_text is None else _CHINESE_WEEKDAYS[weekday_text]
     return candidate, stated_weekday
+
+
+def _calendar_date(year: int, month: int, day: int) -> date | None:
+    try:
+        return date(year, month, day)
+    except ValueError:
+        return None

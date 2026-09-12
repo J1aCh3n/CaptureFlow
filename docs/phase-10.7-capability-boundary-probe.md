@@ -131,12 +131,12 @@ write nothing. They are missing vocabulary, not defects.
 
 | Gap | Probe | Behavior |
 | --- | --- | --- |
-| Bare Chinese month-day | `9月20日上午十点有体检` | asks for an exact date; only `2026年9月20日`, `2026-09-20`, or `9/20` resolve |
+| ~~Bare Chinese month-day~~ | `9月20日上午十点有体检` | **fixed**: `9月20日`, `9月20号`, and English month names now resolve to the next occurrence |
 | Week arithmetic | `下下周三下午三点有架构评审会` | asks for an exact date |
 | Fuzzy horizon | `月底之前要把报告交上去` | task created, deadline explicitly not resolved |
 | Recurrence | `每周一下午三点有团队例会` | asks for an exact date; never says recurrence is unsupported |
 | Bare hour | `提醒我明天十点吃药` | task created, deadline dropped (`十点` needs 上午/下午/晚上/中午/凌晨) |
-| Duration words | `开一个半小时`, `for an hour` | asks for a duration; only 半小时, N分钟, N小时, N minutes/hours resolve |
+| ~~Duration words~~ | `开一个半小时`, `for an hour` | **fixed**: 个小时, 个半小时, 钟头, decimals, `an hour`, and `an hour and a half` now resolve |
 | Relative shift | `把站会提前一小时` | asks for an exact start time; no arithmetic on an existing time |
 | Range query | `我下周有什么安排？` | `insufficient_context`; recall needs an expression resolving to one date |
 | Bulk action | `把所有会议都删掉` | asks which single event |
@@ -167,8 +167,11 @@ the recall path.
    silently disables update and delete in any realistic workspace.
 2. Refuse or clarify a stated timezone (bug 2).
 3. Widen the credential guard to Chinese and bare `token` (bug 3).
-4. Extend the date vocabulary with `9月20日` / `9月20号`, and the duration
-   vocabulary with `一个小时` / `一个半小时` / `两小时` / `an hour`.
+4. ~~Extend the date vocabulary with `9月20日` / `9月20号`, and the duration
+   vocabulary with `一个小时` / `一个半小时` / `两小时` / `an hour`.~~ Done in
+   `feat: accept bare month-day dates and common duration wordings`. Chinese
+   numeral dates such as `九月二十日`, week arithmetic such as `下下周三`, and
+   fuzzy horizons such as `月底` remain unsupported on purpose.
 5. Say "recurring events are not supported" instead of asking for a date.
 6. Decide whether a bare `十点` should clarify rather than drop the deadline.
 7. Fix the clarification `missing_field` metadata (bug 5) and decide whether

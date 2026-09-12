@@ -67,10 +67,19 @@ class TimeToolTests(unittest.TestCase):
         cases = {
             "半个小时": 30,
             "半小时": 30,
+            "半个钟头": 30,
             "30分钟": 30,
             "一小时": 60,
+            "一个小时": 60,
+            "一个半小时": 90,
+            "1.5小时": 90,
+            "两小时": 120,
+            "两个小时": 120,
             "2小时": 120,
             "45 minutes": 45,
+            "an hour": 60,
+            "an hour and a half": 90,
+            "half an hour": 30,
         }
 
         for expression, expected_minutes in cases.items():
@@ -78,6 +87,6 @@ class TimeToolTests(unittest.TestCase):
                 self.assertEqual(parse_duration(expression), timedelta(minutes=expected_minutes))
 
     def test_zero_negative_and_unbounded_durations_are_rejected(self) -> None:
-        for expression in ("0分钟", "-30分钟", "13小时", "随便一会儿"):
+        for expression in ("0分钟", "-30分钟", "13小时", "随便一会儿", "半个半小时", "一二小时"):
             with self.subTest(expression=expression):
                 self.assertIsNone(parse_duration(expression))

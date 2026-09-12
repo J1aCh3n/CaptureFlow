@@ -74,6 +74,44 @@ class DateToolTests(unittest.TestCase):
             date(2026, 9, 12),
         )
 
+    def test_chinese_month_day_without_a_year_uses_the_next_occurrence(self) -> None:
+        reference = date(2026, 9, 11)
+        cases = {
+            "9月20日": date(2026, 9, 20),
+            "9月20号": date(2026, 9, 20),
+            "12月1日": date(2026, 12, 1),
+            "3月1日": date(2027, 3, 1),
+        }
+
+        for expression, expected in cases.items():
+            with self.subTest(expression=expression):
+                result = resolve_relative_date(expression, reference, "America/Vancouver")
+                self.assertEqual(result.status, "resolved")
+                self.assertEqual(result.resolved_date, expected)
+
+    def test_english_month_names_resolve_like_numeric_month_day(self) -> None:
+        reference = date(2026, 9, 11)
+        cases = {
+            "September 20": date(2026, 9, 20),
+            "sept 20": date(2026, 9, 20),
+            "20 September": date(2026, 9, 20),
+            "Dec 1": date(2026, 12, 1),
+            "March 1": date(2027, 3, 1),
+        }
+
+        for expression, expected in cases.items():
+            with self.subTest(expression=expression):
+                result = resolve_relative_date(expression, reference, "America/Vancouver")
+                self.assertEqual(result.status, "resolved")
+                self.assertEqual(result.resolved_date, expected)
+
+    def test_impossible_and_unsupported_dates_stay_unresolved(self) -> None:
+        for expression in ("2月30日", "13月1日", "下下周三", "月底", "九月二十日"):
+            with self.subTest(expression=expression):
+                result = resolve_relative_date(expression, date(2026, 9, 11), "America/Vancouver")
+                self.assertNotEqual(result.status, "resolved")
+                self.assertIsNone(result.resolved_date)
+
     def test_chinese_full_date_with_matching_weekday_is_resolved(self) -> None:
         result = resolve_relative_date(
             "2026年9月11日 (周五)", date(2026, 9, 9), "America/Vancouver"
