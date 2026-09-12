@@ -1,6 +1,6 @@
 import tempfile
 import unittest
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timezone
 from pathlib import Path
 
 from captureflow.conversation_router_service import ConversationRouterService
@@ -81,6 +81,7 @@ class ConversationRouterServiceTests(unittest.TestCase):
         self.assertEqual(self.store.list_project_records(self.project.id), [])
         self.assertEqual(model.calls[0]["candidate_events"], [])
         self.assertEqual(model.calls[0]["calendar"][7]["date"], "2026-09-09")
+        self.assertIsNone(model.calls[0]["reference_time"])
         self.assertEqual(replay.model_calls, 0)
         self.assertEqual(len(model.calls), 1)
 
@@ -492,6 +493,34 @@ class ConversationRouterServiceTests(unittest.TestCase):
         self.assertEqual(current.source_message_id, "second-question-turn")
         self.assertNotEqual(current.id, replaced.id)
         self.assertEqual(self.store.list_calendar_events(), [])
+
+    def test_the_current_local_time_reaches_the_model(self) -> None:
+        content = "半小时后开个短会。"
+        model = ScriptedContextualModel(
+            [
+                {
+                    "intent": "calendar_create",
+                    "action": {
+                        "action": "create_event",
+                        "content": "短会",
+                        "date": "2026-09-12",
+                        "start_time": "14:40",
+                        "evidence": [{"message_id": "relative-now-turn", "source_quote": content}],
+                    },
+                }
+            ]
+        )
+
+        ConversationRouterService(
+            self.store, model, date(2026, 9, 12), reference_time=time(14, 10, 37)
+        ).submit(self.conversation.id, content, "relative-now-turn")
+
+        self.assertEqual(model.calls[0]["reference_time"], "14:10")
+        self.assertEqual(model.calls[0]["reference_date"], "2026-09-12")
+        self.assertEqual(
+            self.store.list_calendar_events()[0].start_at,
+            datetime.fromisoformat("2026-09-12T14:40:00-07:00"),
+        )
 
     def test_python_attaches_the_offset_a_date_actually_has(self) -> None:
         content = "11月2日下午三点到四点有季度评审。"

@@ -77,11 +77,13 @@ class ConversationRouterService:
         model: ContextualConversationModel,
         reference_date: date,
         timezone: str = "America/Vancouver",
+        reference_time: time | None = None,
     ) -> None:
         self.store = store
         self.model = model
         self.reference_date = reference_date
         self.timezone = timezone
+        self.reference_time = reference_time
 
     def submit(
         self, conversation_id: str, content: str, message_id: str | None = None) -> ConversationRouterTurn:
@@ -132,6 +134,9 @@ class ConversationRouterService:
                     candidate_saved_items=[self._item_for_router(item) for item in candidates.saved_items],
                     candidate_project_records=[self._record_for_router(record) for record in candidates.project_records],
                     reference_date=self.reference_date.isoformat(),
+                    reference_time=(
+                        None if self.reference_time is None else self.reference_time.strftime("%H:%M")
+                    ),
                     timezone=self.timezone,
                     pending_clarification=None if pending is None else pending.original_action,
                     context_truncated=context_window.truncated,

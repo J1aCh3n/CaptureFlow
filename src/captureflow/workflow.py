@@ -529,11 +529,17 @@ class PhaseTwoWorkflow:
         )
 
 
-def configured_reference_date(timezone: str) -> date:
+def configured_reference_now(timezone: str) -> datetime:
+    """The current local date and time, read once so a turn never mixes two clocks."""
+
     try:
-        return datetime.now(ZoneInfo(timezone)).date()
+        return datetime.now(ZoneInfo(timezone))
     except ZoneInfoNotFoundError as error:
         raise ValueError(f"Unknown timezone: {timezone}") from error
+
+
+def configured_reference_date(timezone: str) -> date:
+    return configured_reference_now(timezone).date()
 
 
 def _normalize(value: str) -> str:

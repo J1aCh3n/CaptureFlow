@@ -112,6 +112,31 @@ functions now have no caller in `src/` and are kept alive only by their own test
 `parse_duration`, and `date_tool.states_recurrence`. `time_tool.parse_time` is
 still used by the legacy V2 Phase 3 `router_service`.
 
+## Follow-up: the current local time
+
+The router received only the date (`datetime.now(tz).date()`), so the model could
+not resolve a time relative to now, or tell that a clock time today had already
+passed. A tool the model calls for the current time was considered and rejected:
+the value is small and needed on every turn, so injecting it keeps one model call
+per turn, cannot be skipped by the model, and stays deterministic in tests.
+
+The UI now reads the local clock once per turn (`configured_reference_now`) and
+passes both the date and `reference_time` (`HH:MM`) to the router, which forwards
+it to the model. The prompt resolves phrases such as `半小时后` from it, and asks
+the model to clarify when a message schedules something for a clock time today
+that is already earlier than now. Python adds no rule of its own: this is
+understanding, not authorization.
+
+`gpt-5.6-luna`, reference date 2026-09-12:
+
+| Local time | Input | Result |
+| --- | --- | --- |
+| 14:10 | `半小时后开个短会` | event 14:40 |
+| 14:10 | `两个小时后跟客户打电话` | event 16:10 |
+| 21:00 | `今天早上八点有个站会` | clarify: already earlier than now |
+| 21:00 | `明天早上八点有个站会` | event 2026-09-13 08:00 |
+| 16:30 | `下午三点有个评审` | clarify: already earlier than now |
+
 ## Claim boundary
 
 One frozen acceptance run and one probe per input show the normalized contract

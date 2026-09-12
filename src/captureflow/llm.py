@@ -94,6 +94,7 @@ class ContextualConversationModel(Protocol):
         pending_clarification: dict | None = None,
         context_truncated: bool = False,
         calendar: list[dict[str, str]] | None = None,
+        reference_time: str | None = None,
     ) -> ConversationDecision: ...
 
 
@@ -277,6 +278,7 @@ class OpenAICompatibleModel:
         pending_clarification: dict | None = None,
         context_truncated: bool = False,
         calendar: list[dict[str, str]] | None = None,
+        reference_time: str | None = None,
     ) -> ConversationDecision:
         """Make one untrusted, context-aware routing proposal; storage remains downstream."""
 
@@ -285,8 +287,8 @@ class OpenAICompatibleModel:
             system=(
                 "You are CaptureFlow's Phase 10 contextual conversation router. Return JSON only. "
                 "You do not execute tools or write SQLite. Choose exactly one intent and use only "
-                "the supplied current_message, recent_messages, candidates, reference_date, timezone, "
-                "calendar, and pending clarification. This is not a general chatbot. "
+                "the supplied current_message, recent_messages, candidates, reference_date, reference_time, "
+                "timezone, calendar, and pending clarification. This is not a general chatbot. "
                 "A definite user statement that a meeting or event is still going to happen on an explicit "
                 "date must use calendar_create, even when it is not phrased as a command. Use the event title "
                 "as action content, keep agenda or attendance text in description as an exact continuous "
@@ -298,7 +300,11 @@ class OpenAICompatibleModel:
                 "message's own context, such as 晚饭后十点 meaning 22:00; when the message does not determine it, "
                 "use clarify rather than guessing. Return null for anything the message does not state, never "
                 "invent a default duration, and never write a UTC offset, because Python attaches the timezone. "
-                "end_time and duration_minutes are mutually exclusive. "
+                "end_time and duration_minutes are mutually exclusive. reference_time, when supplied, is "
+                "the current local time: resolve a time stated relative to now, such as 半小时后 or in two "
+                "hours, from reference_date and reference_time. When a message schedules something for a "
+                "clock time today that is already earlier than reference_time, use clarify instead of moving "
+                "it to another day. "
                 "A meeting the user reports as already held or finished is not a future Calendar event. Keep "
                 "its minutes with save_note, using the reported meeting text as content; do not create a "
                 "Calendar event for it. Judge this from the message's own tense and wording relative to "
@@ -360,6 +366,7 @@ class OpenAICompatibleModel:
                 "candidate_saved_items": candidate_saved_items,
                 "candidate_project_records": candidate_project_records,
                 "reference_date": reference_date,
+                "reference_time": reference_time,
                 "timezone": timezone,
                 "pending_clarification": pending_clarification,
                 "context_truncated": context_truncated,

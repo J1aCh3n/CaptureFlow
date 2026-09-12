@@ -25,7 +25,7 @@ from .models import (
 from .phase_three import PhaseThreeWorkflow
 from .storage import CaptureStore
 from .time_config import configured_timezone
-from .workflow import configured_reference_date
+from .workflow import configured_reference_date, configured_reference_now
 
 
 DIAGNOSTICS_SESSION_KEY = "captureflow_turn_diagnostics"
@@ -702,11 +702,13 @@ def render_chat_input(
         else:
             try:
                 settings = ModelSettings.from_environment()
+                now = configured_reference_now(timezone)
                 turn = ConversationRouterService(
                     store,
                     OpenAICompatibleModel(settings),
-                    configured_reference_date(timezone),
+                    now.date(),
                     timezone,
+                    reference_time=now.time(),
                 ).submit(conversation_id, prompt)
                 if diagnostics_enabled:
                     _remember_turn_diagnostics(
