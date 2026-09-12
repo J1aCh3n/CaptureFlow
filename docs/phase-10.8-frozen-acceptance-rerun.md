@@ -7,7 +7,7 @@ verified only with targeted `gpt-5.6-luna` probes. Neither frozen live fixture h
 been re-run since it was recorded. This rerun checks that earlier accepted
 behavior still holds.
 
-Both runs used `gpt-5.6-terra`, the model pinned by the Phase 10 fixture and used
+Every run used `gpt-5.6-terra`, the model pinned by the Phase 10 fixture and used
 for the recorded Phase 8 evidence, so the results are comparable. Traces are in
 the ignored `runs/` directory; no raw model output or credentials are copied here.
 
