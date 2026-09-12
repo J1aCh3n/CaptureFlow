@@ -232,6 +232,103 @@ class ConversationRouterServiceTests(unittest.TestCase):
         self.assertEqual(restored.start_at, datetime.fromisoformat("2026-09-10T16:00:00-07:00"))
         self.assertIsNone(restored.end_at)
 
+    def _fresh_conversation(self) -> Conversation:
+        conversation = self.store.save_conversation(
+            Conversation(id="fresh-conversation", title="Fresh")
+        )
+        self.store.assign_conversation_project(conversation.id, self.project.id)
+        return conversation
+
+    def _update_decision(self, event_id: str, message_id: str, content: str) -> dict:
+        return {
+            "intent": "calendar_update",
+            "action": {
+                "action": "update_event",
+                "date_expression": "这周四",
+                "target_event_id": event_id,
+                "evidence": [{"message_id": message_id, "source_quote": content}],
+            },
+        }
+
+    def test_a_demonstrative_in_a_new_conversation_asks_which_event(self) -> None:
+        event = self._saved_event(
+            "review-meeting",
+            "算法优化与代码审查会议",
+            datetime.fromisoformat("2026-09-10T14:00:00-07:00"),
+        )
+        fresh = self._fresh_conversation()
+        content = "这个会议改到周四。"
+        model = ScriptedContextualModel([self._update_decision(event.id, "fresh-demonstrative", content)])
+
+        turn = ConversationRouterService(self.store, model, date(2026, 9, 9)).submit(
+            fresh.id, content, "fresh-demonstrative"
+        )
+
+        self.assertEqual(turn.outcome, "clarification_created")
+        self.assertEqual(turn.operations, ())
+        self.assertEqual(self.store.get_calendar_event(event.id), event)
+        self.assertEqual(self.store.get_pending_clarification(fresh.id).missing_field, "target")
+        self.assertIn("has not mentioned that event", turn.assistant_message.content)
+
+    def test_naming_the_event_in_a_new_conversation_still_updates_it(self) -> None:
+        event = self._saved_event(
+            "named-meeting",
+            "算法优化与代码审查会议",
+            datetime.fromisoformat("2026-09-10T14:00:00-07:00"),
+        )
+        fresh = self._fresh_conversation()
+        content = "把算法优化与代码审查会议改到周四下午三点。"
+        model = ScriptedContextualModel(
+            [
+                {
+                    "intent": "calendar_update",
+                    "action": {
+                        "action": "update_event",
+                        "date_expression": "这周四",
+                        "time_expression": "下午三点",
+                        "target_event_id": event.id,
+                        "evidence": [{"message_id": "fresh-named", "source_quote": content}],
+                    },
+                }
+            ]
+        )
+
+        turn = ConversationRouterService(self.store, model, date(2026, 9, 9)).submit(
+            fresh.id, content, "fresh-named"
+        )
+
+        self.assertEqual(turn.outcome, "calendar_update")
+        self.assertEqual(
+            self.store.get_calendar_event(event.id).start_at,
+            datetime.fromisoformat("2026-09-10T15:00:00-07:00"),
+        )
+
+    def test_a_date_word_does_not_count_as_naming_the_event(self) -> None:
+        event = self._saved_event(
+            "weekly", "周例会", datetime.fromisoformat("2026-09-10T10:00:00-07:00")
+        )
+        fresh = self._fresh_conversation()
+        content = "那个会删掉，周四不开了"
+        model = ScriptedContextualModel(
+            [
+                {
+                    "intent": "calendar_delete",
+                    "action": {
+                        "action": "delete_event",
+                        "target_event_id": event.id,
+                        "evidence": [{"message_id": "fresh-delete", "source_quote": content}],
+                    },
+                }
+            ]
+        )
+
+        turn = ConversationRouterService(self.store, model, date(2026, 9, 9)).submit(
+            fresh.id, content, "fresh-delete"
+        )
+
+        self.assertEqual(turn.outcome, "clarification_created")
+        self.assertEqual(self.store.get_calendar_event(event.id).status, "active")
+
     def test_a_second_unanswered_calendar_question_replaces_the_first(self) -> None:
         first = "周末有个会"
         second = "下下周三下午三点有评审会"

@@ -1493,6 +1493,29 @@ class CaptureStore:
             for row in rows
         ]
 
+    def list_calendar_event_message_ids(self, event_id: str) -> set[str]:
+        """Every message that created or changed one event, including their cited sources."""
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT source_message_id FROM calendar_events WHERE id = ?
+                UNION
+                SELECT source_message_id FROM calendar_event_sources WHERE event_id = ?
+                UNION
+                SELECT source_message_id FROM calendar_event_update_operations
+                WHERE event_id = ? AND status = 'committed'
+                UNION
+                SELECT sources.source_message_id
+                FROM calendar_event_update_sources AS sources
+                JOIN calendar_event_update_operations AS operations
+                  ON operations.id = sources.update_operation_id
+                WHERE operations.event_id = ? AND operations.status = 'committed'
+                """,
+                (event_id, event_id, event_id, event_id),
+            ).fetchall()
+        return {row[0] for row in rows}
+
     def update_calendar_event(
         self, event_id: str, *, title: str, start_at: date | datetime
     ) -> CalendarEvent:

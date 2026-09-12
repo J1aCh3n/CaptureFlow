@@ -1,5 +1,6 @@
 """One bounded, contextual entry point for ordinary CaptureFlow chat."""
 
+import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from time import perf_counter
@@ -35,6 +36,12 @@ from .time_tool import parse_duration, parse_end_time, parse_time, stated_timezo
 
 
 RouterOperation = ToolOperation | CalendarEventUpdateOperation | ProjectChangeOperation
+
+# Words that point at "a meeting" without saying which one.
+_GENERIC_EVENT_TERMS = {
+    "会议", "例会", "开会", "这个", "那个", "这场", "那场", "这次", "那次", "日程", "安排", "活动",
+    "meeting", "meetings", "event", "call", "sync", "this", "that", "the", "it",
+}
 
 
 @dataclass(frozen=True)
@@ -154,7 +161,9 @@ class ConversationRouterService:
                     )
                 operations, reply = self._create_event(user_message, decision.action)
             elif decision.intent == "calendar_update":
-                if field := self._calendar_clarification_field(decision.action, user_message):
+                if field := self._calendar_clarification_field(
+                    decision.action, user_message, context_window
+                ):
                     assistant = self._save_calendar_clarification(user_message, decision.action, field)
                     return self._turn(
                         user_message,
@@ -170,6 +179,22 @@ class ConversationRouterService:
                     )
                 operations, reply = self._update_event(user_message, decision.action)
             elif decision.intent == "calendar_delete":
+                if field := self._calendar_clarification_field(
+                    decision.action, user_message, context_window
+                ):
+                    assistant = self._save_calendar_clarification(user_message, decision.action, field)
+                    return self._turn(
+                        user_message,
+                        assistant,
+                        decision,
+                        context_window,
+                        candidates,
+                        (),
+                        model_calls=1,
+                        model_seconds=model_seconds,
+                        local_seconds=perf_counter() - local_started,
+                        outcome="clarification_created",
+                    )
                 operations, reply = self._delete_event(user_message, decision.action)
             elif decision.intent in {"save_idea", "save_note"}:
                 operations, reply = self._save_item(user_message, decision.action)
@@ -406,10 +431,19 @@ class ConversationRouterService:
         return (committed,), f"Deleted local calendar event: {event.title}. It can be undone."
 
     def _calendar_clarification_field(
-        self, action: ContextualAction | None, user_message: Message | None = None
+        self,
+        action: ContextualAction | None,
+        user_message: Message | None = None,
+        context_window: ProjectContextWindow | None = None,
     ) -> str | None:
         if action is None:
             return None
+        if (
+            user_message is not None
+            and context_window is not None
+            and self._target_is_ungrounded(action, user_message, context_window)
+        ):
+            return "target"
         if user_message is not None and self._states_other_timezone(user_message.content):
             return "timezone"
         if action.date_expression is not None and states_recurrence(action.date_expression):
@@ -436,6 +470,26 @@ class ConversationRouterService:
                 if not isinstance(self.store.get_calendar_event(action.target_event_id).start_at, datetime):
                     return "time"
         return None
+
+    def _target_is_ungrounded(
+        self, action: ContextualAction, user_message: Message, context_window: ProjectContextWindow
+    ) -> bool:
+        """Whether an update or delete binds to an event this conversation never identified.
+
+        The model still chooses the target. This only refuses to write when nothing in the
+        current conversation supports that choice: the event was not created or changed by
+        a message in the bounded window, and the current message does not name it. A
+        demonstrative such as `这个会议` in a new conversation must not silently bind to
+        whichever event happens to exist.
+        """
+
+        if action.action not in {"update_event", "delete_event"} or action.target_event_id is None:
+            return False
+        window_ids = {message.id for message in context_window.messages} - {user_message.id}
+        if window_ids & self.store.list_calendar_event_message_ids(action.target_event_id):
+            return False
+        title = self.store.get_calendar_event(action.target_event_id).title
+        return not (_distinctive_terms(user_message.content) & _distinctive_terms(title))
 
     def _states_other_timezone(self, content: str) -> str | None:
         """Notice a message about a timezone this workspace does not store."""
@@ -634,6 +688,10 @@ class ConversationRouterService:
             "recurrence": (
                 "I cannot store a repeating schedule, only single dated records. "
                 "Which one exact date should I use?"
+            ),
+            "target": (
+                "This conversation has not mentioned that event yet. "
+                "Which local calendar event do you mean? Please name it."
             ),
         }[missing_field]
 
@@ -971,6 +1029,22 @@ def _stable_id(message_id: str, suffix: str) -> str:
 
 def _normalized(value: str) -> str:
     return " ".join(value.split())
+
+
+def _distinctive_terms(value: str) -> set[str]:
+    """Chinese character pairs and Latin words that can name one event, minus generic ones.
+
+    Pairs rather than single characters, so `周四` in a date does not match `周例会`.
+    """
+
+    lowered = value.casefold()
+    words = {word for word in re.findall(r"[a-z0-9]{2,}", lowered)}
+    pairs = {
+        run[index : index + 2]
+        for run in re.findall(r"[一-鿿]{2,}", value)
+        for index in range(len(run) - 1)
+    }
+    return (words | pairs) - _GENERIC_EVENT_TERMS
 
 
 def _parse_start_at(value: str) -> date | datetime:
