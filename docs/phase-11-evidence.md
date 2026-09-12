@@ -137,6 +137,23 @@ understanding, not authorization.
 | 21:00 | `明天早上八点有个站会` | event 2026-09-13 08:00 |
 | 16:30 | `下午三点有个评审` | clarify: already earlier than now |
 
+Because the prompt changed, the frozen Phase 10 acceptance was re-run with
+`gpt-5.6-terra` at `33fb938`:
+
+| Run | Result |
+| --- | --- |
+| `runs/phase11-reference-time-20260912` | 14 of 16 |
+| `runs/phase11-reference-time-20260912-b` | **16 of 16** |
+
+In the first run the `tracker_change` turn returned `model_or_validation_failure`
+after 1.86 seconds — not a timeout — so no task was created and the project
+retrieval case that depends on it failed too. Replayed twelve times from that
+run's exact pre-message state, the turn produced a valid task every time, and the
+full rerun passed. The failing output could not be classified: the router discards
+the validation error behind its generic reply, and the trace deliberately keeps no
+raw model output. Recording the error type and message, without the raw output,
+would make the next intermittent failure diagnosable.
+
 ## Claim boundary
 
 One frozen acceptance run and one probe per input show the normalized contract
