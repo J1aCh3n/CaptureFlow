@@ -2,8 +2,8 @@
 
 ## Status
 
-Accepted on 2026-09-12. The open questions are answered below; implementation
-follows the order in this document.
+Implemented on 2026-09-12; see [phase-11-evidence.md](phase-11-evidence.md). The open questions
+are answered in the Decisions section at the end.
 
 ## Summary
 
