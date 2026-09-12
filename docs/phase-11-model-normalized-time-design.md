@@ -2,8 +2,8 @@
 
 ## Status
 
-Design for review. Nothing here is implemented. Implementation starts only after
-the open questions at the end are answered.
+Accepted on 2026-09-12. The open questions are answered below; implementation
+follows the order in this document.
 
 ## Summary
 
@@ -278,15 +278,16 @@ One commit per step:
 5. Remove the now-unused router helpers; full suite.
 6. Live acceptance, luna probes, and the evidence record.
 
-## Open questions
+## Decisions
 
-1. **Ambiguous hour.** Should the model resolve `十点` from context in the message
-   when it can (`晚饭后十点` is 22:00) and clarify only when it cannot? Recommended:
-   yes.
-2. **Deterministic backstops.** Keep the Python timezone and recurrence detectors
-   as a second check behind the model's fields? Recommended: no — that keeps the
-   vocabulary this phase exists to remove. The credential guard is not affected.
-3. **Legacy router.** Retire `router_service.BoundedChatService` and its tests in a
-   separate follow-up, so `time_tool.py` can be deleted entirely? Recommended: yes,
-   as its own phase.
-4. **Calendar table range.** Is minus 7 to plus 27 days the right window?
+The four open questions were answered by the user on 2026-09-12.
+
+1. **Ambiguous hour.** The model resolves a bare hour when the message's own
+   context determines it (`晚饭后十点` is 22:00) and clarifies only when it cannot.
+2. **Deterministic backstops.** Not kept. Timezone and recurrence are reported by
+   the model in their fields; Python applies policy to those fields only. The
+   credential guard is unaffected because it must run before any model call.
+3. **Legacy router.** Ignored in this phase. `router_service.BoundedChatService`,
+   `time_tool.py`, and their tests are left in place and cleaned up separately as
+   redundant files.
+4. **Calendar table range.** Reference date minus 7 days to plus 27 days.
