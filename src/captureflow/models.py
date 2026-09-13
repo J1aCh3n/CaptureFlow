@@ -595,7 +595,7 @@ class ContextualAction(BaseModel):
 
 
 class ConversationDecision(BaseModel):
-    """The future one-call contextual routing contract; it does not write storage itself."""
+    """The one decision a model makes per chat turn; it does not write storage itself."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -616,6 +616,15 @@ class ConversationDecision(BaseModel):
             return None
         value = value.strip()
         return value or None
+
+    @model_validator(mode="before")
+    @classmethod
+    def ignore_sources_outside_answers(cls, value: object) -> object:
+        # source_ids only feed an answer's source cards. A write or a question that cites
+        # the event or record it concerns is not wrong, so the list is dropped, not rejected.
+        if isinstance(value, dict) and value.get("intent") not in {"local_answer", "project_answer", "reply_only"}:
+            return {key: item for key, item in value.items() if key != "source_ids"}
+        return value
 
     @field_validator("source_ids")
     @classmethod
@@ -645,17 +654,17 @@ class ConversationDecision(BaseModel):
                 raise ValueError(f"a {self.intent.replace('_', ' ')} requires a candidate event target")
             if self.intent == "calendar_update" and not self.action.has_replacement():
                 raise ValueError("an event update requires at least one replacement field")
-            if extra := self._present("project_changes", "clarification_question", "pending_action", "source_ids"):
+            if extra := self._present("project_changes", "clarification_question", "pending_action"):
                 raise ValueError(f"a local write cannot include tracker or clarification payload: {extra}")
         elif self.intent == "tracker_change":
             if not self.project_changes:
                 raise ValueError("a tracker change requires project changes")
-            if extra := self._present("action", "clarification_question", "pending_action", "source_ids"):
+            if extra := self._present("action", "clarification_question", "pending_action"):
                 raise ValueError(f"a tracker change requires project changes only: {extra}")
         elif self.intent == "clarify":
             if not self.clarification_question:
                 raise ValueError("a clarification requires a clarification question")
-            if extra := self._present("action", "project_changes", "source_ids"):
+            if extra := self._present("action", "project_changes"):
                 raise ValueError(f"a clarification cannot include a committed action or tracker change: {extra}")
             if self.pending_action is None or self.pending_action.action not in {
                 "create_event",

@@ -279,6 +279,30 @@ class ModelTests(unittest.TestCase):
         self.assertEqual((change.due_date, change.due_time), ("2026-09-16", "20:00"))
         self.assertEqual(change.due_at, datetime.fromisoformat("2026-09-16T20:00:00-07:00"))
 
+    def test_a_write_that_cites_its_own_target_as_a_source_is_accepted(self) -> None:
+        decision = ConversationDecision.model_validate(
+            {
+                "intent": "calendar_update",
+                "action": {
+                    "action": "update_event",
+                    "target_event_id": "event-1",
+                    "start_time": "14:00",
+                    "evidence": [{"message_id": "message-1", "source_quote": "改到下午两点。"}],
+                },
+                "source_ids": ["event-1"],
+            }
+        )
+        answer = ConversationDecision.model_validate(
+            {"intent": "project_answer", "reply": "当前任务是排查延迟。", "source_ids": ["record-1"]}
+        )
+
+        self.assertEqual(decision.source_ids, [])
+        self.assertEqual(answer.source_ids, ["record-1"])
+        with self.assertRaises(ValidationError):
+            ConversationDecision.model_validate(
+                {"intent": "reply_only", "reply": "好的。", "source_ids": ["event-1"]}
+            )
+
     def test_an_unstated_recurrence_may_arrive_as_null(self) -> None:
         change = ProjectChange.model_validate(
             {
