@@ -230,6 +230,7 @@ def _submit(
             "operation_ids": [operation.id for operation in turn.operations],
             "operation_kinds": [_operation_kind(operation) for operation in turn.operations],
             "assistant_message_id": turn.assistant_message.id,
+            "failure_reason": turn.failure_reason,
         }
     )
     return turn

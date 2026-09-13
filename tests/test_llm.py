@@ -50,12 +50,12 @@ class OpenAICompatibleModelTests(unittest.TestCase):
         self.assertEqual(completions.kwargs["timeout"], 30)
 
     def test_output_outside_the_schema_is_reported_as_invalid(self) -> None:
-        completions = RecordingCompletions('{"intent":"send_email"}')
+        completions = RecordingCompletions('{"intent":"send_email_SECRET_VALUE"}')
         model = OpenAICompatibleModel.__new__(OpenAICompatibleModel)
         model.settings = ModelSettings(api_key="test-key", model="gpt-5.6-terra")
         model.client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
 
-        with self.assertRaises(InvalidStructuredOutput):
+        with self.assertRaises(InvalidStructuredOutput) as raised:
             model.propose_conversation_decision(
                 current_message=_MESSAGE,
                 recent_messages=[_MESSAGE],
@@ -65,6 +65,10 @@ class OpenAICompatibleModelTests(unittest.TestCase):
                 reference_date="2026-09-12",
                 timezone="America/Vancouver",
             )
+
+        # The failure names the field and rule for diagnosis, but never echoes model output.
+        self.assertIn("intent:", str(raised.exception))
+        self.assertNotIn("SECRET_VALUE", str(raised.exception))
 
     def test_contextual_router_receives_bounded_context_and_candidates_once(self) -> None:
         completions = RecordingCompletions(

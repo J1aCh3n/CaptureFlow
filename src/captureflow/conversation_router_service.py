@@ -12,7 +12,7 @@ from pydantic import ValidationError
 from .context_service import ContextWindow, RouterCandidates, select_context_window, select_router_candidates
 from .credentials import contains_credential_disclosure
 from .date_tool import calendar_reference
-from .llm import ContextualConversationModel, InvalidStructuredOutput, ModelError
+from .llm import ContextualConversationModel, InvalidStructuredOutput, ModelError, describe_validation_error
 from .local_context_service import LocalContextService
 from .models import (
     CalendarEvent,
@@ -66,6 +66,8 @@ class ConversationRouterTurn:
     model_calls: int = 0
     model_seconds: float = 0
     local_seconds: float = 0
+    # Why a turn failed, as error type and rule; never the model's raw output.
+    failure_reason: str | None = None
 
 
 class ConversationRouterService:
@@ -145,7 +147,7 @@ class ConversationRouterService:
                 )
             )
             self._validate_decision(decision, user_message, context_window, candidates)
-        except (InvalidStructuredOutput, ModelError, ValidationError, ValueError):
+        except (InvalidStructuredOutput, ModelError, ValidationError, ValueError) as error:
             return self._reply(
                 user_message,
                 "I could not safely validate this conversation decision, so no local record was changed.",
@@ -156,6 +158,7 @@ class ConversationRouterService:
                 model_calls=1,
                 model_seconds=perf_counter() - started,
                 outcome="model_or_validation_failure",
+                failure_reason=_failure_reason(error),
             )
 
         model_seconds = perf_counter() - started
@@ -205,6 +208,7 @@ class ConversationRouterService:
                 model_seconds=model_seconds,
                 local_seconds=perf_counter() - local_started,
                 outcome="write_or_dispatch_failure",
+                failure_reason=_failure_reason(error),
             )
 
         outcome = decision.intent if decision.intent != "reply_only" or operations else "reply_only"
@@ -852,6 +856,7 @@ class ConversationRouterService:
         model_seconds: float = 0,
         local_seconds: float = 0,
         outcome: str,
+        failure_reason: str | None = None,
     ) -> ConversationRouterTurn:
         assistant = self._assistant_message(user_message, content)
         if decision is not None and decision.intent == "project_answer":
@@ -867,6 +872,7 @@ class ConversationRouterService:
             model_calls=model_calls,
             model_seconds=model_seconds,
             local_seconds=local_seconds,
+            failure_reason=failure_reason,
         )
 
     def _assistant_message(self, user_message: Message, content: str) -> Message:
@@ -922,6 +928,11 @@ class ConversationRouterService:
     @staticmethod
     def _record_for_router(record: ProjectRecord) -> dict:
         return {"id": record.id, "kind": record.kind, "content": record.content, "state": record.state}
+
+
+def _failure_reason(error: Exception) -> str:
+    detail = describe_validation_error(error) if isinstance(error, ValidationError) else str(error)
+    return f"{type(error).__name__}: {detail}"[:1_000]
 
 
 def _stable_id(message_id: str, suffix: str) -> str:

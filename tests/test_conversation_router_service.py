@@ -1627,6 +1627,9 @@ class ConversationRouterServiceTests(unittest.TestCase):
         ).submit(self.conversation.id, content, "invalid-target-turn")
 
         self.assertEqual(turn.outcome, "model_or_validation_failure")
+        self.assertEqual(
+            turn.failure_reason, "ValueError: calendar update target is outside supplied candidates"
+        )
         self.assertEqual(self.store.list_calendar_events(), [])
 
     def test_an_implausible_update_date_asks_for_the_date(self) -> None:

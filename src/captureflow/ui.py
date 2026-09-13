@@ -705,6 +705,7 @@ def render_chat_input(
                         candidate_saved_items=len(turn.candidates.saved_items),
                         candidate_project_records=len(turn.candidates.project_records),
                         outcome=turn.outcome,
+                        failure_reason=turn.failure_reason,
                         model_calls=turn.model_calls,
                         model_seconds=turn.model_seconds,
                         local_seconds=turn.local_seconds,
@@ -757,6 +758,8 @@ def _render_turn_diagnostics(message_id: str) -> None:
             f"Local validation/write: {diagnostics['local_seconds']:.3f}s · "
             f"Total submit: {diagnostics['total_seconds']:.3f}s"
         )
+        if diagnostics.get("failure_reason"):
+            st.caption(f"Failure: {diagnostics['failure_reason']}")
         if "intent" in diagnostics:
             intent = diagnostics["intent"] or "not available"
             st.caption(

@@ -247,13 +247,24 @@ class OpenAICompatibleModel:
                 raise ModelError("The model returned an empty response.")
             return schema.model_validate_json(content)
         except ValidationError as error:
-            raise InvalidStructuredOutput(f"The model returned invalid structured output: {error}") from error
+            raise InvalidStructuredOutput(
+                f"The model returned invalid structured output: {describe_validation_error(error)}"
+            ) from error
         except (IndexError, ValueError) as error:
             raise ModelError(f"The model returned invalid structured output: {error}") from error
         except Exception as error:
             if isinstance(error, ModelError):
                 raise
             raise ModelError(f"Model request failed: {error}") from error
+
+
+def describe_validation_error(error: ValidationError) -> str:
+    """Name each failing field and rule without echoing the model's values back."""
+
+    return "; ".join(
+        f"{'.'.join(str(part) for part in detail['loc']) or '<root>'}: {detail['msg']}"
+        for detail in error.errors(include_input=False, include_url=False)
+    )
 
 
 def _normalized_text(value: str) -> str:
