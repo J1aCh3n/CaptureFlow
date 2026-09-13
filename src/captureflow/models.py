@@ -645,20 +645,18 @@ class ConversationDecision(BaseModel):
                 raise ValueError(f"a {self.intent.replace('_', ' ')} requires a candidate event target")
             if self.intent == "calendar_update" and not self.action.has_replacement():
                 raise ValueError("an event update requires at least one replacement field")
-            if self.project_changes or self.clarification_question or self.pending_action or self.source_ids:
-                raise ValueError("a local write cannot include tracker or clarification payload")
+            if extra := self._present("project_changes", "clarification_question", "pending_action", "source_ids"):
+                raise ValueError(f"a local write cannot include tracker or clarification payload: {extra}")
         elif self.intent == "tracker_change":
-            if (
-                self.action
-                or not self.project_changes
-                or self.clarification_question
-                or self.pending_action
-                or self.source_ids
-            ):
-                raise ValueError("a tracker change requires project changes only")
+            if not self.project_changes:
+                raise ValueError("a tracker change requires project changes")
+            if extra := self._present("action", "clarification_question", "pending_action", "source_ids"):
+                raise ValueError(f"a tracker change requires project changes only: {extra}")
         elif self.intent == "clarify":
-            if self.action or self.project_changes or not self.clarification_question or self.source_ids:
-                raise ValueError("a clarification cannot include a committed action or tracker change")
+            if not self.clarification_question:
+                raise ValueError("a clarification requires a clarification question")
+            if extra := self._present("action", "project_changes", "source_ids"):
+                raise ValueError(f"a clarification cannot include a committed action or tracker change: {extra}")
             if self.pending_action is None or self.pending_action.action not in {
                 "create_event",
                 "update_event",
@@ -666,13 +664,18 @@ class ConversationDecision(BaseModel):
             }:
                 raise ValueError("a clarification requires one pending calendar action")
         else:
-            if self.action or self.project_changes or self.clarification_question or self.pending_action:
-                raise ValueError("a read-only decision cannot include a write or clarification payload")
+            if extra := self._present("action", "project_changes", "clarification_question", "pending_action"):
+                raise ValueError(f"a read-only decision cannot include a write or clarification payload: {extra}")
             if self.intent == "reply_only" and self.source_ids:
                 raise ValueError("a reply-only decision cannot cite local sources")
             if not self.reply:
                 raise ValueError("a read-only decision requires a reply")
         return self
+
+    def _present(self, *fields: str) -> str:
+        """The named fields that carry a value, by name only, for a precise error."""
+
+        return ", ".join(field for field in fields if getattr(self, field))
 
     def _deferred_second_item_is_bounded(self) -> None:
         """One turn still commits one action; a second item may only be asked about."""
