@@ -349,6 +349,41 @@ Records per run were 19, 20, 19, 19, and 19 of 20. Model time per run was
 
 How `target_not_found_asks` was addressed is decision 7.
 
+### After decision 7, on `qwen3.5-flash`
+
+Five runs at `00985e7`, as an explicit cross-model comparison: `qwen3.8-flash` had
+too little free quota left. Runs are `runs/phase13-v3-named-q35-1` to `-5`. There is
+no baseline on this model before the change, so the table shows the result after it
+only.
+
+| Case | Passed | Input tokens | Output tokens | Model seconds |
+| --- | --- | --- | --- | --- |
+| `calendar_create` | 5 of 5 | 4,110 | 498–581 | 4–5 |
+| `calendar_update` | 5 of 5 | 4,304 | 611–1,283 | 4–9 |
+| `tracker_change` | 4 of 5 | 4,462 | 426–5,191 | 4–32 |
+| `meeting_question` | 4 of 5 | 4,569–4,618 | 533–827 | 4–7 |
+| `replay_idempotency` | 5 of 5 | — | — | 0 |
+| `cross_conversation_local_retrieval` | 4 of 5 | 4,142–4,197 | 478–776 | 4–9 |
+| `cross_conversation_project_retrieval` | 4 of 5 | 5,023–5,195 | 4,793–8,235 | 36–50 |
+| `target_found_acts` | 5 of 5 | 4,424–4,510 | 825–4,355 | 6–33 |
+| `target_not_found_asks` | 4 of 5 | 4,126–4,181 | 539–1,124 | 4–7 |
+| `target_named_completes` | 4 of 5 | 4,271–4,358 | 683–1,940 | 5–13 |
+
+Records per run were 20, 19, 18, 19, and 18 of 20. Model time per run was 77–122
+seconds, faster than `qwen3.8-flash`.
+
+- **The target cases.** A demonstrative in a new conversation was asked about in
+  four runs of five; once (run 4) the model still bound it to the meeting, which
+  wrote nothing. The named event was completed in four runs; once (run 3) the model
+  chose `clarify` without a question in `reply`, the same failure seen once on
+  `qwen3.8-flash`.
+- **The other failures are this model's, one each:** `tracker_change` asked a
+  question instead of creating the task (run 5), so that run's project answer had
+  no task to cite; `meeting_question` cited an ID outside the candidates and failed
+  validation (run 2); and `cross_conversation_local_retrieval` answered with
+  `reply_only` (run 3).
+
+
 ## Risks
 
 - **A wrong target.** Without the Python heuristic, a model could bind "这个会议" to
