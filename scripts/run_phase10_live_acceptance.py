@@ -44,16 +44,15 @@ def main() -> int:
     trace = _trace_header(root, fixture, settings, model_overridden)
     project = store.save_project(Project(id="phase-ten-live-project", name="CaptureFlow"))
     main_conversation = _conversation(store, "phase-ten-live-main", project.id)
+    model = OpenAICompatibleModel(settings)
+    tokens = TokenCounter(model)
     router = ConversationRouterService(
-        store,
-        OpenAICompatibleModel(settings),
-        date.fromisoformat(protocol["reference_date"]),
-        protocol["timezone"],
+        store, model, date.fromisoformat(protocol["reference_date"]), protocol["timezone"]
     )
     inputs = {case["name"]: case["input"] for case in fixture["cases"]}
 
     created = _submit(
-        trace, "calendar_create", router, main_conversation.id, inputs["calendar_create"], "phase10-create"
+        trace, tokens, "calendar_create", router, main_conversation.id, inputs["calendar_create"], "phase10-create"
     )
     _check(
         trace,
@@ -65,7 +64,7 @@ def main() -> int:
     )
 
     updated = _submit(
-        trace, "calendar_update", router, main_conversation.id, inputs["calendar_update"], "phase10-update"
+        trace, tokens, "calendar_update", router, main_conversation.id, inputs["calendar_update"], "phase10-update"
     )
     event = store.list_calendar_events()[0] if store.list_calendar_events() else None
     _check(
@@ -82,7 +81,7 @@ def main() -> int:
     )
 
     tracked = _submit(
-        trace, "tracker_change", router, main_conversation.id, inputs["tracker_change"], "phase10-tracker"
+        trace, tokens, "tracker_change", router, main_conversation.id, inputs["tracker_change"], "phase10-tracker"
     )
     _check(
         trace,
@@ -101,7 +100,7 @@ def main() -> int:
     tracked_record_id = tracked_records[0].id if len(tracked_records) == 1 else None
 
     meeting_answer = _submit(
-        trace, "meeting_question", router, main_conversation.id, inputs["meeting_question"], "phase10-question"
+        trace, tokens, "meeting_question", router, main_conversation.id, inputs["meeting_question"], "phase10-question"
     )
     _check(
         trace,
@@ -111,6 +110,7 @@ def main() -> int:
 
     replay = _submit(
         trace,
+        tokens,
         "replay_idempotency",
         router,
         main_conversation.id,
@@ -127,16 +127,11 @@ def main() -> int:
     )
 
     later_conversation = _conversation(store, "phase-ten-live-later", project.id)
-    later_router = ConversationRouterService(
-        store,
-        OpenAICompatibleModel(settings),
-        date.fromisoformat(protocol["reference_date"]),
-        protocol["timezone"],
-    )
     cross_local = _submit(
         trace,
+        tokens,
         "cross_conversation_local_retrieval",
-        later_router,
+        router,
         later_conversation.id,
         inputs["cross_conversation_local_retrieval"],
         "phase10-cross-local",
@@ -149,8 +144,9 @@ def main() -> int:
 
     cross_project = _submit(
         trace,
+        tokens,
         "cross_conversation_project_retrieval",
-        later_router,
+        router,
         later_conversation.id,
         inputs["cross_conversation_project_retrieval"],
         "phase10-cross-project",
@@ -161,21 +157,52 @@ def main() -> int:
         answered_from_project_record(store, cross_project, tracked_record_id),
     )
 
-    ambiguous = _submit(
+    # Found, so act: this conversation just asked about the meeting.
+    found = _submit(
         trace,
-        "ambiguous_correction",
-        later_router,
+        tokens,
+        "target_found_acts",
+        router,
         later_conversation.id,
-        inputs["ambiguous_correction"],
-        "phase10-ambiguous",
+        inputs["target_found_acts"],
+        "phase10-found",
     )
     _check(
         trace,
-        "ambiguous_correction_effect",
-        ambiguous is not None
-        and ambiguous.outcome == "clarification_created"
-        and not ambiguous.operations
-        and store.get_pending_clarification(later_conversation.id) is not None,
+        "target_found_acts_effect",
+        event is not None and moved_event(store, found, event.id, hour=15),
+    )
+
+    # Not found, so ask, then complete with the event the user names.
+    unmentioned = _conversation(store, "phase-ten-live-unmentioned", project.id)
+    before_question = None if event is None else store.get_calendar_event(event.id)
+    asked = _submit(
+        trace,
+        tokens,
+        "target_not_found_asks",
+        router,
+        unmentioned.id,
+        inputs["target_not_found_asks"],
+        "phase10-not-found",
+    )
+    _check(
+        trace,
+        "target_not_found_asks_effect",
+        before_question is not None and asked_without_writing(store, asked, before_question),
+    )
+    named = _submit(
+        trace,
+        tokens,
+        "target_named_completes",
+        router,
+        unmentioned.id,
+        inputs["target_named_completes"],
+        "phase10-named",
+    )
+    _check(
+        trace,
+        "target_named_completes_effect",
+        event is not None and moved_event(store, named, event.id, day=date(2026, 9, 17)),
     )
 
     trace["finished_at"] = datetime.now(timezone.utc).isoformat()
@@ -215,6 +242,66 @@ def answered_from_project_record(store: CaptureStore, turn, record_id: str | Non
     )
 
 
+def moved_event(
+    store: CaptureStore, turn, event_id: str, *, day: date | None = None, hour: int | None = None
+) -> bool:
+    """An update passes when it committed and the stored event now starts at the stated day or hour."""
+
+    if turn is None or turn.outcome != "calendar_update":
+        return False
+    if not any(
+        isinstance(operation, CalendarEventUpdateOperation) and operation.status == "committed"
+        for operation in turn.operations
+    ):
+        return False
+    event = store.get_calendar_event(event_id)
+    return (day is None or event.start_date == day) and (
+        hour is None or (isinstance(event.start_at, datetime) and event.start_at.hour == hour)
+    )
+
+
+def asked_without_writing(store: CaptureStore, turn, event_before) -> bool:
+    """A question passes when the turn asked, wrote nothing, and left the event as it was."""
+
+    return (
+        turn is not None
+        and turn.outcome == "clarification_created"
+        and not turn.operations
+        and store.get_calendar_event(event_before.id) == event_before
+    )
+
+
+class TokenCounter:
+    """Record each model request's token counts; the prompt and output are not kept."""
+
+    def __init__(self, model: OpenAICompatibleModel) -> None:
+        self.requests: list[tuple[int | None, int | None]] = []
+        completions = model.client.chat.completions
+        create = completions.create
+
+        def counted_create(**kwargs):
+            response = create(**kwargs)
+            usage = getattr(response, "usage", None)
+            self.requests.append(
+                (getattr(usage, "prompt_tokens", None), getattr(usage, "completion_tokens", None))
+            )
+            return response
+
+        completions.create = counted_create
+
+    def since(self, start: int) -> dict[str, int | None]:
+        requests = self.requests[start:]
+        return {
+            "input_tokens": _total(count for count, _ in requests),
+            "output_tokens": _total(count for _, count in requests),
+        }
+
+
+def _total(counts) -> int | None:
+    counts = list(counts)
+    return None if not counts or None in counts else sum(counts)
+
+
 def _conversation(store: CaptureStore, conversation_id: str, project_id: str) -> Conversation:
     conversation = store.save_conversation(Conversation(id=conversation_id, title=conversation_id))
     store.assign_conversation_project(conversation.id, project_id)
@@ -222,9 +309,16 @@ def _conversation(store: CaptureStore, conversation_id: str, project_id: str) ->
 
 
 def _submit(
-    trace: dict, name: str, service: ConversationRouterService, conversation_id: str, content: str, message_id: str
+    trace: dict,
+    tokens: TokenCounter,
+    name: str,
+    service: ConversationRouterService,
+    conversation_id: str,
+    content: str,
+    message_id: str,
 ):
     started = perf_counter()
+    first_request = len(tokens.requests)
     try:
         turn = service.submit(conversation_id, content, message_id)
     except Exception as error:
@@ -241,6 +335,7 @@ def _submit(
             "intent": None if turn.decision is None else turn.decision.intent,
             "model_calls": turn.model_calls,
             "model_seconds": turn.model_seconds,
+            **tokens.since(first_request),
             "local_seconds": turn.local_seconds,
             "candidate_counts": {
                 "events": len(turn.candidates.events),

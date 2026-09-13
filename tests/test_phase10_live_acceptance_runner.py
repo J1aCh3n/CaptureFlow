@@ -1,10 +1,15 @@
 import unittest
+from datetime import date, datetime
 from types import SimpleNamespace
 
+from captureflow.models import CalendarEvent, CalendarEventUpdateOperation
 from scripts.run_phase10_live_acceptance import (
+    TokenCounter,
     _validate_model_selection,
     answered_from_project_record,
     answered_from_stored_event,
+    asked_without_writing,
+    moved_event,
 )
 
 
@@ -67,6 +72,81 @@ class EffectCheckTests(unittest.TestCase):
         self.assertFalse(
             answered_from_project_record(_Sources(record_ids=["task-1"]), _turn("project_answer"), None)
         )
+
+
+class _Events:
+    def __init__(self, event):
+        self.event = event
+
+    def get_calendar_event(self, _event_id):
+        return self.event
+
+
+def _event(start_at):
+    return CalendarEvent(
+        id="event-1",
+        conversation_id="conversation-1",
+        title="算法优化与代码审查会议",
+        source_message_id="message-1",
+        source_quote="会议",
+        start_at=start_at,
+        all_day=False,
+        timezone="America/Vancouver",
+    )
+
+
+def _update(status="committed"):
+    event = _event(datetime.fromisoformat("2026-09-10T14:00:00-07:00"))
+    return CalendarEventUpdateOperation(
+        id="update-1",
+        source_message_id="message-2",
+        action_index=0,
+        event_id=event.id,
+        before=event,
+        after=event,
+        status=status,
+    )
+
+
+class TargetCaseTests(unittest.TestCase):
+    def test_an_update_passes_only_when_committed_and_the_event_moved_as_stated(self) -> None:
+        moved = _Events(_event(datetime.fromisoformat("2026-09-17T15:00:00-07:00")))
+
+        self.assertTrue(moved_event(moved, _turn("calendar_update", (_update(),)), "event-1", day=date(2026, 9, 17)))
+        self.assertTrue(moved_event(moved, _turn("calendar_update", (_update(),)), "event-1", hour=15))
+        for turn, expected in (
+            (_turn("calendar_update", (_update(),)), {"hour": 14}),
+            (_turn("calendar_update", (_update("review"),)), {"hour": 15}),
+            (_turn("clarification_created"), {"hour": 15}),
+            (None, {"hour": 15}),
+        ):
+            with self.subTest(turn=turn, expected=expected):
+                self.assertFalse(moved_event(moved, turn, "event-1", **expected))
+
+    def test_a_question_passes_only_without_a_write_or_a_changed_event(self) -> None:
+        before = _event(datetime.fromisoformat("2026-09-10T14:00:00-07:00"))
+
+        self.assertTrue(asked_without_writing(_Events(before), _turn("clarification_created"), before))
+        self.assertFalse(asked_without_writing(_Events(before), _turn("calendar_update", (_update(),)), before))
+        self.assertFalse(
+            asked_without_writing(
+                _Events(_event(datetime.fromisoformat("2026-09-10T15:00:00-07:00"))),
+                _turn("clarification_created"),
+                before,
+            )
+        )
+
+    def test_token_counts_are_recorded_per_request_without_content(self) -> None:
+        usage = SimpleNamespace(prompt_tokens=4200, completion_tokens=900)
+        completions = SimpleNamespace(create=lambda **_: SimpleNamespace(usage=usage))
+        model = SimpleNamespace(client=SimpleNamespace(chat=SimpleNamespace(completions=completions)))
+        counter = TokenCounter(model)
+
+        model.client.chat.completions.create(messages=[])
+        model.client.chat.completions.create(messages=[])
+
+        self.assertEqual(counter.since(0), {"input_tokens": 8400, "output_tokens": 1800})
+        self.assertEqual(counter.since(2), {"input_tokens": None, "output_tokens": None})
 
 
 if __name__ == "__main__":

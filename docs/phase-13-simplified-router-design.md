@@ -290,19 +290,23 @@ Nothing is stored beyond what already is: the pasted text is a message in
 
 Checks are behaviors a user sees, never internal state.
 
-`ambiguous_correction` is replaced by two cases that test the principle itself:
+`ambiguous_correction` is replaced by two cases that test the principle itself. They
+run last, in this order, as three submits:
 
-1. **Not found, so ask, then complete.**
-   - In a new conversation that never mentioned the meeting, send `这个会议改到周四。`.
-     Expect no write and a question.
-   - Then answer `算法优化与代码审查会议，改到 9 月 17 日。` Expect that event moved to
-     2026-09-17.
-2. **Found, so act.** In the conversation that just asked about the meeting, send
-   `这个会议改到下午三点。` Expect the update, with no question.
+1. **Found, so act** (`target_found_acts`). In the conversation that just asked
+   about the meeting, send `这个会议改到下午三点。` Expect a committed update and the
+   event starting at 15:00.
+2. **Not found, so ask, then complete.**
+   - `target_not_found_asks`: in a new conversation that never mentioned the
+     meeting, send `这个会议改到周四。`. Expect a question, no write, and the event
+     unchanged.
+   - `target_named_completes`: then answer `算法优化与代码审查会议，改到 9 月 17 日。`
+     Expect a committed update and the event on 2026-09-17.
 
-Other cases keep their checks, except that no check reads a pending-clarification
-row. Each run also records input tokens and model time per turn, so the effect of
-the wider context is measured.
+Other cases keep their checks. A run has ten submits and ten effect checks, 20
+records. Each submit also records its input and output tokens and model time, so
+the effect of the wider context is measured. The counts come from the provider's
+usage report; no prompt or output is kept.
 
 ## Risks
 

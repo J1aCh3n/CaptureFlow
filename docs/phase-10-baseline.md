@@ -42,6 +42,11 @@ contextual router exists.
 > Protocol version 2 ([Phase 12](phase-12-answer-intents-design.md)) checks the two
 > answer rows by their effect — who wrote the reply, what it cites, and that nothing
 > was written — rather than by the intent label alone.
+>
+> Protocol version 3 ([Phase 13](phase-13-simplified-router-design.md)) replaces the
+> last row with two cases: a correction whose target the conversation mentioned is
+> applied, and one whose target it never mentioned is asked about, then completed
+> once the user names the event.
 
 | Input category | Required intent | Permitted committed effect |
 | --- | --- | --- |

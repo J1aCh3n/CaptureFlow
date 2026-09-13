@@ -4,7 +4,7 @@
     "timezone": "America/Vancouver",
     "database_seed": "isolated phase-10 contextual-router live fixture",
     "model": "qwen3.8-flash",
-    "version": 2
+    "version": 3
   },
   "cases": [
     {
@@ -36,8 +36,16 @@
       "input": "这个项目当前有什么待办？"
     },
     {
-      "name": "ambiguous_correction",
+      "name": "target_found_acts",
+      "input": "这个会议改到下午三点。"
+    },
+    {
+      "name": "target_not_found_asks",
       "input": "这个会议改到周四。"
+    },
+    {
+      "name": "target_named_completes",
+      "input": "算法优化与代码审查会议，改到 9 月 17 日。"
     }
   ]
 }

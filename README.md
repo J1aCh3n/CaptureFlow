@@ -12,9 +12,10 @@ messages, calendar events, ideas, and notes as unassigned local records.
 
 It is deliberately not a general chatbot. On each ordinary chat turn one model
 call reads the message in its bounded conversation context and returns a typed
-decision; only a question about a whole project makes a second call. Python validates the candidate target, time policy,
-lifecycle, duplicate/conflict, and credential rules before any SQLite write. The working
-principle is: understanding belongs to the model; authorization stays in Python.
+decision; only a question about a whole project makes a second call. Python
+validates the candidate target, time policy, lifecycle, duplicate/conflict, and
+credential rules before any SQLite write. The working principle is: understanding
+belongs to the model; authorization stays in Python.
 It has no external calendar synchronization, email, meetings, vector retrieval,
 or access to external services.
 
@@ -106,13 +107,14 @@ rows.
 
 ## Status and evidence
 
-The deterministic suite passes 184 tests. It verifies the database, validation,
+The deterministic suite passes 187 tests. It verifies the database, validation,
 and model-write boundaries with scripted model decisions.
 
-The frozen Phase 10 live acceptance (16 ordered assertions) exercises calendar creation and correction, task distinction,
-meeting questions, replay, cross-conversation lookups, and an ambiguous
-correction. Each run is demonstration evidence, not a reliability benchmark.
-Its protocol model was `gpt-5.6-terra` through Phase 11 and is `qwen3.8-flash`
+The frozen Phase 10 live acceptance (20 ordered records, protocol version 3)
+exercises calendar creation and correction, task distinction, meeting questions,
+replay, cross-conversation lookups, and a correction whose target is found or must
+be asked about. It records each turn's tokens and model time. Each run is
+demonstration evidence, not a reliability benchmark. Its protocol model was `gpt-5.6-terra` through Phase 11 and is `qwen3.8-flash`
 from the redundancy cleanup onward.
 
 | Document | Covers |
