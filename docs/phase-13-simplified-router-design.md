@@ -1,7 +1,7 @@
 # Phase 13: A Simpler Contextual Router
 
 **Status:** implemented, with acceptance protocol version 3 and five runs recorded
-under Evidence. Decision 7 is open; the others are recorded in the last section.
+under Evidence. The decisions are recorded in the last section.
 
 ## Why
 
@@ -37,7 +37,7 @@ Understanding belongs to the model; authorization stays in Python.
 A target counts as found when either:
 
 - the current conversation mentioned it, or
-- the current message is specific enough to match one stored event or record.
+- the current message names the item itself, such as by its title.
 
 An item that appeared only in an older, different conversation is not found. The
 model asks.
@@ -347,7 +347,7 @@ Records per run were 19, 20, 19, 19, and 19 of 20. Model time per run was
   about 4,100–4,500 input tokens, close to the estimate of about 4,000. Latency is
   dominated by output: the slowest turn wrote 4,757 tokens, mostly reasoning.
 
-Whether and how to address `target_not_found_asks` is open decision 7.
+How `target_not_found_asks` was addressed is decision 7.
 
 ## Risks
 
@@ -422,8 +422,13 @@ Not in this phase. Each fits the layers in D without changing their shape.
    turn and move the citation checks into the router. Revisit with the token and
    time records from protocol version 3.
 7. **A demonstrative in a new conversation.** `target_not_found_asks` passed one run
-   of five: the model usually binds `这个会议` to the only candidate meeting (see
-   Evidence). Open.
+   of five: the model usually bound `这个会议` to the only candidate meeting (see
+   Evidence). The prompt said a target is found when the message is specific enough
+   to match exactly one candidate, which the only candidate satisfies. Decided:
+   change only that sentence, to a message that names the item itself, such as by
+   its title. The existing sentence that a demonstrative in a conversation that
+   never mentioned the item finds nothing stays as it is. Verified with five runs on
+   `qwen3.5-flash`, because `qwen3.8-flash` has almost no free quota left.
 
 ## Delete confirmation
 

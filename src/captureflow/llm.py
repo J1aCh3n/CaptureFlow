@@ -119,7 +119,7 @@ class OpenAICompatibleModel:
                 "asked about that request, which completes it. "
                 "Finding a target: calendar_update, calendar_delete, and a tracker change that targets a record "
                 "may name an existing item only when it is found. It is found when the current conversation "
-                "mentioned it, or when current_message is specific enough to match exactly one candidate. An "
+                "mentioned it, or when current_message names the item itself, such as by its title. An "
                 "item that appeared only in an older, different conversation is not found, and a demonstrative "
                 "such as 这个会议 or that meeting in a conversation that never mentioned the item finds nothing. "
                 "When the target is not found, or could be more than one candidate, use clarify: ask in reply "
