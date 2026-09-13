@@ -17,8 +17,10 @@
     Interpreter to use. Defaults to the llm-course Conda environment.
 
 .PARAMETER Model
-    Value for CAPTUREFLOW_MODEL. Defaults to the existing variable, then to the
-    cheap debugging model.
+    Value for CAPTUREFLOW_MODEL. Defaults to the existing variable, then to
+    qwen3.6-plus. For a Qwen model the key comes from QWEN_API_KEY, the endpoint
+    is DashScope international, and the timeout is 120 seconds, unless those
+    variables are already set.
 
 .PARAMETER CheckOnly
     Run every check and print the resolved configuration without starting the
@@ -28,7 +30,7 @@
     .\scripts\run_local_app.ps1
 
 .EXAMPLE
-    .\scripts\run_local_app.ps1 -Model gpt-5.6-terra
+    .\scripts\run_local_app.ps1 -CheckOnly
 #>
 
 [CmdletBinding()]
@@ -64,18 +66,31 @@ if ($imported.Trim() -ne $source) {
     throw "captureflow imports from $($imported.Trim()), not $source. Refusing to run another checkout's code."
 }
 
-if (-not $env:CAPTUREFLOW_API_KEY -and $env:REPOMEDIC_OPENAI_API_KEY) {
-    $env:CAPTUREFLOW_API_KEY = $env:REPOMEDIC_OPENAI_API_KEY
-}
 if ($Model) {
     $env:CAPTUREFLOW_MODEL = $Model
 } elseif (-not $env:CAPTUREFLOW_MODEL) {
-    $env:CAPTUREFLOW_MODEL = 'gpt-5.6-luna'
+    $env:CAPTUREFLOW_MODEL = 'qwen3.6-plus'
+}
+if ($env:CAPTUREFLOW_MODEL -like 'qwen*') {
+    if (-not $env:CAPTUREFLOW_API_KEY -and $env:QWEN_API_KEY) {
+        $env:CAPTUREFLOW_API_KEY = $env:QWEN_API_KEY
+    }
+    if (-not $env:CAPTUREFLOW_BASE_URL) {
+        # A key issued for the international region is rejected by the Beijing endpoint.
+        $env:CAPTUREFLOW_BASE_URL = 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1'
+    }
+    if (-not $env:CAPTUREFLOW_MODEL_TIMEOUT_SECONDS) {
+        # Qwen took 18-60 seconds per routing call; the 30-second default would cut it off.
+        $env:CAPTUREFLOW_MODEL_TIMEOUT_SECONDS = '120'
+    }
+} elseif (-not $env:CAPTUREFLOW_API_KEY -and $env:REPOMEDIC_OPENAI_API_KEY) {
+    $env:CAPTUREFLOW_API_KEY = $env:REPOMEDIC_OPENAI_API_KEY
 }
 
 Write-Host "checkout: $root"
 Write-Host "package:  $($imported.Trim())"
 Write-Host "model:    $env:CAPTUREFLOW_MODEL"
+Write-Host "endpoint: $(if ($env:CAPTUREFLOW_BASE_URL) { $env:CAPTUREFLOW_BASE_URL } else { 'OpenAI default' })"
 Write-Host "database: $(if ($env:CAPTUREFLOW_DATABASE_PATH) { $env:CAPTUREFLOW_DATABASE_PATH } else { Join-Path $root 'data\captureflow.sqlite3' })"
 if ($env:CAPTUREFLOW_API_KEY) {
     Write-Host 'api key:  configured'

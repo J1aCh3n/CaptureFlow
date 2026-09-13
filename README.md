@@ -1,8 +1,8 @@
-# CaptureFlow
+﻿# CaptureFlow
 
 CaptureFlow is a local, single-user project continuity assistant. Its interface is
 persisted text chat: it keeps bounded conversation context and maintains
-source-grounded local records in SQLite — Calendar events, Ideas & Notes, and
+source-grounded local records in SQLite â€” Calendar events, Ideas & Notes, and
 per-project tracker records such as tasks, decisions, and blockers. The default
 workspace keeps chat beside a read-only snapshot of the selected project;
 Calendar, Tracker, and Ideas & Notes are also available as full management views.
@@ -45,7 +45,7 @@ interpret date or time wording.
 
 Behavior worth knowing:
 
-- A follow-up such as `把这场会议改到明天下午两点到三点` updates the event the
+- A follow-up such as `æŠŠè¿™åœºä¼šè®®æ”¹åˆ°æ˜Žå¤©ä¸‹åˆä¸¤ç‚¹åˆ°ä¸‰ç‚¹` updates the event the
   conversation created. An update or delete that names no event the conversation
   identified asks which event is meant.
 - A stated foreign timezone or a repeating schedule is clarified rather than
@@ -59,10 +59,10 @@ Behavior worth knowing:
   active Calendar, Ideas & Notes, and same-project records, with source cards and
   times rendered from SQLite. It works in an unassigned conversation.
 
-Known limits: a bare hour such as `明天十点` is resolved to 10:00 without a
+Known limits: a bare hour such as `æ˜Žå¤©åç‚¹` is resolved to 10:00 without a
 question, and the reply states it; a message that only mentions an event by name
 does not count as identifying it for an update; range questions such as
-`我下周有什么安排？` are not answered.
+`æˆ‘ä¸‹å‘¨æœ‰ä»€ä¹ˆå®‰æŽ’ï¼Ÿ` are not answered.
 
 These explicit commands need no model call:
 
@@ -87,20 +87,21 @@ rows.
 
 ## Status and evidence
 
-The deterministic suite passes 159 tests. It verifies the database, validation,
+The deterministic suite passes 164 tests. It verifies the database, validation,
 and model-write boundaries with scripted model decisions.
 
-The frozen Phase 10 live acceptance (16 ordered assertions against
-`gpt-5.6-terra`) exercises calendar creation and correction, task distinction,
+The frozen Phase 10 live acceptance (16 ordered assertions) exercises calendar creation and correction, task distinction,
 meeting questions, replay, cross-conversation lookups, and an ambiguous
 correction. Each run is demonstration evidence, not a reliability benchmark.
+Its protocol model was `gpt-5.6-terra` through Phase 11 and is `qwen3.6-plus`
+from the redundancy cleanup onward.
 
 | Document | Covers |
 | --- | --- |
 | [phase-9-local-context-evidence.md](docs/phase-9-local-context-evidence.md) | Deterministic local recall |
 | [phase-10-baseline.md](docs/phase-10-baseline.md) | The contextual router's acceptance contract |
 | [phase-10-live-evidence.md](docs/phase-10-live-evidence.md) | First frozen live acceptance |
-| [phase-10.4](docs/phase-10.4-calendar-deletion-and-noon-times.md) – [phase-10.7](docs/phase-10.7-capability-boundary-probe.md) | Feedback rounds: deletion, compound turns, deadlines, boundary probe |
+| [phase-10.4](docs/phase-10.4-calendar-deletion-and-noon-times.md) â€“ [phase-10.7](docs/phase-10.7-capability-boundary-probe.md) | Feedback rounds: deletion, compound turns, deadlines, boundary probe |
 | [phase-10.8-frozen-acceptance-rerun.md](docs/phase-10.8-frozen-acceptance-rerun.md) | Acceptance reruns after those rounds |
 | [phase-11-model-normalized-time-design.md](docs/phase-11-model-normalized-time-design.md) | Moving date and time understanding to the model |
 | [phase-11-evidence.md](docs/phase-11-evidence.md) | Phase 11 results and acceptance reruns |
@@ -114,7 +115,7 @@ ignored output directory:
 python scripts/run_phase10_live_acceptance.py --output-dir runs/phase10-live-YYYYMMDD
 ```
 
-The fixture model remains the default acceptance protocol. To run the same cases
+The fixture's model is the acceptance protocol. To run the same cases
 as an explicitly labeled cross-model comparison, configure another model and add
 `--allow-model-override`; the trace records both the protocol and actual models.
 
@@ -138,7 +139,9 @@ When several checkouts of this repository exist, an editable install of one of
 them shadows the others, and the app then runs the wrong code without any error.
 `scripts/run_local_app.ps1` puts this checkout's `src` first, refuses to start if
 `captureflow` still imports from elsewhere, and runs Streamlit from the
-repository root regardless of the current directory:
+repository root regardless of the current directory. It defaults to
+`qwen3.6-plus`: the key from `QWEN_API_KEY`, the DashScope international
+endpoint, and a 120-second timeout, unless those variables are already set:
 
 ```powershell
 .\scripts\run_local_app.ps1
@@ -157,14 +160,14 @@ The router uses a configured OpenAI-compatible chat-completions endpoint. Set
 these environment variables in the shell that starts Streamlit:
 
 ```powershell
-$env:CAPTUREFLOW_API_KEY = "..."
-$env:CAPTUREFLOW_MODEL = "your-model-id"
-# Optional for a compatible provider endpoint:
-$env:CAPTUREFLOW_BASE_URL = "https://provider.example/v1"
+$env:CAPTUREFLOW_API_KEY = $env:QWEN_API_KEY
+$env:CAPTUREFLOW_MODEL = "qwen3.6-plus"
+# A compatible provider endpoint; a DashScope key only works in its own region:
+$env:CAPTUREFLOW_BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
 # Optional; defaults to the computer's timezone:
 $env:CAPTUREFLOW_TIMEZONE = "America/Vancouver"
-# Optional; defaults to 30 seconds and must be positive:
-$env:CAPTUREFLOW_MODEL_TIMEOUT_SECONDS = "30"
+# Optional; defaults to 30 seconds and must be positive. Qwen needs about 120:
+$env:CAPTUREFLOW_MODEL_TIMEOUT_SECONDS = "120"
 streamlit run app.py
 ```
 
