@@ -324,6 +324,13 @@ class ProjectChange(BaseModel):
     target_record_id: str | None = None
     target_state: Literal["completed", "resolved"] | None = None
 
+    @field_validator("recurring", mode="before")
+    @classmethod
+    def unstated_recurrence_is_not_recurring(cls, value: object) -> object:
+        # The prompt asks for null on anything the message does not state; for this
+        # flag, unstated means not repeating.
+        return False if value is None else value
+
     @model_validator(mode="before")
     @classmethod
     def drop_retired_deadline_expressions(cls, value: object) -> object:
@@ -505,6 +512,13 @@ class ContextualAction(BaseModel):
     recurring: bool = False
     target_event_id: str | None = Field(default=None, min_length=1)
     evidence: list[EvidenceReference] = Field(min_length=1, max_length=3)
+
+    @field_validator("recurring", mode="before")
+    @classmethod
+    def unstated_recurrence_is_not_recurring(cls, value: object) -> object:
+        # The prompt asks for null on anything the message does not state; for this
+        # flag, unstated means not repeating.
+        return False if value is None else value
 
     @field_validator("content", "description", "timezone")
     @classmethod

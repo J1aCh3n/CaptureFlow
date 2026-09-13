@@ -279,6 +279,31 @@ class ModelTests(unittest.TestCase):
         self.assertEqual((change.due_date, change.due_time), ("2026-09-16", "20:00"))
         self.assertEqual(change.due_at, datetime.fromisoformat("2026-09-16T20:00:00-07:00"))
 
+    def test_an_unstated_recurrence_may_arrive_as_null(self) -> None:
+        change = ProjectChange.model_validate(
+            {
+                "action": "create_record",
+                "kind": "task",
+                "content": "排查延迟问题",
+                "source_quote": "我需要排查延迟问题。",
+                "due_date": None,
+                "recurring": None,
+            }
+        )
+        action = ContextualAction.model_validate(
+            {
+                "action": "update_event",
+                "target_event_id": "event-1",
+                "recurring": None,
+                "evidence": [{"message_id": "message-1", "source_quote": "这个会议改到周四。"}],
+            }
+        )
+
+        self.assertFalse(change.recurring)
+        self.assertFalse(action.recurring)
+        schema = ContextualAction.model_json_schema()["properties"]["recurring"]
+        self.assertEqual(schema["type"], "boolean")
+
     def test_only_a_new_task_may_carry_a_deadline(self) -> None:
         change = ProjectChange(
             action="create_record",
