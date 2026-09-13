@@ -84,6 +84,14 @@ Overridden `qwen3.8-flash` runs at intermediate commits scored:
 | `3050f9e` | 14 of 16 | The update failed on `source_ids` |
 | `2b9d914` | 15 of 16 | The ambiguous correction failed for lack of a new value |
 
+After `3cf1f91` accepted an end time and a duration that agree,
+`runs/qwen38flash-protocol-20260912-c` passed 15 of 16 with seven model calls.
+The event was created, updated, and found from both conversations. The one
+failure was `ambiguous_correction`: sent from the second conversation, the
+decision cited evidence from a message outside that conversation's window, and
+Python rejected it. That rejection guards grounding and was left in place; the
+case still wrote nothing.
+
 ## Open issues
 
 - **Run-to-run variance is high.** One structural slip at the first turn fails
