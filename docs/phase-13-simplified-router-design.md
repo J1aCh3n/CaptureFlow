@@ -383,6 +383,25 @@ seconds, faster than `qwen3.8-flash`.
   validation (run 2); and `cross_conversation_local_retrieval` answered with
   `reply_only` (run 3).
 
+### Sporadic failures, logged and not fixed
+
+A local probe on `qwen3.5-flash` at `4f1af28` replayed the acceptance state before
+three failing turns and ran each turn six times, keeping the raw output outside the
+repository. Each failure that reproduced did so once in six trials, so all are
+treated as sporadic for now: they are recorded here and not fixed.
+
+| Failure | Seen in | Reproduced | Cause found in the raw output | Fix, if it recurs |
+| --- | --- | --- | --- | --- |
+| `clarify` without a question | 3.8 run 1, 3.5 run 3 | 1 of 6 | The reasoning concluded it must ask, but the output was only `{"intent": "clarify"}`; the question was written nowhere, not into another field | Python replies with a generic question when `reply` is empty |
+| A local answer cites IDs outside the candidates | 3.5 run 2 | 1 of 6 | The model put message IDs (the create message, an assistant reply, the current message) into `source_ids`, confusing it with `source_message_ids`, and left out the event's ID | Drop IDs outside the candidates and fall back to the lookup instead of failing the turn |
+| A demonstrative in a new conversation is not asked about | 3.5 run 4 | 0 of 6 | — | — |
+| A named event is asked about again | 3.5 run 3 | 0 of 6 | — | — |
+| A task is asked about instead of created | 3.5 run 5 | not probed | — | — |
+| A local question in another conversation gets `reply_only` | 3.5 run 3 | not probed | — | Known sporadic before Phase 13 |
+
+The probe also showed that the current message appears twice in the model's input,
+as `current_message` and again at the end of `recent_messages`; one reasoning trace
+remarked on it. No failure was traced to it.
 
 ## Risks
 
