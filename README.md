@@ -1,4 +1,4 @@
-﻿# CaptureFlow
+# CaptureFlow
 
 CaptureFlow is a local, single-user project continuity assistant. Its interface is
 persisted text chat: it keeps bounded conversation context and maintains
