@@ -94,7 +94,7 @@ rows.
 
 ## Status and evidence
 
-The deterministic suite passes 174 tests. It verifies the database, validation,
+The deterministic suite passes 177 tests. It verifies the database, validation,
 and model-write boundaries with scripted model decisions.
 
 The frozen Phase 10 live acceptance (16 ordered assertions) exercises calendar creation and correction, task distinction,
