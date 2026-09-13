@@ -1,8 +1,7 @@
 # Phase 13: A Simpler Contextual Router
 
-**Status:** implemented: the router, schema, context layers, tracker quotes, and
-delete confirmation. Acceptance protocol version 3 and its runs follow. The
-decisions are recorded in the last section.
+**Status:** implemented, with acceptance protocol version 3 and five runs recorded
+under Evidence. Decision 7 is open; the others are recorded in the last section.
 
 ## Why
 
@@ -308,6 +307,48 @@ records. Each submit also records its input and output tokens and model time, so
 the effect of the wider context is measured. The counts come from the provider's
 usage report; no prompt or output is kept.
 
+## Evidence
+
+The deterministic suite passes 187 tests.
+
+Protocol version 3 ran five times on `qwen3.8-flash` at `3d86638`, from a clean
+working tree, with ten model calls per run. No run reached the free quota, so no
+run needed another model. Runs are `runs/phase13-v3-1` to `-5`.
+
+| Case | Passed | Input tokens | Output tokens | Model seconds |
+| --- | --- | --- | --- | --- |
+| `calendar_create` | 5 of 5 | 4,146 | 383–611 | 7–12 |
+| `calendar_update` | 5 of 5 | 4,340 | 572–1,222 | 8–18 |
+| `tracker_change` | 5 of 5 | 4,498 | 407–744 | 7–12 |
+| `meeting_question` | 5 of 5 | 4,637–4,638 | 272–1,667 | 6–27 |
+| `replay_idempotency` | 5 of 5 | — | — | 0 |
+| `cross_conversation_local_retrieval` | 5 of 5 | 4,232–4,233 | 289–1,045 | 7–24 |
+| `cross_conversation_project_retrieval` | 5 of 5 | 5,267–5,275 | 408–1,214 | 8–23 |
+| `target_found_acts` | 5 of 5 | 4,484–4,493 | 1,219–4,757 | 31–223 |
+| `target_not_found_asks` | 1 of 5 | 4,210–4,216 | 586–1,018 | 14–22 |
+| `target_named_completes` | 5 of 5 | 4,320–4,394 | 691–2,655 | 14–75 |
+
+Records per run were 19, 20, 19, 19, and 19 of 20. Model time per run was
+141–382 seconds. The project answer's token counts cover both of its calls.
+
+- **Every case except one passed every run**, including the former failure modes:
+  `tracker_change` and both answer cases held, and a named event was always
+  completed.
+- **`target_not_found_asks` failed four times, in two ways:**
+  - Three times (runs 3–5) the model did not ask. In a conversation whose only
+    message was `这个会议改到周四。`, it chose the one candidate meeting and moved
+    it to Thursday, which was already that event's date, so the turn wrote nothing
+    (`calendar_unchanged`). This is the wrong-target risk below, observed: the
+    prompt's rule was not followed.
+  - Once (run 1) the model chose `clarify` without putting its question in
+    `reply`, and the turn failed validation. The trace keeps no model output, so
+    where the question went is not known.
+- **Cost of the layered context.** With this small database each routing call reads
+  about 4,100–4,500 input tokens, close to the estimate of about 4,000. Latency is
+  dominated by output: the slowest turn wrote 4,757 tokens, mostly reasoning.
+
+Whether and how to address `target_not_found_asks` is open decision 7.
+
 ## Risks
 
 - **A wrong target.** Without the Python heuristic, a model could bind "这个会议" to
@@ -380,6 +421,9 @@ Not in this phase. Each fits the layers in D without changing their shape.
    call in this phase. Merging would add closed and superseded records to every
    turn and move the citation checks into the router. Revisit with the token and
    time records from protocol version 3.
+7. **A demonstrative in a new conversation.** `target_not_found_asks` passed one run
+   of five: the model usually binds `这个会议` to the only candidate meeting (see
+   Evidence). Open.
 
 ## Delete confirmation
 
