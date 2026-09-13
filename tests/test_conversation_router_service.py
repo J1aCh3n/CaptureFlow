@@ -1682,6 +1682,51 @@ class ConversationRouterServiceTests(unittest.TestCase):
         )
         self.assertEqual(self.store.list_calendar_events(), [])
 
+    def test_an_update_without_a_new_value_asks_for_the_date(self) -> None:
+        source = self.store.save_message(
+            Message(
+                id="thursday-event-source",
+                conversation_id=self.conversation.id,
+                role="user",
+                content="本周四下午四点有工作流会议。",
+            )
+        )
+        event = self.store.save_calendar_event(
+            CalendarEvent(
+                id="thursday-workflow-event",
+                conversation_id=self.conversation.id,
+                title="工作流会议",
+                source_message_id=source.id,
+                source_quote=source.content,
+                start_at=datetime.fromisoformat("2026-09-10T16:00:00-07:00"),
+                all_day=False,
+                timezone="America/Vancouver",
+            )
+        )
+        correction = "这个会议改到周四。"
+        model = ScriptedContextualModel(
+            [
+                {
+                    "intent": "calendar_update",
+                    "action": {
+                        "action": "update_event",
+                        "target_event_id": event.id,
+                        "date": None,
+                        "evidence": [{"message_id": "undecided-update-turn", "source_quote": correction}],
+                    },
+                }
+            ]
+        )
+
+        turn = ConversationRouterService(
+            self.store, model, date(2026, 9, 9)
+        ).submit(self.conversation.id, correction, "undecided-update-turn")
+
+        self.assertEqual(turn.outcome, "clarification_created")
+        self.assertEqual(self.store.get_calendar_event(event.id), event)
+        self.assertEqual(self.store.list_calendar_event_update_operations("undecided-update-turn"), [])
+        self.assertEqual(self.store.get_pending_clarification(self.conversation.id).missing_field, "date")
+
     def test_an_implausible_update_date_asks_for_the_date(self) -> None:
         source = self.store.save_message(
             Message(

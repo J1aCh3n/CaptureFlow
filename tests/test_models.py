@@ -201,13 +201,12 @@ class ModelTests(unittest.TestCase):
         )
 
         self.assertIsNone(decision.pending_action.date)
-        with self.assertRaises(ValidationError):
-            ConversationDecision(
-                intent="calendar_update",
-                action=ContextualAction(
-                    action="update_event", target_event_id="event-1", evidence=evidence
-                ),
-            )
+        # A proposed update may lack its new value too; the router turns it into a question.
+        undecided = ConversationDecision(
+            intent="calendar_update",
+            action=ContextualAction(action="update_event", target_event_id="event-1", evidence=evidence),
+        )
+        self.assertFalse(undecided.action.has_replacement())
 
     def test_contextual_clarification_retains_an_unresolved_calendar_update(self) -> None:
         decision = ConversationDecision(

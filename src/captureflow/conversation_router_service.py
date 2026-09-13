@@ -426,6 +426,10 @@ class ConversationRouterService:
             return "timezone"
         if action.recurring:
             return "recurrence"
+        if action.action == "update_event" and not action.has_replacement():
+            # The model found the event but not its new value, as in 改到周四 when two
+            # Thursdays are plausible; ask instead of rejecting the whole decision.
+            return "date"
         if action.action == "create_event" and action.date is None:
             return "date"
         if action.date is not None and not self._plausible_date(date.fromisoformat(action.date)):

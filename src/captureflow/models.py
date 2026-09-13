@@ -560,8 +560,8 @@ class ContextualAction(BaseModel):
             if (self.end_time is not None or self.duration_minutes is not None) and self.start_time is None:
                 raise ValueError("an event end or duration needs a start time")
         elif self.action == "update_event":
-            # A committed update needs a replacement field; that is checked on the decision,
-            # because a pending update may be waiting for exactly the field it lacks.
+            # An update may lack every replacement field: the router asks for it rather
+            # than rejecting a model that could not tell what the new value is.
             pass
         elif self.action == "delete_event":
             # A committed deletion needs one candidate target; an unresolved one may
@@ -652,8 +652,6 @@ class ConversationDecision(BaseModel):
                 and self.action.target_event_id is None
             ):
                 raise ValueError(f"a {self.intent.replace('_', ' ')} requires a candidate event target")
-            if self.intent == "calendar_update" and not self.action.has_replacement():
-                raise ValueError("an event update requires at least one replacement field")
             if extra := self._present("project_changes", "clarification_question", "pending_action"):
                 raise ValueError(f"a local write cannot include tracker or clarification payload: {extra}")
         elif self.intent == "tracker_change":
