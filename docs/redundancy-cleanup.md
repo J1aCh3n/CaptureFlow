@@ -64,7 +64,14 @@ Phase 11 replaced. They remain in Git history.
 ## Evidence boundary
 
 The evidence for this cleanup is the deterministic suite, which passed after every
-commit, plus the old-versus-new comparison for `asked_date`. The frozen Phase 10
-live acceptance was attempted at `3dd73b3` but could not run: every model call
-returned `429 insufficient_quota` because the API account had no credits. It
-should be re-run once credits are available, since `submit` was restructured.
+commit, plus the old-versus-new comparison for `asked_date`. The original frozen
+Phase 10 model remains blocked by `429 insufficient_quota`. A separate, explicitly
+overridden `qwen3.6-plus` comparison ran from
+`runs/cleanup-phase10-live-20260912-qwen36-codex` at `e853a6c` with a clean working
+tree: 14 of 16 records passed with seven model calls. Qwen classified the tracker
+input as `save_idea` instead of `tracker_change` and the cross-conversation project
+question as `local_answer` instead of `project_answer`; the other six effect checks
+passed. No rerun was made because these were two semantic mismatches, not the
+single isolated failure covered by the rerun rule. This one cross-model run is
+demonstration evidence, not a reliability measure or a replacement for the frozen
+`gpt-5.6-terra` acceptance.
