@@ -4,7 +4,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 from pydantic import ValidationError
 
-from .memory import contains_credential_disclosure
+from .credentials import contains_credential_disclosure
 from .models import Message, Project, ProjectChange, ProjectChangeOperation, ProjectRecord
 from .storage import CaptureStore
 

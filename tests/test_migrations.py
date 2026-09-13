@@ -90,11 +90,14 @@ class MigrationTests(unittest.TestCase):
         store = CaptureStore(self.database_path)
         store.initialize()
 
-        self.assertEqual(store.get_capture("capture-1").source_text, "Legacy capture")
         with closing(sqlite3.connect(self.database_path)) as connection:
+            capture = connection.execute(
+                "SELECT source_text FROM captures WHERE id = 'capture-1'"
+            ).fetchone()
             versions = connection.execute(
                 "SELECT version FROM schema_migrations ORDER BY version"
             ).fetchall()
+        self.assertEqual(capture, ("Legacy capture",))
         self.assertEqual(versions, [(version,) for version in range(1, LATEST_SCHEMA_VERSION + 1)])
 
     def test_existing_v7_event_upgrades_with_an_empty_description(self) -> None:

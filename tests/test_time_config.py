@@ -25,7 +25,7 @@ class TimeConfigTests(unittest.TestCase):
 
 class ReferenceClockTests(unittest.TestCase):
     def test_reference_now_is_timezone_aware_and_matches_the_reference_date(self) -> None:
-        from captureflow.workflow import configured_reference_date, configured_reference_now
+        from captureflow.time_config import configured_reference_date, configured_reference_now
 
         now = configured_reference_now("America/Vancouver")
 
@@ -38,7 +38,7 @@ class ReferenceClockTests(unittest.TestCase):
         )
 
     def test_an_unknown_timezone_is_rejected(self) -> None:
-        from captureflow.workflow import configured_reference_now
+        from captureflow.time_config import configured_reference_now
 
         with self.assertRaises(ValueError):
             configured_reference_now("Mars/Olympus_Mons")

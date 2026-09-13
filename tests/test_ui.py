@@ -18,7 +18,7 @@ from captureflow.models import (
     SavedItem,
 )
 from captureflow.storage import CaptureStore
-from captureflow.workflow import configured_reference_date
+from captureflow.time_config import configured_reference_date
 
 
 class _CalendarRoutingUiModel:

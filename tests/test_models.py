@@ -6,12 +6,10 @@ from pydantic import ValidationError
 from captureflow.models import (
     CalendarEvent,
     CalendarEventUpdateOperation,
-    Capture,
     ContextualAction,
     ConversationDecision,
     Conversation,
     EvidenceReference,
-    MAX_CAPTURE_CHARACTERS,
     Message,
     PendingClarification,
     ProjectChange,
@@ -25,17 +23,6 @@ class ModelTests(unittest.TestCase):
         conversation = Conversation(title="  Reading list  ")
 
         self.assertEqual(conversation.title, "Reading list")
-
-    def test_blank_capture_is_invalid(self) -> None:
-        with self.assertRaises(ValidationError):
-            Capture(conversation_id="conversation-1", source_text="   ")
-
-    def test_capture_limit_is_enforced(self) -> None:
-        with self.assertRaises(ValidationError):
-            Capture(
-                conversation_id="conversation-1",
-                source_text="x" * (MAX_CAPTURE_CHARACTERS + 1),
-            )
 
     def test_blank_message_is_invalid(self) -> None:
         with self.assertRaises(ValidationError):

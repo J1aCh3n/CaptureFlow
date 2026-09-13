@@ -13,7 +13,7 @@ from .context_service import ProjectContextWindow, RouterCandidates, select_proj
 from .date_tool import calendar_reference
 from .llm import InvalidStructuredOutput, ModelError, ContextualConversationModel
 from .local_context_service import LocalContextService
-from .memory import contains_credential_disclosure
+from .credentials import contains_credential_disclosure
 from .models import (
     CalendarEvent,
     CalendarEventUpdateOperation,
