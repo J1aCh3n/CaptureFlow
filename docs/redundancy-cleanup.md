@@ -65,13 +65,16 @@ Phase 11 replaced. They remain in Git history.
 
 The evidence for this cleanup is the deterministic suite, which passed after every
 commit, plus the old-versus-new comparison for `asked_date`. The original frozen
-Phase 10 model remains blocked by `429 insufficient_quota`. A separate, explicitly
-overridden `qwen3.6-plus` comparison ran from
-`runs/cleanup-phase10-live-20260912-qwen36-codex` at `e853a6c` with a clean working
-tree: 14 of 16 records passed with seven model calls. Qwen classified the tracker
-input as `save_idea` instead of `tracker_change` and the cross-conversation project
-question as `local_answer` instead of `project_answer`; the other six effect checks
-passed. No rerun was made because these were two semantic mismatches, not the
-single isolated failure covered by the rerun rule. This one cross-model run is
-demonstration evidence, not a reliability measure or a replacement for the frozen
-`gpt-5.6-terra` acceptance.
+Phase 10 model remains blocked by `429 insufficient_quota`. Two explicitly
+overridden `qwen3.6-plus` comparisons ran from clean working trees with seven model
+calls each. `runs/cleanup-phase10-live-20260912-qwen36-codex` at `e853a6c` passed
+14 of 16 records: Qwen saved the tracker input as an idea, leaving no Project
+record for the dependent lookup. The requested rerun,
+`runs/cleanup-phase10-live-20260912-qwen36-codex-b` at `d96f6d5`, passed 12 of 16:
+the tracker turn and ambiguous correction returned model-or-validation failures,
+the missing tracker record again blocked the Project-source check, and the
+cross-conversation meeting lookup was classified as `project_answer` while citing
+a Calendar source. These cross-model runs demonstrate provider-specific variance;
+they are not a reliability measure or a replacement for the frozen
+`gpt-5.6-terra` acceptance. No product code, prompt, or fixture was changed in
+response.

@@ -1,8 +1,9 @@
 # Task: re-run the frozen Phase 10 live acceptance after the redundancy cleanup
 
-**Status:** open for the frozen protocol model. An explicitly overridden
-`qwen3.6-plus` comparison completed 14 of 16 records at `e853a6c`; the two failed
-effect checks were `tracker_change` and `cross_conversation_project_retrieval`.
+**Status:** open for the frozen protocol model. Two explicitly overridden
+`qwen3.6-plus` comparisons completed 14 of 16 records at `e853a6c` and 12 of 16
+at `d96f6d5`; the rerun reproduced the missing Tracker record and added a
+meeting-query intent mismatch plus an ambiguous-correction validation failure.
 Delete nothing, and change no product code, fixture, or prompt as part of this
 task.
 
