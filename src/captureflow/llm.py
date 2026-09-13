@@ -8,7 +8,7 @@ from typing import Any, Protocol, TypeVar
 from openai import OpenAI
 from pydantic import BaseModel, ValidationError
 
-from .models import ConversationDecision
+from .models import ConversationDecision, ProjectAnswer
 
 
 class ModelError(RuntimeError):
@@ -34,6 +34,14 @@ class ContextualConversationModel(Protocol):
         calendar: list[dict[str, str]] | None = None,
         reference_time: str | None = None,
     ) -> ConversationDecision: ...
+
+    def answer_project_question(
+        self,
+        question: dict[str, str],
+        recent_messages: list[dict[str, str]],
+        project_snapshot: dict,
+        reference_date: str,
+    ) -> ProjectAnswer: ...
 
 
 @dataclass(frozen=True)
@@ -153,9 +161,13 @@ class OpenAICompatibleModel:
                 "save_idea, or save_note, must cite the current message, and is not executed until the user "
                 "confirms it. Leave both fields null when the message states only one item; never invent a "
                 "second item or split one item into two. "
-                "A meeting question is local_answer and must not propose a write. Project status/history "
-                "questions are project_answer and must not propose a write. For local_answer or project_answer, "
-                "list every supplied candidate ID used by the reply in source_ids. Save only an explicit idea or "
+                "Neither answer intent proposes a write, and CaptureFlow writes both answers itself. "
+                "local_answer is a question about one or a few specific stored items: a Calendar event, an "
+                "idea or note, or a single project record such as one task's deadline. Put the IDs of the "
+                "supplied candidates the question is about in source_ids, or leave source_ids empty when none "
+                "of them is it. project_answer is a question about the project as a whole: progress, outstanding "
+                "work, blockers, deadlines across tasks, or why a decision changed; CaptureFlow gathers the "
+                "project's records for it, so source_ids and reply are not needed. Save only an explicit idea or "
                 "note with save_idea or save_note. Use reply_only for unsupported conversation. "
                 "Every local action needs one to three EvidenceReference entries. Each entry must copy an "
                 "exact quote from one supplied recent_messages message and its exact message_id; do not cite "
@@ -188,6 +200,38 @@ class OpenAICompatibleModel:
             candidate_project_records,
         )
         return decision
+
+    def answer_project_question(
+        self,
+        question: dict[str, str],
+        recent_messages: list[dict[str, str]],
+        project_snapshot: dict,
+        reference_date: str,
+    ) -> ProjectAnswer:
+        """Write a project-level answer from the supplied snapshot; Python checks its citations."""
+
+        return self._complete(
+            ProjectAnswer,
+            system=(
+                "You are CaptureFlow's project answer writer. Return JSON only. Answer the question about "
+                "the project using only project_snapshot and recent_messages. The snapshot lists open records, "
+                "recently completed or resolved records, and superseded decisions and constraints with their "
+                "rationale and the record that replaced each, plus upcoming project Calendar events. For "
+                "progress or outstanding work, use open and recently closed records. For why something "
+                "changed, use the superseded record, its rationale, and the record that replaced it. Do not "
+                "write dates or clock times in reply: CaptureFlow renders them from the stored records you "
+                "cite. List in source_ids every record or event ID the reply relies on, copied exactly from "
+                "the snapshot, at most six. If the snapshot does not contain the answer, say so plainly and "
+                "leave source_ids empty. Never invent a record, decision, reason, deadline, or ID. Reply in "
+                "the language of the question."
+            ),
+            payload={
+                "question": question,
+                "recent_messages": recent_messages,
+                "project_snapshot": project_snapshot,
+                "reference_date": reference_date,
+            },
+        )
 
     @staticmethod
     def _validate_contextual_references(

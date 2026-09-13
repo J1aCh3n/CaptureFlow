@@ -30,6 +30,7 @@ from .models import (
     ToolOperation,
     utc_now,
 )
+from .project_answer_service import answer_project_question, build_project_snapshot
 from .project_service import apply_validated_changes
 from .storage import CaptureStore
 
@@ -190,11 +191,16 @@ class ConversationRouterService:
                 return turn_without_writes(
                     self._save_clarification(user_message, decision), "clarification_created"
                 )
-            if decision.intent == "local_answer" or self._cites_local_records(decision, candidates):
+            if decision.intent == "local_answer":
                 local_turn = LocalContextService(self.store, self.reference_date).submit(
-                    conversation_id, content, user_message.id
+                    conversation_id,
+                    content,
+                    user_message.id,
+                    selected=self._named_candidates(decision, candidates),
                 )
                 return turn_without_writes(local_turn.assistant_message, local_turn.outcome)
+            if decision.intent == "project_answer":
+                return self._answer_project(user_message, decision, context_window, candidates, model_seconds)
             operations, reply = self._execute(decision, user_message, candidates)
         except (KeyError, ValidationError, ValueError) as error:
             return self._reply(
@@ -241,16 +247,82 @@ class ConversationRouterService:
         return turn
 
     @staticmethod
-    def _cites_local_records(decision: ConversationDecision, candidates: RouterCandidates) -> bool:
-        """Whether a project answer rests on Calendar events or ideas/notes.
+    def _named_candidates(
+        decision: ConversationDecision, candidates: RouterCandidates
+    ) -> list[CalendarEvent | SavedItem | ProjectRecord]:
+        """The stored items a local question is about, in the order the model named them."""
 
-        Those facts, and event times above all, are rendered from SQLite by the local
-        lookup; a project answer would restate them in the model's own words.
-        """
+        by_id = {
+            item.id: item
+            for item in (*candidates.events, *candidates.saved_items, *candidates.project_records)
+        }
+        return [by_id[source_id] for source_id in decision.source_ids if source_id in by_id]
 
-        local_ids = {event.id for event in candidates.events} | {item.id for item in candidates.saved_items}
-        return decision.intent == "project_answer" and any(
-            source_id in local_ids for source_id in decision.source_ids
+    def _answer_project(
+        self,
+        user_message: Message,
+        decision: ConversationDecision,
+        context_window: ContextWindow,
+        candidates: RouterCandidates,
+        routing_seconds: float,
+    ) -> ConversationRouterTurn:
+        """Answer a question about the whole project with a second call over its snapshot."""
+
+        project = self.store.get_conversation_project(user_message.conversation_id)
+        if project is None:
+            return self._reply(
+                user_message,
+                "This conversation is not assigned to a project, so I cannot answer a question about project progress.",
+                decision,
+                context_window,
+                candidates,
+                (),
+                model_calls=1,
+                model_seconds=routing_seconds,
+                outcome="project_answer_unavailable",
+            )
+        snapshot_started = perf_counter()
+        snapshot = build_project_snapshot(self.store, project, self.reference_date)
+        snapshot_seconds = perf_counter() - snapshot_started
+        answer_started = perf_counter()
+        try:
+            result = answer_project_question(
+                self.model, snapshot, user_message, context_window.for_router(), self.reference_date
+            )
+        except (InvalidStructuredOutput, ModelError, ValidationError, ValueError) as error:
+            return self._reply(
+                user_message,
+                "I could not answer from the stored project records, so nothing was changed.",
+                decision,
+                context_window,
+                candidates,
+                (),
+                model_calls=2,
+                model_seconds=routing_seconds + perf_counter() - answer_started,
+                local_seconds=snapshot_seconds,
+                outcome="model_or_validation_failure",
+                failure_reason=_failure_reason(error),
+            )
+        answer_seconds = perf_counter() - answer_started
+        assistant = self._assistant_message(user_message, result.reply)
+        if result.records:
+            self.store.save_project_answer_sources(assistant.id, [record.id for record in result.records])
+        if result.events:
+            self.store.save_local_context_answer_sources(
+                assistant.id,
+                [LocalContextSourceRef(source_type="calendar_event", source_id=event.id) for event in result.events],
+            )
+        return ConversationRouterTurn(
+            user_message,
+            assistant,
+            decision,
+            context_window,
+            candidates,
+            (),
+            outcome="project_answer",
+            model_calls=2,
+            model_seconds=routing_seconds + answer_seconds,
+            local_seconds=snapshot_seconds,
         )
 
     def _execute(
@@ -268,8 +340,6 @@ class ConversationRouterService:
             return self._save_item(user_message, decision.action)
         if decision.intent == "tracker_change":
             return self._apply_tracker_change(user_message, decision, candidates)
-        if decision.intent == "project_answer":
-            return (), decision.reply or "I do not have enough stored project context to answer that."
         if decision.intent == "clarify":
             # A question is already pending, so this one is asked without replacing it.
             return (), decision.clarification_question or "Which local event do you mean?"
@@ -709,28 +779,6 @@ class ConversationRouterService:
             )
         )
 
-    def _save_answer_sources(
-        self, assistant_message_id: str, decision: ConversationDecision, candidates: RouterCandidates
-    ) -> None:
-        if not decision.source_ids:
-            return
-        event_ids = {event.id for event in candidates.events}
-        item_ids = {item.id for item in candidates.saved_items}
-        local_sources = [
-            LocalContextSourceRef(
-                source_type="calendar_event" if source_id in event_ids else "saved_item",
-                source_id=source_id,
-            )
-            for source_id in decision.source_ids
-            if source_id in event_ids | item_ids
-        ]
-        if local_sources:
-            self.store.save_local_context_answer_sources(assistant_message_id, local_sources)
-        record_ids = {record.id for record in candidates.project_records}
-        selected_records = [source_id for source_id in decision.source_ids if source_id in record_ids]
-        if selected_records:
-            self.store.save_project_answer_sources(assistant_message_id, selected_records)
-
     def _resume_persisted_operations(self, user_message: Message) -> tuple[RouterOperation, ...]:
         operations: list[RouterOperation] = []
         for operation in self.store.list_tool_operations(user_message.id):
@@ -901,8 +949,6 @@ class ConversationRouterService:
         failure_reason: str | None = None,
     ) -> ConversationRouterTurn:
         assistant = self._assistant_message(user_message, content)
-        if decision is not None and decision.intent == "project_answer":
-            self._save_answer_sources(assistant.id, decision, candidates)
         return ConversationRouterTurn(
             user_message,
             assistant,

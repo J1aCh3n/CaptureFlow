@@ -675,8 +675,10 @@ class ConversationDecision(BaseModel):
                 raise ValueError(f"a read-only decision cannot include a write or clarification payload: {extra}")
             if self.intent == "reply_only" and self.source_ids:
                 raise ValueError("a reply-only decision cannot cite local sources")
-            if not self.reply:
-                raise ValueError("a read-only decision requires a reply")
+            # An answer's text is written by Python or by a second call, never taken
+            # from the routing decision, so only reply_only needs one here.
+            if self.intent == "reply_only" and not self.reply:
+                raise ValueError("a reply-only decision requires a reply")
         return self
 
     def _present(self, *fields: str) -> str:
@@ -749,3 +751,30 @@ class CalendarEventUpdateOperation(BaseModel):
         if self.status != "failed" and self.error is not None:
             raise ValueError("only a failed calendar update may contain an error")
         return self
+
+
+class ProjectAnswer(BaseModel):
+    """The second model call's answer to a project-level question, from a project snapshot."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    reply: str = Field(min_length=1, max_length=2_000)
+    source_ids: list[str] = Field(default_factory=list, max_length=12)
+
+    @field_validator("reply")
+    @classmethod
+    def reply_is_not_whitespace(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("a project answer needs reply text")
+        return value
+
+    @field_validator("source_ids", mode="before")
+    @classmethod
+    def source_ids_are_a_list_without_repeats(cls, value: object) -> object:
+        # A null list means nothing was cited, and a repeated ID adds nothing.
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return list(dict.fromkeys(value))
+        return value

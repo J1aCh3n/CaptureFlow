@@ -1,8 +1,9 @@
-"""Deterministic recall of local Calendar events, Notes/Ideas, and same-project records.
+"""Answer a question about specific stored items: Calendar events, Notes/Ideas, or project records.
 
-The contextual router hands a meeting question here after the model picks
-local_answer. Selection and the reply are plain lookups, so every date and time
-shown comes straight from SQLite.
+The contextual router hands a question here when the model picks local_answer,
+with the candidates the model named. The reply is rendered from the SQLite rows,
+so every date and time shown comes straight from storage. When the model named
+nothing, a date and keyword lookup finds the items instead.
 """
 
 import re
@@ -33,13 +34,22 @@ class LocalContextService:
         self.reference_date = reference_date
 
     def submit(
-        self, conversation_id: str, content: str, message_id: str | None = None
+        self,
+        conversation_id: str,
+        content: str,
+        message_id: str | None = None,
+        selected: list[CalendarEvent | SavedItem | ProjectRecord] | None = None,
     ) -> LocalContextTurn:
         user_message = self._user_message(conversation_id, content, message_id)
         existing_reply = self.store.get_assistant_reply(user_message.id)
         if existing_reply is not None:
             return LocalContextTurn(user_message, existing_reply, (), "reloaded")
-        sources = self._select_sources(conversation_id, content)
+        looked_up = not selected
+        sources = (
+            self._select_sources(conversation_id, content)
+            if looked_up
+            else list(selected)[:MAX_LOCAL_CONTEXT_SOURCES]
+        )
         if not sources:
             return LocalContextTurn(
                 user_message,
@@ -51,7 +61,7 @@ class LocalContextService:
                 (),
                 "insufficient_context",
             )
-        assistant = self._reply(user_message, _format_reply(content, sources))
+        assistant = self._reply(user_message, _format_reply(content, sources, looked_up))
         self._save_sources(assistant, sources)
         return LocalContextTurn(user_message, assistant, tuple(sources), "grounded_local_context")
 
@@ -166,13 +176,15 @@ def _asks_for_calendar_fact(query: str) -> bool:
 
 
 def _format_reply(
-    query: str, sources: list[CalendarEvent | SavedItem | ProjectRecord]
+    query: str, sources: list[CalendarEvent | SavedItem | ProjectRecord], looked_up: bool
 ) -> str:
+    """Render the stored items; hints about what the lookup missed apply only to a lookup."""
+
     events = [source for source in sources if isinstance(source, CalendarEvent)]
     notes = [source for source in sources if isinstance(source, SavedItem)]
     project_records = [source for source in sources if isinstance(source, ProjectRecord)]
     lines: list[str] = []
-    if _asks_for_calendar_fact(query) and not events:
+    if looked_up and _asks_for_calendar_fact(query) and not events:
         lines.append("No matching Calendar event is stored for the requested date or description.")
     if events:
         heading = "I found these local calendar events:" if len(events) > 1 else "I found this local calendar event:"
@@ -182,15 +194,20 @@ def _format_reply(
         lines.append("Saved local note/idea context:")
         lines.extend(f"- {item.kind.title()}: {item.content}" for item in notes)
     if project_records:
-        lines.append("Same-project tracker context (not Calendar events):")
-        lines.extend(
-            f"- {record.kind.title()}: {record.content}" for record in project_records
-        )
+        lines.append("From the project tracker:")
+        lines.extend(_format_record(record) for record in project_records)
     if any(marker in query.casefold() for marker in ("prepare", "准备", "要做什么")):
         lines.append("No explicit personal preparation task is stored in the selected local records.")
-    if len(events) > 1 or len(notes) > 1:
+    if looked_up and (len(events) > 1 or len(notes) > 1):
         lines.append("If you mean one specific item, name it and I will narrow the local lookup.")
     return "\n".join(lines)
+
+
+def _format_record(record: ProjectRecord) -> str:
+    summary = f"- {record.kind.replace('_', ' ').title()}: {record.content}"
+    if record.due_at is not None:
+        summary = f"{summary} (due {record.due_at.isoformat()})"
+    return summary
 
 
 def _format_event(event: CalendarEvent) -> str:

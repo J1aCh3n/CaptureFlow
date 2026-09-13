@@ -12,7 +12,7 @@ messages, calendar events, ideas, and notes as unassigned local records.
 
 It is deliberately not a general chatbot. On each ordinary chat turn one model
 call reads the message in its bounded conversation context and returns a typed
-decision. Python validates the source quote, candidate target, lifecycle,
+decision; only a question about a whole project makes a second call. Python validates the source quote, candidate target, lifecycle,
 duplicate/conflict, and credential rules before any SQLite write. The working
 principle is: understanding belongs to the model; authorization stays in Python.
 It has no external calendar synchronization, email, meetings, vector retrieval,
@@ -55,9 +55,16 @@ Behavior worth knowing:
   asks about it in a follow-up question.
 - A task deadline appears on the Calendar without becoming an event.
 - Replacing an active decision or constraint waits for approval from its Chat card.
-- A meeting question (`local_answer`) is answered by a deterministic lookup of
-  active Calendar, Ideas & Notes, and same-project records, with source cards and
-  times rendered from SQLite. It works in an unassigned conversation.
+- A question about specific stored items (`local_answer`) — a meeting, an idea or
+  note, or one task's deadline — is answered from the SQLite rows the model named,
+  with source cards and times rendered from storage. When the model names none, a
+  date and keyword lookup finds them. It works in an unassigned conversation.
+- A question about the whole project (`project_answer`) — progress, outstanding
+  work, blockers, or why a decision changed — makes a second model call over a
+  bounded snapshot of the project's records, including superseded decisions and
+  upcoming events. Python checks every citation and renders deadlines and event
+  times under the answer. See
+  [phase-12-answer-intents-design.md](docs/phase-12-answer-intents-design.md).
 
 Known limits: a bare hour such as `æ˜Žå¤©åç‚¹` is resolved to 10:00 without a
 question, and the reply states it; a message that only mentions an event by name
@@ -87,7 +94,7 @@ rows.
 
 ## Status and evidence
 
-The deterministic suite passes 166 tests. It verifies the database, validation,
+The deterministic suite passes 174 tests. It verifies the database, validation,
 and model-write boundaries with scripted model decisions.
 
 The frozen Phase 10 live acceptance (16 ordered assertions) exercises calendar creation and correction, task distinction,

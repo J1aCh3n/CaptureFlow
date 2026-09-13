@@ -18,13 +18,19 @@ from captureflow.storage import CaptureStore
 
 
 class ScriptedContextualModel:
-    def __init__(self, decisions):
+    def __init__(self, decisions, project_answers=()):
         self.decisions = list(decisions)
+        self.project_answers = list(project_answers)
         self.calls = []
+        self.project_answer_calls = []
 
     def propose_conversation_decision(self, **kwargs):
         self.calls.append(kwargs)
         return self.decisions.pop(0)
+
+    def answer_project_question(self, **kwargs):
+        self.project_answer_calls.append(kwargs)
+        return self.project_answers.pop(0)
 
 
 class ConversationRouterServiceTests(unittest.TestCase):
@@ -1619,50 +1625,57 @@ class ConversationRouterServiceTests(unittest.TestCase):
             [record.content for record in self.store.list_project_records(self.project.id)], [content]
         )
 
-    def test_project_answer_keeps_only_supplied_candidate_source_cards(self) -> None:
+    def _project_record(self, record_id: str, kind: str, state: str, content: str, **fields) -> ProjectRecord:
         source = self.store.save_message(
             Message(
-                id="project-answer-source",
+                id=f"{record_id}-source",
                 conversation_id=self.conversation.id,
                 role="user",
-                content="排查 ROS 2 节点延迟。",
+                content=content,
             )
         )
-        record = self.store.save_project_record(
+        return self.store.save_project_record(
             ProjectRecord(
-                id="ros-delay-task",
+                id=record_id,
                 project_id=self.project.id,
                 conversation_id=self.conversation.id,
-                kind="task",
-                content=source.content,
-                state="active",
+                kind=kind,
+                content=content,
+                state=state,
                 source_message_id=source.id,
-                source_quote=source.content,
+                source_quote=content,
+                **fields,
             )
         )
-        query = "项目现在有什么任务？"
+
+    def test_local_answer_renders_the_items_the_model_named(self) -> None:
+        task = self._project_record(
+            "ros-delay-task",
+            "task",
+            "active",
+            "排查 ROS 2 节点延迟。",
+            due_at=datetime.fromisoformat("2026-09-12T18:00:00-07:00"),
+        )
+        query = "排查延迟那个任务什么时候截止？"
         model = ScriptedContextualModel(
-            [
-                {
-                    "intent": "project_answer",
-                    "reply": "当前任务是排查 ROS 2 节点延迟。",
-                    "source_ids": [record.id],
-                }
-            ]
+            [{"intent": "local_answer", "reply": "周五截止。", "source_ids": [task.id]}]
         )
 
-        turn = ConversationRouterService(
-            self.store, model, date(2026, 9, 9)
-        ).submit(self.conversation.id, query, "project-answer-turn")
+        turn = ConversationRouterService(self.store, model, date(2026, 9, 9)).submit(
+            self.conversation.id, query, "task-deadline-question"
+        )
 
-        self.assertEqual(turn.outcome, "project_answer")
+        self.assertEqual(turn.outcome, "grounded_local_context")
         self.assertEqual(turn.model_calls, 1)
+        self.assertIn("2026-09-12T18:00:00-07:00", turn.assistant_message.content)
+        self.assertNotIn("周五截止", turn.assistant_message.content)
+        self.assertNotIn("No matching Calendar event", turn.assistant_message.content)
         self.assertEqual(
-            [source.id for source in self.store.list_project_answer_sources(turn.assistant_message.id)],
-            [record.id],
+            [record.id for record in self.store.list_project_answer_sources(turn.assistant_message.id)],
+            [task.id],
         )
 
-    def test_a_project_answer_about_a_calendar_event_is_rendered_from_sqlite(self) -> None:
+    def test_local_answer_without_named_items_falls_back_to_the_lookup(self) -> None:
         source = self.store.save_message(
             Message(
                 id="review-meeting-source",
@@ -1684,25 +1697,13 @@ class ConversationRouterServiceTests(unittest.TestCase):
                 timezone="America/Vancouver",
             )
         )
-        query = "我明天的算法优化与代码审查会议几点开始？"
-        model = ScriptedContextualModel(
-            [
-                {
-                    "intent": "project_answer",
-                    "reply": "会议明天上午十点开始。",
-                    "source_ids": [event.id],
-                }
-            ]
+        model = ScriptedContextualModel([{"intent": "local_answer", "source_ids": []}])
+
+        turn = ConversationRouterService(self.store, model, date(2026, 9, 9)).submit(
+            self.conversation.id, "我明天有什么安排？", "fallback-lookup-question"
         )
 
-        turn = ConversationRouterService(
-            self.store, model, date(2026, 9, 9)
-        ).submit(self.conversation.id, query, "calendar-project-answer-turn")
-
-        self.assertEqual(turn.decision.intent, "project_answer")
         self.assertEqual(turn.outcome, "grounded_local_context")
-        self.assertEqual(turn.model_calls, 1)
-        self.assertNotIn("上午十点", turn.assistant_message.content)
         self.assertIn(event.start_at.isoformat(), turn.assistant_message.content)
         self.assertEqual(
             [
@@ -1711,6 +1712,82 @@ class ConversationRouterServiceTests(unittest.TestCase):
             ],
             [event.id],
         )
+
+    def test_project_answer_is_written_from_the_project_snapshot(self) -> None:
+        task = self._project_record(
+            "ros-delay-task",
+            "task",
+            "active",
+            "排查 ROS 2 节点延迟。",
+            due_at=datetime.fromisoformat("2026-09-12T18:00:00-07:00"),
+        )
+        self._project_record("setup-task", "task", "completed", "搭建仿真环境。")
+        old = self._project_record("storage-sqlite", "decision", "active", "使用 SQLite 存储。")
+        new = self._project_record(
+            "storage-postgres",
+            "decision",
+            "active",
+            "改用 PostgreSQL。",
+            rationale="需要多人协作。",
+            supersedes_record_id=old.id,
+        )
+        self.store.transition_project_record(old.id, "superseded")
+        model = ScriptedContextualModel(
+            [{"intent": "project_answer"}],
+            [
+                {
+                    "reply": "还剩排查节点延迟一项；存储已从 SQLite 换成 PostgreSQL，因为需要多人协作。",
+                    "source_ids": [task.id, new.id, task.id],
+                }
+            ],
+        )
+
+        turn = ConversationRouterService(self.store, model, date(2026, 9, 9)).submit(
+            self.conversation.id, "项目现在进展如何，为什么换了存储？", "project-progress-question"
+        )
+
+        self.assertEqual(turn.outcome, "project_answer")
+        self.assertEqual(turn.model_calls, 2)
+        snapshot = model.project_answer_calls[0]["project_snapshot"]
+        self.assertEqual(
+            {record["id"] for record in snapshot["open_records"]}, {new.id, task.id}
+        )
+        self.assertEqual([record["id"] for record in snapshot["closed_records"]], ["setup-task"])
+        self.assertEqual(snapshot["superseded_records"][0]["superseded_by_record_id"], new.id)
+        self.assertIn("Stored dates:", turn.assistant_message.content)
+        self.assertIn("2026-09-12T18:00:00-07:00", turn.assistant_message.content)
+        self.assertEqual(
+            [record.id for record in self.store.list_project_answer_sources(turn.assistant_message.id)],
+            [task.id, new.id],
+        )
+
+    def test_a_project_answer_citing_outside_the_snapshot_changes_nothing(self) -> None:
+        self._project_record("ros-delay-task", "task", "active", "排查 ROS 2 节点延迟。")
+        model = ScriptedContextualModel(
+            [{"intent": "project_answer"}],
+            [{"reply": "当前有三项任务。", "source_ids": ["invented-record"]}],
+        )
+
+        turn = ConversationRouterService(self.store, model, date(2026, 9, 9)).submit(
+            self.conversation.id, "项目还有什么没做？", "invented-source-question"
+        )
+
+        self.assertEqual(turn.outcome, "model_or_validation_failure")
+        self.assertEqual(turn.model_calls, 2)
+        self.assertIn("outside the project snapshot", turn.failure_reason)
+        self.assertEqual(self.store.list_project_answer_sources(turn.assistant_message.id), [])
+
+    def test_a_project_question_without_a_project_makes_no_second_call(self) -> None:
+        unassigned = self.store.save_conversation(Conversation(id="unassigned-chat", title="Loose"))
+        model = ScriptedContextualModel([{"intent": "project_answer"}])
+
+        turn = ConversationRouterService(self.store, model, date(2026, 9, 9)).submit(
+            unassigned.id, "项目进展如何？", "unassigned-project-question"
+        )
+
+        self.assertEqual(turn.outcome, "project_answer_unavailable")
+        self.assertEqual(turn.model_calls, 1)
+        self.assertEqual(model.project_answer_calls, [])
 
     def test_invalid_event_target_leaves_local_data_unchanged(self) -> None:
         content = "把会议改到下午两点。"
