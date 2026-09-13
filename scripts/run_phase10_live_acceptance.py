@@ -17,6 +17,11 @@ from captureflow.storage import CaptureStore
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument(
+        "--allow-model-override",
+        action="store_true",
+        help="run with CAPTUREFLOW_MODEL even when it differs from the frozen protocol model",
+    )
     args = parser.parse_args()
     if args.output_dir.exists():
         raise SystemExit("output directory must not already exist")
@@ -30,12 +35,13 @@ def main() -> int:
     )
     settings = ModelSettings.from_environment()
     protocol = fixture["protocol"]
-    if settings.model != protocol["model"]:
-        raise SystemExit(f"expected CAPTUREFLOW_MODEL={protocol['model']}")
+    model_overridden = _validate_model_selection(
+        settings.model, protocol["model"], args.allow_model_override
+    )
 
     store = CaptureStore(args.output_dir / "captureflow.sqlite3")
     store.initialize()
-    trace = _trace_header(root, fixture, settings)
+    trace = _trace_header(root, fixture, settings, model_overridden)
     project = store.save_project(Project(id="phase-ten-live-project", name="CaptureFlow"))
     main_conversation = _conversation(store, "phase-ten-live-main", project.id)
     router = ConversationRouterService(
@@ -245,10 +251,26 @@ def _operation_kind(operation) -> str:
     return getattr(operation, "tool_name", type(operation).__name__)
 
 
-def _trace_header(root: Path, fixture: dict, settings: ModelSettings) -> dict:
+def _validate_model_selection(
+    configured_model: str, protocol_model: str, allow_override: bool
+) -> bool:
+    model_overridden = configured_model != protocol_model
+    if model_overridden and not allow_override:
+        raise SystemExit(
+            f"expected CAPTUREFLOW_MODEL={protocol_model}; "
+            "pass --allow-model-override for a cross-model run"
+        )
+    return model_overridden
+
+
+def _trace_header(
+    root: Path, fixture: dict, settings: ModelSettings, model_overridden: bool
+) -> dict:
     return {
         "started_at": datetime.now(timezone.utc).isoformat(),
         "model": settings.model,
+        "protocol_model": fixture["protocol"]["model"],
+        "model_overridden": model_overridden,
         "endpoint_family": "configured_openai_compatible" if settings.base_url else "openai_default",
         "timeout_seconds": settings.timeout_seconds,
         "timezone": fixture["protocol"]["timezone"],

@@ -27,8 +27,10 @@ is the same **16 of 16** recorded in
   `PYTHONPATH` to this worktree's `src` in every shell. Check that
   `captureflow.__file__` resolves inside this worktree.
 - API use is approved for this run. The key comes from `REPOMEDIC_OPENAI_API_KEY`.
-- The fixture pins the model, so `CAPTUREFLOW_MODEL` must be `gpt-5.6-terra`; the
-  runner refuses any other model.
+- This task still requires the fixture model, so `CAPTUREFLOW_MODEL` must be
+  `gpt-5.6-terra`. The runner accepts another configured model only with the
+  explicit `--allow-model-override` flag and records that run as a cross-model
+  comparison; such a run does not complete this frozen acceptance task.
 
 ```powershell
 $wt = "C:\Users\frank\OneDrive\Documents\Uni\gituhb_project\captureflow-contextual-router"

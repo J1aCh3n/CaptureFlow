@@ -114,6 +114,10 @@ ignored output directory:
 python scripts/run_phase10_live_acceptance.py --output-dir runs/phase10-live-YYYYMMDD
 ```
 
+The fixture model remains the default acceptance protocol. To run the same cases
+as an explicitly labeled cross-model comparison, configure another model and add
+`--allow-model-override`; the trace records both the protocol and actual models.
+
 ## Development environment
 
 Use the existing Conda environment:
