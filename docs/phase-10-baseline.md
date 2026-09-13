@@ -39,12 +39,17 @@ contextual router exists.
 
 ## Acceptance contract
 
+> Protocol version 2 ([Phase 12](phase-12-answer-intents-design.md)) checks the two
+> answer rows by their effect — who wrote the reply, what it cites, and that nothing
+> was written — rather than by the intent label alone.
+
 | Input category | Required intent | Permitted committed effect |
 | --- | --- | --- |
 | Detailed meeting statement | `calendar_create` | One `create_local_event` |
 | Time correction referring to one prior meeting | `calendar_update` | One `update_local_event` |
 | Work to complete, not a scheduled meeting | `tracker_change` | Project record only |
-| Question about a known meeting | `local_answer` | No write |
+| Question about a known meeting | `local_answer` | No write; the local lookup answers and cites the stored event |
+| Question about the project's open work | `project_answer` | No write; the answer cites the tracked record |
 | Correction without sufficient replacement time or target | `clarify` | No write |
 
 `这周四` may be resolved by the existing date tool using the supplied reference

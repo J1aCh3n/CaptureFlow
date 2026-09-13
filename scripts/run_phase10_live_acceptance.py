@@ -97,6 +97,8 @@ def main() -> int:
         )
         and len(store.list_project_records(project.id)) == 1,
     )
+    tracked_records = store.list_project_records(project.id)
+    tracked_record_id = tracked_records[0].id if len(tracked_records) == 1 else None
 
     meeting_answer = _submit(
         trace, "meeting_question", router, main_conversation.id, inputs["meeting_question"], "phase10-question"
@@ -104,11 +106,7 @@ def main() -> int:
     _check(
         trace,
         "meeting_question_effect",
-        meeting_answer is not None
-        and meeting_answer.decision is not None
-        and meeting_answer.decision.intent == "local_answer"
-        and not meeting_answer.operations
-        and bool(store.list_local_context_answer_sources(meeting_answer.assistant_message.id)),
+        answered_from_stored_event(store, meeting_answer, None if event is None else event.id),
     )
 
     replay = _submit(
@@ -146,11 +144,7 @@ def main() -> int:
     _check(
         trace,
         "cross_conversation_local_retrieval_effect",
-        cross_local is not None
-        and cross_local.decision is not None
-        and cross_local.decision.intent == "local_answer"
-        and not cross_local.operations
-        and bool(store.list_local_context_answer_sources(cross_local.assistant_message.id)),
+        answered_from_stored_event(store, cross_local, None if event is None else event.id),
     )
 
     cross_project = _submit(
@@ -164,10 +158,7 @@ def main() -> int:
     _check(
         trace,
         "cross_conversation_project_retrieval_effect",
-        cross_project is not None
-        and cross_project.outcome == "project_answer"
-        and not cross_project.operations
-        and bool(store.list_project_answer_sources(cross_project.assistant_message.id)),
+        answered_from_project_record(store, cross_project, tracked_record_id),
     )
 
     ambiguous = _submit(
@@ -193,6 +184,35 @@ def main() -> int:
         json.dumps(trace, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     return 0 if trace["passed"] else 1
+
+
+def answered_from_stored_event(store: CaptureStore, turn, event_id: str | None) -> bool:
+    """A meeting question passes when the local lookup answered with that event's card.
+
+    The check is the effect a user sees, not the intent label: nothing was written,
+    the deterministic lookup wrote the reply, and the created event is cited.
+    """
+
+    return (
+        turn is not None
+        and event_id is not None
+        and turn.outcome == "grounded_local_context"
+        and not turn.operations
+        and event_id
+        in {source.reference.source_id for source in store.list_local_context_answer_sources(turn.assistant_message.id)}
+    )
+
+
+def answered_from_project_record(store: CaptureStore, turn, record_id: str | None) -> bool:
+    """A project question passes when the project answer wrote nothing and cites the tracked task."""
+
+    return (
+        turn is not None
+        and record_id is not None
+        and turn.outcome == "project_answer"
+        and not turn.operations
+        and record_id in {record.id for record in store.list_project_answer_sources(turn.assistant_message.id)}
+    )
 
 
 def _conversation(store: CaptureStore, conversation_id: str, project_id: str) -> Conversation:
@@ -271,6 +291,7 @@ def _trace_header(
         "started_at": datetime.now(timezone.utc).isoformat(),
         "model": settings.model,
         "protocol_model": fixture["protocol"]["model"],
+        "protocol_version": fixture["protocol"]["version"],
         "model_overridden": model_overridden,
         "endpoint_family": "configured_openai_compatible" if settings.base_url else "openai_default",
         "timeout_seconds": settings.timeout_seconds,
