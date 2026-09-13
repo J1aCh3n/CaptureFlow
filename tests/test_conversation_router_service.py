@@ -1602,6 +1602,56 @@ class ConversationRouterServiceTests(unittest.TestCase):
             [record.id],
         )
 
+    def test_a_project_answer_about_a_calendar_event_is_rendered_from_sqlite(self) -> None:
+        source = self.store.save_message(
+            Message(
+                id="review-meeting-source",
+                conversation_id=self.conversation.id,
+                role="user",
+                content="我明天下午两点到三点有算法优化与代码审查会议。",
+            )
+        )
+        event = self.store.save_calendar_event(
+            CalendarEvent(
+                id="review-meeting",
+                conversation_id=self.conversation.id,
+                title="算法优化与代码审查会议",
+                source_message_id=source.id,
+                source_quote=source.content,
+                start_at=datetime.fromisoformat("2026-09-10T14:00:00-07:00"),
+                end_at=datetime.fromisoformat("2026-09-10T15:00:00-07:00"),
+                all_day=False,
+                timezone="America/Vancouver",
+            )
+        )
+        query = "我明天的算法优化与代码审查会议几点开始？"
+        model = ScriptedContextualModel(
+            [
+                {
+                    "intent": "project_answer",
+                    "reply": "会议明天上午十点开始。",
+                    "source_ids": [event.id],
+                }
+            ]
+        )
+
+        turn = ConversationRouterService(
+            self.store, model, date(2026, 9, 9)
+        ).submit(self.conversation.id, query, "calendar-project-answer-turn")
+
+        self.assertEqual(turn.decision.intent, "project_answer")
+        self.assertEqual(turn.outcome, "grounded_local_context")
+        self.assertEqual(turn.model_calls, 1)
+        self.assertNotIn("上午十点", turn.assistant_message.content)
+        self.assertIn(event.start_at.isoformat(), turn.assistant_message.content)
+        self.assertEqual(
+            [
+                source.reference.source_id
+                for source in self.store.list_local_context_answer_sources(turn.assistant_message.id)
+            ],
+            [event.id],
+        )
+
     def test_invalid_event_target_leaves_local_data_unchanged(self) -> None:
         content = "把会议改到下午两点。"
         model = ScriptedContextualModel(

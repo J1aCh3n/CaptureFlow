@@ -190,7 +190,7 @@ class ConversationRouterService:
                 return turn_without_writes(
                     self._save_clarification(user_message, decision), "clarification_created"
                 )
-            if decision.intent == "local_answer":
+            if decision.intent == "local_answer" or self._cites_local_records(decision, candidates):
                 local_turn = LocalContextService(self.store, self.reference_date).submit(
                     conversation_id, content, user_message.id
                 )
@@ -239,6 +239,19 @@ class ConversationRouterService:
         if deferred is not None:
             self._save_follow_up_clarification(user_message, turn.assistant_message, deferred)
         return turn
+
+    @staticmethod
+    def _cites_local_records(decision: ConversationDecision, candidates: RouterCandidates) -> bool:
+        """Whether a project answer rests on Calendar events or ideas/notes.
+
+        Those facts, and event times above all, are rendered from SQLite by the local
+        lookup; a project answer would restate them in the model's own words.
+        """
+
+        local_ids = {event.id for event in candidates.events} | {item.id for item in candidates.saved_items}
+        return decision.intent == "project_answer" and any(
+            source_id in local_ids for source_id in decision.source_ids
+        )
 
     def _execute(
         self, decision: ConversationDecision, user_message: Message, candidates: RouterCandidates
