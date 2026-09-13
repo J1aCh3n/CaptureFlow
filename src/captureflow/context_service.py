@@ -1,7 +1,7 @@
 """What the contextual router sees: a recent message window and a few candidate records."""
 
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date
 
 from .local_context_service import match_terms
 from .models import CalendarEvent, Message, ProjectRecord, SavedItem
@@ -14,7 +14,7 @@ MAX_ROUTER_CANDIDATES_PER_KIND = 3
 
 
 @dataclass(frozen=True)
-class ProjectContextWindow:
+class ContextWindow:
     messages: tuple[Message, ...]
     omitted_message_count: int
 
@@ -40,18 +40,18 @@ class RouterCandidates:
     project_records: tuple[ProjectRecord, ...]
 
 
-def select_project_context(
+def select_context_window(
     messages: list[Message],
     *,
     max_messages: int = MAX_CONTEXT_MESSAGES,
     max_characters: int = MAX_CONTEXT_CHARACTERS,
-) -> ProjectContextWindow:
+) -> ContextWindow:
     """Choose one contiguous recent window without truncating a persisted message."""
 
     if max_messages < 1 or max_characters < 1:
-        raise ValueError("project context limits must be positive")
+        raise ValueError("context window limits must be positive")
     if not messages:
-        raise ValueError("project context requires at least one message")
+        raise ValueError("a context window needs at least one message")
 
     ordered_messages = _logical_turn_order(messages)
     selected_reversed: list[Message] = []
@@ -61,13 +61,13 @@ def select_project_context(
         would_exceed_message_limit = len(selected_reversed) >= max_messages
         would_exceed_character_limit = character_count + len(message.content) > max_characters
         if selected_reversed and (would_exceed_message_limit or would_exceed_character_limit):
-            return ProjectContextWindow(
+            return ContextWindow(
                 messages=tuple(reversed(selected_reversed)), omitted_message_count=index + 1
             )
         selected_reversed.append(message)
         character_count += len(message.content)
 
-    return ProjectContextWindow(messages=tuple(reversed(selected_reversed)), omitted_message_count=0)
+    return ContextWindow(messages=tuple(reversed(selected_reversed)), omitted_message_count=0)
 
 
 def select_router_candidates(
@@ -152,17 +152,13 @@ def _events_nearest(
     nearest = sorted(
         events,
         key=lambda event: (
-            abs((_event_date(event) - reference_date).days),
-            _event_date(event) < reference_date,
-            _event_date(event),
+            abs((event.start_date - reference_date).days),
+            event.start_date < reference_date,
+            event.start_date,
             event.id,
         ),
     )[:limit]
-    return sorted(nearest, key=lambda event: (_event_date(event), event.id))
-
-
-def _event_date(event: CalendarEvent) -> date:
-    return event.start_at.date() if isinstance(event.start_at, datetime) else event.start_at
+    return sorted(nearest, key=lambda event: (event.start_date, event.id))
 
 
 def _logical_turn_order(messages: list[Message]) -> list[Message]:

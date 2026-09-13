@@ -1,4 +1,4 @@
-"""Deterministic V2 chat commands with no model dependency."""
+"""The explicit /event, /idea, and /note chat commands, which need no model."""
 
 from dataclasses import dataclass
 from datetime import date
@@ -25,11 +25,11 @@ class ChatTurn:
 
 
 class CommandError(ValueError):
-    """A user-correctable error in the explicit Phase 2 command language."""
+    """A user-correctable error in the explicit command language."""
 
 
 class DeterministicChatService:
-    """Persist a small, explicit command language for the Phase 2 shell."""
+    """Persist a small, explicit command language that never calls a model."""
 
     def __init__(self, store: CaptureStore, timezone: str = "America/Vancouver") -> None:
         self.store = store

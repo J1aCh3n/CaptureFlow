@@ -1,3 +1,5 @@
+"""The one model call per chat turn: an OpenAI-compatible adapter and its prompt."""
+
 import json
 import os
 from dataclasses import dataclass
@@ -14,11 +16,7 @@ class ModelError(RuntimeError):
 
 
 class InvalidStructuredOutput(ModelError):
-    """A model response can be shown to the single bounded repair pass."""
-
-    def __init__(self, message: str, raw_output: str) -> None:
-        super().__init__(message)
-        self.raw_output = raw_output
+    """The model answered, but not with a decision that fits the schema and its inputs."""
 
 
 class ContextualConversationModel(Protocol):
@@ -50,7 +48,7 @@ class ModelSettings:
         api_key = os.getenv("CAPTUREFLOW_API_KEY")
         model = os.getenv("CAPTUREFLOW_MODEL")
         if not api_key or not model:
-            raise ModelError("Set CAPTUREFLOW_API_KEY and CAPTUREFLOW_MODEL before analyzing.")
+            raise ModelError("Set CAPTUREFLOW_API_KEY and CAPTUREFLOW_MODEL before chatting.")
         try:
             timeout_seconds = float(os.getenv("CAPTUREFLOW_MODEL_TIMEOUT_SECONDS", "30"))
         except ValueError as error:
@@ -215,41 +213,25 @@ class OpenAICompatibleModel:
             if action is None:
                 continue
             if action.target_event_id is not None and action.target_event_id not in event_ids:
-                raise InvalidStructuredOutput(
-                    "The model selected a calendar event outside the supplied candidates.",
-                    decision.model_dump_json(),
-                )
+                raise InvalidStructuredOutput("The model selected a calendar event outside the supplied candidates.")
             for evidence in action.evidence:
                 source_message = messages_by_id.get(evidence.message_id)
                 if source_message is None:
-                    raise InvalidStructuredOutput(
-                        "The model cited a message outside the supplied recent context.",
-                        decision.model_dump_json(),
-                    )
+                    raise InvalidStructuredOutput("The model cited a message outside the supplied recent context.")
                 if _normalized_text(evidence.source_quote) not in _normalized_text(source_message):
-                    raise InvalidStructuredOutput(
-                        "The model cited text that is not present in its supplied message.",
-                        decision.model_dump_json(),
-                    )
+                    raise InvalidStructuredOutput("The model cited text that is not present in its supplied message.")
         if any(
             change.target_record_id is not None and change.target_record_id not in record_ids
             for change in decision.project_changes
         ):
-            raise InvalidStructuredOutput(
-                "The model selected a project record outside the supplied candidates.",
-                decision.model_dump_json(),
-            )
+            raise InvalidStructuredOutput("The model selected a project record outside the supplied candidates.")
         if any(source_id not in event_ids | saved_item_ids | record_ids for source_id in decision.source_ids):
-            raise InvalidStructuredOutput(
-                "The model cited a local answer source outside the supplied candidates.",
-                decision.model_dump_json(),
-            )
+            raise InvalidStructuredOutput("The model cited a local answer source outside the supplied candidates.")
 
     def _complete(self, schema: type[Schema], system: str, payload: dict[str, Any]) -> Schema:
         prompt = json.dumps(
             {"schema": schema.model_json_schema(), "input": payload}, ensure_ascii=False
         )
-        content: str | None = None
         try:
             response = self.client.chat.completions.create(
                 model=self.settings.model,
@@ -265,9 +247,7 @@ class OpenAICompatibleModel:
                 raise ModelError("The model returned an empty response.")
             return schema.model_validate_json(content)
         except ValidationError as error:
-            raise InvalidStructuredOutput(
-                f"The model returned invalid structured output: {error}", content or ""
-            ) from error
+            raise InvalidStructuredOutput(f"The model returned invalid structured output: {error}") from error
         except (IndexError, ValueError) as error:
             raise ModelError(f"The model returned invalid structured output: {error}") from error
         except Exception as error:

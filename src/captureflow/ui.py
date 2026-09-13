@@ -523,24 +523,22 @@ def render_project_snapshot(store: CaptureStore, conversation_id: str) -> None:
         completed_metric.metric("Done", len(completed_tasks))
         blocker_metric.metric("Blockers", len(active_blockers))
 
-        reference_date = configured_reference_date(
-            os.getenv("CAPTUREFLOW_TIMEZONE", "America/Vancouver")
-        )
+        reference_date = configured_reference_date(configured_timezone())
         upcoming_events = [
             event
             for event in store.list_calendar_events()
             if event.conversation_id in conversation_ids
-            and _calendar_event_date(event.start_at) >= reference_date
+            and event.start_date >= reference_date
         ]
         upcoming_deadlines = [
             deadline
             for deadline in store.list_task_deadlines()
             if deadline.project_id == current_project.id
-            and _calendar_event_date(deadline.due_at) >= reference_date
+            and _day_of(deadline.due_at) >= reference_date
         ]
         upcoming = sorted(
-            [(_calendar_event_date(event.start_at), event) for event in upcoming_events]
-            + [(_calendar_event_date(deadline.due_at), deadline) for deadline in upcoming_deadlines],
+            [(event.start_date, event) for event in upcoming_events]
+            + [(_day_of(deadline.due_at), deadline) for deadline in upcoming_deadlines],
             key=lambda entry: entry[0],
         )[:3]
         st.markdown("#### Upcoming")
@@ -602,8 +600,8 @@ def _render_planned_project_views() -> None:
     )
 
 
-def _calendar_event_date(start_at: date | datetime) -> date:
-    return start_at.date() if isinstance(start_at, datetime) else start_at
+def _day_of(moment: date | datetime) -> date:
+    return moment.date() if isinstance(moment, datetime) else moment
 
 
 def _format_due_at(due_at: date | datetime) -> str:
@@ -684,7 +682,6 @@ def render_chat_input(
                     model_seconds=0,
                     local_seconds=perf_counter() - started,
                     total_seconds=perf_counter() - started,
-                    repair_used=False,
                 )
         else:
             try:
@@ -712,7 +709,6 @@ def render_chat_input(
                         model_seconds=turn.model_seconds,
                         local_seconds=turn.local_seconds,
                         total_seconds=perf_counter() - started,
-                        repair_used=False,
                     )
             except (ModelError, ValueError) as error:
                 project = store.get_conversation_project(conversation_id)
@@ -738,7 +734,6 @@ def render_chat_input(
                         model_seconds=0,
                         local_seconds=elapsed,
                         total_seconds=elapsed,
-                        repair_used=False,
                     )
         st.rerun()
 
@@ -755,8 +750,7 @@ def _render_turn_diagnostics(message_id: str) -> None:
     with st.expander(f"Diagnostics · {message_id[:8]}"):
         st.caption(
             f"Mode: {diagnostics['mode']} · Outcome: {diagnostics['outcome']} · "
-            f"Model calls: {diagnostics['model_calls']} · "
-            f"Repair: {'yes' if diagnostics['repair_used'] else 'no'}"
+            f"Model calls: {diagnostics['model_calls']}"
         )
         st.caption(
             f"Model: {diagnostics['model_seconds']:.3f}s · "

@@ -56,9 +56,7 @@ class LocalContextServiceTests(unittest.TestCase):
                 source_quote=source.content,
             )
         )
-        self.service = LocalContextService(
-            self.store, reference_date=date(2026, 9, 8), timezone="America/Vancouver"
-        )
+        self.service = LocalContextService(self.store, reference_date=date(2026, 9, 8))
 
     def tearDown(self) -> None:
         self.temporary_directory.cleanup()
@@ -195,11 +193,7 @@ class LocalContextServiceTests(unittest.TestCase):
             )
         )
 
-        turn = LocalContextService(
-            self.store,
-            reference_date=date(2026, 9, 8),
-            timezone="America/Vancouver",
-        ).submit(self.later.id, "我明天的工作流会议有什么内容？")
+        turn = self.service.submit(self.later.id, "我明天的工作流会议有什么内容？")
 
         self.assertNotIn(unrelated.id, {source.id for source in turn.sources})
         self.assertNotIn(unrelated.content, turn.assistant_message.content)
@@ -223,11 +217,7 @@ class LocalContextServiceTests(unittest.TestCase):
             )
         )
 
-        turn = LocalContextService(
-            self.store,
-            reference_date=date(2026, 9, 8),
-            timezone="America/Vancouver",
-        ).submit(self.later.id, "我明天有什么活动")
+        turn = self.service.submit(self.later.id, "我明天有什么活动")
 
         self.assertEqual(turn.outcome, "insufficient_context")
         self.assertEqual(turn.sources, ())

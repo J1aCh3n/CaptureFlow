@@ -197,7 +197,7 @@ class CaptureStore:
         return self.get_project(project_id)
 
     def delete_project(self, project_id: str) -> bool:
-        """Delete project-only state while retaining its conversations and local captures."""
+        """Delete project-only state while retaining its conversations and their local records."""
 
         self.get_project(project_id)
         with self._connect() as connection:
@@ -679,7 +679,7 @@ class CaptureStore:
     def save_project_change_operation(
         self, operation: ProjectChangeOperation
     ) -> ProjectChangeOperation:
-        """Persist a validated proposal before any Phase 6 tracker mutation."""
+        """Persist a validated proposal before any tracker mutation."""
 
         source = self._require_source_message(operation.source_message_id)
         project = self.get_conversation_project(source.conversation_id)
@@ -1916,9 +1916,9 @@ class CaptureStore:
     ) -> Message:
         message = self.get_message(message_id)
         if message.role != "user":
-            raise ValueError("a V2 source message must have the user role")
+            raise ValueError("a source message must have the user role")
         if conversation_id is not None and message.conversation_id != conversation_id:
-            raise ValueError("a V2 source message must belong to the target conversation")
+            raise ValueError("a source message must belong to the target conversation")
         return message
 
     @staticmethod

@@ -5,12 +5,12 @@ local_answer. Selection and the reply are plain lookups, so every date and time
 shown comes straight from SQLite.
 """
 
-from dataclasses import dataclass
-from datetime import date, datetime
 import re
+from dataclasses import dataclass
+from datetime import date
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
-from .date_tool import resolve_relative_date
+from .date_tool import asked_date
 from .models import CalendarEvent, LocalContextSourceRef, Message, ProjectRecord, SavedItem, utc_now
 from .storage import CaptureStore
 
@@ -28,10 +28,9 @@ class LocalContextTurn:
 class LocalContextService:
     """Answer a local-context question from the records it can cite."""
 
-    def __init__(self, store: CaptureStore, reference_date: date, timezone: str) -> None:
+    def __init__(self, store: CaptureStore, reference_date: date) -> None:
         self.store = store
         self.reference_date = reference_date
-        self.timezone = timezone
 
     def submit(
         self, conversation_id: str, content: str, message_id: str | None = None
@@ -76,10 +75,10 @@ class LocalContextService:
     def _select_sources(
         self, conversation_id: str, query: str
     ) -> list[CalendarEvent | SavedItem | ProjectRecord]:
-        target_date = _query_date(query, self.reference_date, self.timezone)
+        target_date = asked_date(query, self.reference_date)
         events = self.store.list_calendar_events()
         if target_date is not None:
-            events = [event for event in events if _event_date(event) == target_date]
+            events = [event for event in events if event.start_date == target_date]
         else:
             events = _rank(
                 query,
@@ -136,35 +135,6 @@ class LocalContextService:
         )
 
 
-def _query_date(query: str, reference_date: date, timezone: str) -> date | None:
-    normalized = query.casefold()
-    for expression in (
-        "the day after tomorrow",
-        "大后天",
-        "后天",
-        "tomorrow",
-        "明天",
-        "today",
-        "今天",
-    ):
-        if expression in normalized:
-            result = resolve_relative_date(expression, reference_date, timezone)
-            return result.resolved_date
-    match = re.search(
-        r"\b\d{4}-\d{2}-\d{2}\b|"
-        r"\d{4}年\d{1,2}月\d{1,2}日(?:\s*[（(](?:周|星期|礼拜)[一二三四五六日天][）)])?",
-        query,
-    )
-    if match:
-        result = resolve_relative_date(match.group(), reference_date, timezone)
-        return result.resolved_date
-    return None
-
-
-def _event_date(event: CalendarEvent) -> date:
-    return event.start_at.date() if isinstance(event.start_at, datetime) else event.start_at
-
-
 def _rank(query: str, candidates: list, text_for_candidate) -> list:
     terms = match_terms(query)
     ranked = [
@@ -184,31 +154,15 @@ def match_terms(value: str) -> set[str]:
     return words | chinese
 
 
-def _asks_for_event_time(query: str) -> bool:
-    normalized = query.casefold()
-    return any(
-        marker in normalized
-        for marker in ("when", "time", "what time", "几点", "什么时候", "什么时间", "时间")
-    )
+_CALENDAR_QUESTION_MARKERS = (
+    "when", "time", "几点", "什么时候", "时间",
+    "calendar", "event", "activity", "activities", "appointment", "日历", "日程", "活动", "安排", "行程",
+)
 
 
 def _asks_for_calendar_fact(query: str) -> bool:
     normalized = query.casefold()
-    return _asks_for_event_time(query) or any(
-        marker in normalized
-        for marker in (
-            "calendar",
-            "event",
-            "activity",
-            "activities",
-            "appointment",
-            "日历",
-            "日程",
-            "活动",
-            "安排",
-            "行程",
-        )
-    )
+    return any(marker in normalized for marker in _CALENDAR_QUESTION_MARKERS)
 
 
 def _format_reply(

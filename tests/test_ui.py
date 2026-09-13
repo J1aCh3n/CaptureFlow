@@ -98,6 +98,8 @@ class UiTests(unittest.TestCase):
         )
         for key in self.previous_model_settings:
             os.environ.pop(key, None)
+        # Pin the clock's timezone so date-relative assertions do not depend on the machine.
+        os.environ["CAPTUREFLOW_TIMEZONE"] = "America/Vancouver"
 
     def tearDown(self) -> None:
         if self.previous_database_path is None:

@@ -9,11 +9,11 @@ from zoneinfo import ZoneInfo
 
 from pydantic import ValidationError
 
-from .context_service import ProjectContextWindow, RouterCandidates, select_project_context, select_router_candidates
-from .date_tool import calendar_reference
-from .llm import InvalidStructuredOutput, ModelError, ContextualConversationModel
-from .local_context_service import LocalContextService
+from .context_service import ContextWindow, RouterCandidates, select_context_window, select_router_candidates
 from .credentials import contains_credential_disclosure
+from .date_tool import calendar_reference
+from .llm import ContextualConversationModel, InvalidStructuredOutput, ModelError
+from .local_context_service import LocalContextService
 from .models import (
     CalendarEvent,
     CalendarEventUpdateOperation,
@@ -59,13 +59,13 @@ class ConversationRouterTurn:
     user_message: Message
     assistant_message: Message
     decision: ConversationDecision | None
-    context_window: ProjectContextWindow
+    context_window: ContextWindow
     candidates: RouterCandidates
     operations: tuple[RouterOperation, ...]
-    model_calls: int
-    model_seconds: float
-    local_seconds: float
     outcome: str
+    model_calls: int = 0
+    model_seconds: float = 0
+    local_seconds: float = 0
 
 
 class ConversationRouterService:
@@ -86,14 +86,15 @@ class ConversationRouterService:
         self.reference_time = reference_time
 
     def submit(
-        self, conversation_id: str, content: str, message_id: str | None = None) -> ConversationRouterTurn:
+        self, conversation_id: str, content: str, message_id: str | None = None
+    ) -> ConversationRouterTurn:
         user_message = self._user_message(conversation_id, content, message_id)
-        context_window = select_project_context(self.store.list_messages(conversation_id))
+        context_window = select_context_window(self.store.list_messages(conversation_id))
         candidates = select_router_candidates(
             self.store, conversation_id, self.reference_date, user_message.content
         )
         if existing_reply := self.store.get_assistant_reply(user_message.id):
-            return self._turn(
+            return ConversationRouterTurn(
                 user_message,
                 existing_reply,
                 None,
@@ -159,100 +160,39 @@ class ConversationRouterService:
 
         model_seconds = perf_counter() - started
         local_started = perf_counter()
+
+        def turn_without_writes(assistant: Message, outcome: str) -> ConversationRouterTurn:
+            return ConversationRouterTurn(
+                user_message,
+                assistant,
+                decision,
+                context_window,
+                candidates,
+                (),
+                outcome=outcome,
+                model_calls=1,
+                model_seconds=model_seconds,
+                local_seconds=perf_counter() - local_started,
+            )
+
         try:
-            if decision.intent == "calendar_create":
-                if field := self._calendar_clarification_field(decision.action, user_message):
-                    assistant = self._save_calendar_clarification(user_message, decision.action, field)
-                    return self._turn(
-                        user_message,
-                        assistant,
-                        decision,
-                        context_window,
-                        candidates,
-                        (),
-                        model_calls=1,
-                        model_seconds=model_seconds,
-                        local_seconds=perf_counter() - local_started,
-                        outcome="clarification_created",
-                    )
-                operations, reply = self._create_event(user_message, decision.action)
-            elif decision.intent == "calendar_update":
-                if field := self._calendar_clarification_field(
+            if decision.intent in _CALENDAR_WRITES and (
+                missing_field := self._calendar_clarification_field(
                     decision.action, user_message, context_window
-                ):
-                    assistant = self._save_calendar_clarification(user_message, decision.action, field)
-                    return self._turn(
-                        user_message,
-                        assistant,
-                        decision,
-                        context_window,
-                        candidates,
-                        (),
-                        model_calls=1,
-                        model_seconds=model_seconds,
-                        local_seconds=perf_counter() - local_started,
-                        outcome="clarification_created",
-                    )
-                operations, reply = self._update_event(user_message, decision.action)
-            elif decision.intent == "calendar_delete":
-                if field := self._calendar_clarification_field(
-                    decision.action, user_message, context_window
-                ):
-                    assistant = self._save_calendar_clarification(user_message, decision.action, field)
-                    return self._turn(
-                        user_message,
-                        assistant,
-                        decision,
-                        context_window,
-                        candidates,
-                        (),
-                        model_calls=1,
-                        model_seconds=model_seconds,
-                        local_seconds=perf_counter() - local_started,
-                        outcome="clarification_created",
-                    )
-                operations, reply = self._delete_event(user_message, decision.action)
-            elif decision.intent in {"save_idea", "save_note"}:
-                operations, reply = self._save_item(user_message, decision.action)
-            elif decision.intent == "tracker_change":
-                operations, reply = self._apply_tracker_change(user_message, decision, candidates)
-            elif decision.intent == "local_answer":
-                local_turn = LocalContextService(
-                    self.store, self.reference_date, self.timezone
-                ).submit(conversation_id, content, user_message.id)
-                return self._turn(
-                    user_message,
-                    local_turn.assistant_message,
-                    decision,
-                    context_window,
-                    candidates,
-                    (),
-                    model_calls=1,
-                    model_seconds=model_seconds,
-                    local_seconds=perf_counter() - local_started,
-                    outcome=local_turn.outcome,
                 )
-            elif decision.intent == "project_answer":
-                operations, reply = (), decision.reply or "I do not have enough stored project context to answer that."
-            elif decision.intent == "clarify":
-                if pending is not None:
-                    operations, reply = (), decision.clarification_question or "Which local event do you mean?"
-                else:
-                    assistant = self._save_clarification(user_message, decision)
-                    return self._turn(
-                        user_message,
-                        assistant,
-                        decision,
-                        context_window,
-                        candidates,
-                        (),
-                        model_calls=1,
-                        model_seconds=model_seconds,
-                        local_seconds=perf_counter() - local_started,
-                        outcome="clarification_created",
-                    )
-            else:
-                operations, reply = (), decision.reply or "I cannot take a local action for that."
+            ):
+                assistant = self._save_pending_question(user_message, missing_field, decision.action)
+                return turn_without_writes(assistant, "clarification_created")
+            if decision.intent == "clarify" and pending is None:
+                return turn_without_writes(
+                    self._save_clarification(user_message, decision), "clarification_created"
+                )
+            if decision.intent == "local_answer":
+                local_turn = LocalContextService(self.store, self.reference_date).submit(
+                    conversation_id, content, user_message.id
+                )
+                return turn_without_writes(local_turn.assistant_message, local_turn.outcome)
+            operations, reply = self._execute(decision, user_message, candidates)
         except (KeyError, ValidationError, ValueError) as error:
             return self._reply(
                 user_message,
@@ -276,7 +216,8 @@ class ConversationRouterService:
             # Only a write of the pending kind answers it; an unrelated task must not
             # silently discard a calendar event that is still waiting for its time.
             self.store.resolve_pending_clarification(pending.id, "resolved")
-        deferred = self._deferred_second_item(decision, operations)
+        # A second item is asked about only once this turn has committed its one action.
+        deferred = decision.deferred_action if operations else None
         if deferred is not None:
             reply = f"{reply}\n\n{decision.follow_up_question}"
         turn = self._reply(
@@ -295,15 +236,27 @@ class ConversationRouterService:
             self._save_follow_up_clarification(user_message, turn.assistant_message, deferred)
         return turn
 
-    @staticmethod
-    def _deferred_second_item(
-        decision: ConversationDecision, operations: tuple[RouterOperation, ...]
-    ) -> ContextualAction | None:
-        """Return the second item to ask about, once this turn has committed its one action."""
+    def _execute(
+        self, decision: ConversationDecision, user_message: Message, candidates: RouterCandidates
+    ) -> tuple[tuple[RouterOperation, ...], str]:
+        """Commit the decision's one local write, or return the reply for a turn with none."""
 
-        if decision.deferred_action is None or not operations:
-            return None
-        return decision.deferred_action
+        if decision.intent == "calendar_create":
+            return self._create_event(user_message, decision.action)
+        if decision.intent == "calendar_update":
+            return self._update_event(user_message, decision.action)
+        if decision.intent == "calendar_delete":
+            return self._delete_event(user_message, decision.action)
+        if decision.intent in _SAVED_ITEM_WRITES:
+            return self._save_item(user_message, decision.action)
+        if decision.intent == "tracker_change":
+            return self._apply_tracker_change(user_message, decision, candidates)
+        if decision.intent == "project_answer":
+            return (), decision.reply or "I do not have enough stored project context to answer that."
+        if decision.intent == "clarify":
+            # A question is already pending, so this one is asked without replacing it.
+            return (), decision.clarification_question or "Which local event do you mean?"
+        return (), decision.reply or "I cannot take a local action for that."
 
     def _create_event(
         self, user_message: Message, action: ContextualAction | None
@@ -367,7 +320,7 @@ class ConversationRouterService:
         assert action is not None and action.target_event_id is not None
         self._current_evidence(action, user_message)
         existing = self.store.get_calendar_event(action.target_event_id)
-        target_date = self._event_date(existing)
+        target_date = existing.start_date
         if action.date is not None:
             target_date = date.fromisoformat(action.date)
         after = self._updated_event(
@@ -443,16 +396,14 @@ class ConversationRouterService:
     def _calendar_clarification_field(
         self,
         action: ContextualAction | None,
-        user_message: Message | None = None,
-        context_window: ProjectContextWindow | None = None,
+        user_message: Message,
+        context_window: ContextWindow,
     ) -> str | None:
+        """The field a calendar action must ask about before it may be written, if any."""
+
         if action is None:
             return None
-        if (
-            user_message is not None
-            and context_window is not None
-            and self._target_is_ungrounded(action, user_message, context_window)
-        ):
+        if self._target_is_ungrounded(action, user_message, context_window):
             return "target"
         if action.timezone is not None and action.timezone != self.timezone:
             return "timezone"
@@ -496,7 +447,7 @@ class ConversationRouterService:
         return None
 
     def _target_is_ungrounded(
-        self, action: ContextualAction, user_message: Message, context_window: ProjectContextWindow
+        self, action: ContextualAction, user_message: Message, context_window: ContextWindow
     ) -> bool:
         """Whether an update or delete binds to an event this conversation never identified.
 
@@ -647,19 +598,12 @@ class ConversationRouterService:
                 return "target"
         return "date"
 
-    def _save_calendar_clarification(
-        self, user_message: Message, action: ContextualAction | None, missing_field: str
-    ) -> Message:
-        assert action is not None
-        return self._save_pending_question(
-            user_message, missing_field, action.model_dump(mode="json")
-        )
-
     def _save_pending_question(
-        self, user_message: Message, missing_field: str, action: dict
+        self, user_message: Message, missing_field: str, action: ContextualAction | None
     ) -> Message:
         """Ask one bounded question and keep the unexecuted action, writing nothing."""
 
+        assert action is not None
         self._replace_unanswered_question(user_message)
         assistant = self._assistant_message(user_message, self._question(missing_field))
         self.store.save_pending_clarification(
@@ -668,7 +612,7 @@ class ConversationRouterService:
                 conversation_id=user_message.conversation_id,
                 source_message_id=user_message.id,
                 assistant_message_id=assistant.id,
-                original_action=action,
+                original_action=action.model_dump(mode="json"),
                 missing_field=missing_field,
                 created_at=user_message.created_at,
             )
@@ -852,10 +796,6 @@ class ConversationRouterService:
         )
 
     @staticmethod
-    def _event_date(event: CalendarEvent) -> date:
-        return event.start_at.date() if isinstance(event.start_at, datetime) else event.start_at
-
-    @staticmethod
     def _current_evidence(action: ContextualAction, user_message: Message) -> EvidenceReference:
         for evidence in action.evidence:
             if evidence.message_id == user_message.id:
@@ -866,7 +806,7 @@ class ConversationRouterService:
     def _validate_decision(
         decision: ConversationDecision,
         user_message: Message,
-        context_window: ProjectContextWindow,
+        context_window: ContextWindow,
         candidates: RouterCandidates,
     ) -> None:
         messages = {message.id: message for message in context_window.messages}
@@ -904,7 +844,7 @@ class ConversationRouterService:
         user_message: Message,
         content: str,
         decision: ConversationDecision | None,
-        context_window: ProjectContextWindow,
+        context_window: ContextWindow,
         candidates: RouterCandidates,
         operations: tuple[RouterOperation, ...],
         *,
@@ -916,44 +856,17 @@ class ConversationRouterService:
         assistant = self._assistant_message(user_message, content)
         if decision is not None and decision.intent == "project_answer":
             self._save_answer_sources(assistant.id, decision, candidates)
-        return self._turn(
+        return ConversationRouterTurn(
             user_message,
             assistant,
             decision,
             context_window,
             candidates,
             operations,
+            outcome=outcome,
             model_calls=model_calls,
             model_seconds=model_seconds,
             local_seconds=local_seconds,
-            outcome=outcome,
-        )
-
-    @staticmethod
-    def _turn(
-        user_message: Message,
-        assistant_message: Message,
-        decision: ConversationDecision | None,
-        context_window: ProjectContextWindow,
-        candidates: RouterCandidates,
-        operations: tuple[RouterOperation, ...],
-        *,
-        model_calls: int = 0,
-        model_seconds: float = 0,
-        local_seconds: float = 0,
-        outcome: str,
-    ) -> ConversationRouterTurn:
-        return ConversationRouterTurn(
-            user_message,
-            assistant_message,
-            decision,
-            context_window,
-            candidates,
-            operations,
-            model_calls,
-            model_seconds,
-            local_seconds,
-            outcome,
         )
 
     def _assistant_message(self, user_message: Message, content: str) -> Message:

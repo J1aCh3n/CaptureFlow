@@ -1,1 +1,1 @@
-"""CaptureFlow's deterministic Phase 1 foundation."""
+"""CaptureFlow: a local, single-user project continuity assistant."""

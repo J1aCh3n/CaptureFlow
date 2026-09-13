@@ -3,7 +3,7 @@ import unittest
 from datetime import date, datetime, timezone
 from pathlib import Path
 
-from captureflow.context_service import select_project_context, select_router_candidates
+from captureflow.context_service import select_context_window, select_router_candidates
 from captureflow.models import (
     CalendarEvent,
     Conversation,
@@ -36,7 +36,7 @@ class RouterContextTests(unittest.TestCase):
             for index in range(4)
         ]
 
-        window = select_project_context(messages, max_messages=2, max_characters=30)
+        window = select_context_window(messages, max_messages=2, max_characters=30)
 
         self.assertEqual([message.id for message in window.messages], ["message-2", "message-3"])
         self.assertEqual(window.omitted_message_count, 2)
@@ -57,7 +57,7 @@ class RouterContextTests(unittest.TestCase):
             created_at=user.created_at,
         )
 
-        window = select_project_context([assistant, user])
+        window = select_context_window([assistant, user])
 
         self.assertEqual([message.id for message in window.messages], [user.id, assistant.id])
 
@@ -73,7 +73,7 @@ class RouterContextTests(unittest.TestCase):
             ),
         ]
 
-        window = select_project_context(messages)
+        window = select_context_window(messages)
 
         self.assertEqual(
             window.for_router(),

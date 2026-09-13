@@ -14,7 +14,7 @@ def utc_now() -> datetime:
 
 
 class Conversation(BaseModel):
-    """A locally persisted conversation container; chat is not implemented yet."""
+    """A locally persisted chat conversation."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -33,7 +33,7 @@ class Conversation(BaseModel):
 
 
 class Message(BaseModel):
-    """One immutable user or assistant turn in a V2 conversation."""
+    """One immutable user or assistant turn in a conversation."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -102,9 +102,13 @@ class CalendarEvent(BaseModel):
                 raise ValueError("event end must be after its start")
         return self
 
+    @property
+    def start_date(self) -> date:
+        return self.start_at.date() if isinstance(self.start_at, datetime) else self.start_at
+
 
 class SavedItem(BaseModel):
-    """An explicit user-authored idea or note, separate from agent memory."""
+    """An explicit user-authored idea or note."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -128,7 +132,7 @@ class SavedItem(BaseModel):
 
 
 class ToolOperation(BaseModel):
-    """A restart-safe intent for one deterministic V2 local write."""
+    """A restart-safe intent for one local Calendar event or idea/note write."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -155,7 +159,7 @@ class ToolOperation(BaseModel):
 
 
 class PendingClarification(BaseModel):
-    """One persisted bounded Calendar clarification for a V2 conversation."""
+    """The one question a conversation is waiting on, with the action it would complete."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -304,7 +308,7 @@ class ProjectRecordEvent(BaseModel):
 
 
 class ProjectChange(BaseModel):
-    """One untrusted Phase 6 proposal; storage decides whether it may run."""
+    """One untrusted tracker change proposal; Python decides whether it may run."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -424,7 +428,7 @@ class LocalContextSource(BaseModel):
 
 
 class ProjectChangeOperation(BaseModel):
-    """Restart-safe audit record for one validated Phase 6 tracker proposal."""
+    """Restart-safe audit record for one validated tracker change."""
 
     model_config = ConfigDict(frozen=True)
 
