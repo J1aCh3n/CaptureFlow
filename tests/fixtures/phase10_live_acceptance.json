@@ -3,7 +3,7 @@
     "reference_date": "2026-09-09",
     "timezone": "America/Vancouver",
     "database_seed": "isolated phase-10 contextual-router live fixture",
-    "model": "qwen3.6-plus"
+    "model": "qwen3.8-flash"
   },
   "cases": [
     {

@@ -18,7 +18,7 @@
 
 .PARAMETER Model
     Value for CAPTUREFLOW_MODEL. Defaults to the existing variable, then to
-    qwen3.6-plus. For a Qwen model the key comes from QWEN_API_KEY, the endpoint
+    qwen3.8-flash. For a Qwen model the key comes from QWEN_API_KEY, the endpoint
     is DashScope international, and the timeout is 120 seconds, unless those
     variables are already set.
 
@@ -69,7 +69,7 @@ if ($imported.Trim() -ne $source) {
 if ($Model) {
     $env:CAPTUREFLOW_MODEL = $Model
 } elseif (-not $env:CAPTUREFLOW_MODEL) {
-    $env:CAPTUREFLOW_MODEL = 'qwen3.6-plus'
+    $env:CAPTUREFLOW_MODEL = 'qwen3.8-flash'
 }
 if ($env:CAPTUREFLOW_MODEL -like 'qwen*') {
     if (-not $env:CAPTUREFLOW_API_KEY -and $env:QWEN_API_KEY) {
@@ -80,7 +80,7 @@ if ($env:CAPTUREFLOW_MODEL -like 'qwen*') {
         $env:CAPTUREFLOW_BASE_URL = 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1'
     }
     if (-not $env:CAPTUREFLOW_MODEL_TIMEOUT_SECONDS) {
-        # Qwen took 18-60 seconds per routing call; the 30-second default would cut it off.
+        # Qwen took 8-50 seconds, occasionally over 100, per routing call; the 30-second default would cut it off.
         $env:CAPTUREFLOW_MODEL_TIMEOUT_SECONDS = '120'
     }
 } elseif (-not $env:CAPTUREFLOW_API_KEY -and $env:REPOMEDIC_OPENAI_API_KEY) {

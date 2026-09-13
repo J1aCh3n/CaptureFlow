@@ -87,13 +87,13 @@ rows.
 
 ## Status and evidence
 
-The deterministic suite passes 164 tests. It verifies the database, validation,
+The deterministic suite passes 166 tests. It verifies the database, validation,
 and model-write boundaries with scripted model decisions.
 
 The frozen Phase 10 live acceptance (16 ordered assertions) exercises calendar creation and correction, task distinction,
 meeting questions, replay, cross-conversation lookups, and an ambiguous
 correction. Each run is demonstration evidence, not a reliability benchmark.
-Its protocol model was `gpt-5.6-terra` through Phase 11 and is `qwen3.6-plus`
+Its protocol model was `gpt-5.6-terra` through Phase 11 and is `qwen3.8-flash`
 from the redundancy cleanup onward.
 
 | Document | Covers |
@@ -140,7 +140,7 @@ them shadows the others, and the app then runs the wrong code without any error.
 `scripts/run_local_app.ps1` puts this checkout's `src` first, refuses to start if
 `captureflow` still imports from elsewhere, and runs Streamlit from the
 repository root regardless of the current directory. It defaults to
-`qwen3.6-plus`: the key from `QWEN_API_KEY`, the DashScope international
+`qwen3.8-flash`: the key from `QWEN_API_KEY`, the DashScope international
 endpoint, and a 120-second timeout, unless those variables are already set:
 
 ```powershell
@@ -161,7 +161,7 @@ these environment variables in the shell that starts Streamlit:
 
 ```powershell
 $env:CAPTUREFLOW_API_KEY = $env:QWEN_API_KEY
-$env:CAPTUREFLOW_MODEL = "qwen3.6-plus"
+$env:CAPTUREFLOW_MODEL = "qwen3.8-flash"
 # A compatible provider endpoint; a DashScope key only works in its own region:
 $env:CAPTUREFLOW_BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
 # Optional; defaults to the computer's timezone:
