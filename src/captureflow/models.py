@@ -538,38 +538,6 @@ class ProjectRecordEvent(BaseModel):
         return self
 
 
-class ProjectConversationDecision(BaseModel):
-    """A Phase 5 reply classification; it cannot propose a tracker write."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    reply: str = Field(min_length=1, max_length=1_000)
-    turn_kind: Literal[
-        "new_subject",
-        "follow_up",
-        "correction",
-        "cancellation",
-        "clarification_answer",
-        "clarify",
-    ]
-    clarification_question: str | None = Field(default=None, max_length=300)
-
-    @field_validator("reply")
-    @classmethod
-    def reply_is_not_whitespace(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("project conversation reply must not be blank")
-        return value
-
-    @model_validator(mode="after")
-    def clarification_matches_turn_kind(self) -> "ProjectConversationDecision":
-        if self.turn_kind == "clarify" and not self.clarification_question:
-            raise ValueError("a clarify turn requires a clarification question")
-        if self.turn_kind != "clarify" and self.clarification_question is not None:
-            raise ValueError("only a clarify turn may include a clarification question")
-        return self
-
-
 class ProjectChange(BaseModel):
     """One untrusted Phase 6 proposal; storage decides whether it may run."""
 
@@ -670,42 +638,6 @@ class ProjectChange(BaseModel):
             raise ValueError("a resolved deadline needs its normalized date")
 
 
-class ProjectTrackerDecision(ProjectConversationDecision):
-    """A bounded project reply plus zero to three proposed tracker changes."""
-
-    changes: list[ProjectChange] = Field(default_factory=list, max_length=3)
-
-    @model_validator(mode="after")
-    def clarification_cannot_change_the_tracker(self) -> "ProjectTrackerDecision":
-        if self.turn_kind == "clarify" and self.changes:
-            raise ValueError("a clarification turn cannot propose tracker changes")
-        return self
-
-
-class ProjectAnswerDecision(BaseModel):
-    """A Phase 7 answer grounded in a bounded set of retrieved project records."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    reply: str = Field(min_length=1, max_length=1_000)
-    answer_kind: Literal["current_status", "history"]
-    supporting_record_ids: list[str] = Field(min_length=1, max_length=6)
-
-    @field_validator("reply")
-    @classmethod
-    def answer_reply_is_not_whitespace(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("project answer reply must not be blank")
-        return value
-
-    @field_validator("supporting_record_ids")
-    @classmethod
-    def supporting_ids_are_unique(cls, value: list[str]) -> list[str]:
-        if len(set(value)) != len(value):
-            raise ValueError("supporting record IDs must be unique")
-        return value
-
-
 class LocalContextSourceRef(BaseModel):
     """One bounded Calendar or SavedItem source selected for a local answer."""
 
@@ -724,119 +656,6 @@ class LocalContextSource(BaseModel):
     label: str
     content: str
     source_quote: str
-
-
-class SupportedPoint(BaseModel):
-    """One answer statement that must identify its local supporting records."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    text: str = Field(min_length=1, max_length=600)
-    source_ids: list[str] = Field(min_length=1, max_length=6)
-
-    @field_validator("text")
-    @classmethod
-    def text_is_not_whitespace(cls, value: str) -> str:
-        value = value.strip()
-        if not value:
-            raise ValueError("supported point text must not be blank")
-        return value
-
-    @field_validator("source_ids")
-    @classmethod
-    def source_ids_are_unique(cls, value: list[str]) -> list[str]:
-        if len(set(value)) != len(value):
-            raise ValueError("supported point source IDs must be unique")
-        return value
-
-
-class PreparationSuggestion(BaseModel):
-    """A clearly labeled inference, never a persisted task or requirement."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    text: str = Field(min_length=1, max_length=400)
-    based_on_source_ids: list[str] = Field(min_length=1, max_length=6)
-
-    @field_validator("text")
-    @classmethod
-    def text_is_not_whitespace(cls, value: str) -> str:
-        value = value.strip()
-        if not value:
-            raise ValueError("preparation suggestion text must not be blank")
-        return value
-
-    @field_validator("based_on_source_ids")
-    @classmethod
-    def source_ids_are_unique(cls, value: list[str]) -> list[str]:
-        if len(set(value)) != len(value):
-            raise ValueError("preparation suggestion source IDs must be unique")
-        return value
-
-
-class LocalContextAnswerDecision(BaseModel):
-    """A bounded model synthesis over selected Phase 9 local records."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    outcome: Literal["answer", "insufficient_context", "clarify"]
-    selected_event_ids: list[str] = Field(default_factory=list, max_length=3)
-    selected_item_ids: list[str] = Field(default_factory=list, max_length=3)
-    selected_project_record_ids: list[str] = Field(default_factory=list, max_length=3)
-    summary_points: list[SupportedPoint] = Field(default_factory=list, max_length=3)
-    preparation_suggestions: list[PreparationSuggestion] = Field(default_factory=list, max_length=3)
-    missing_information: list[Literal["meeting", "time", "agenda", "preparation"]] = Field(
-        default_factory=list, max_length=4
-    )
-    clarification_question: str | None = Field(default=None, max_length=300)
-
-    @field_validator(
-        "selected_event_ids",
-        "selected_item_ids",
-        "selected_project_record_ids",
-        "missing_information",
-    )
-    @classmethod
-    def list_values_are_unique(cls, value: list[str]) -> list[str]:
-        if len(set(value)) != len(value):
-            raise ValueError("local-context decision list values must be unique")
-        return value
-
-    @field_validator("clarification_question")
-    @classmethod
-    def clarification_is_not_whitespace(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        value = value.strip()
-        return value or None
-
-    @model_validator(mode="after")
-    def fields_match_outcome(self) -> "LocalContextAnswerDecision":
-        selected_ids = [
-            *self.selected_event_ids,
-            *self.selected_item_ids,
-            *self.selected_project_record_ids,
-        ]
-        if len(set(selected_ids)) != len(selected_ids):
-            raise ValueError("a local source ID cannot be selected under multiple source types")
-        if self.outcome == "answer":
-            if not selected_ids:
-                raise ValueError("an answer needs at least one selected local source")
-            if not self.summary_points:
-                raise ValueError("an answer needs at least one supported point")
-            if self.clarification_question is not None:
-                raise ValueError("an answer cannot include a clarification question")
-        elif self.outcome == "clarify":
-            if not self.clarification_question:
-                raise ValueError("a clarification needs a question")
-            if selected_ids or self.summary_points or self.preparation_suggestions:
-                raise ValueError("a clarification cannot select sources or include answer content")
-        else:
-            if self.clarification_question is not None:
-                raise ValueError("only a clarification may include a clarification question")
-            if selected_ids or self.summary_points or self.preparation_suggestions:
-                raise ValueError("an insufficient-context result cannot cite answer content")
-        return self
 
 
 class ProjectChangeOperation(BaseModel):

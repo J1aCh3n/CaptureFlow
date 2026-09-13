@@ -30,7 +30,7 @@ from .models import (
     ToolOperation,
     utc_now,
 )
-from .project_service import ProjectTrackerService
+from .project_service import apply_validated_changes
 from .storage import CaptureStore
 
 
@@ -218,7 +218,7 @@ class ConversationRouterService:
                 operations, reply = self._apply_tracker_change(user_message, decision, candidates)
             elif decision.intent == "local_answer":
                 local_turn = LocalContextService(
-                    self.store, self.reference_date, self.timezone, model=None
+                    self.store, self.reference_date, self.timezone
                 ).submit(conversation_id, content, user_message.id)
                 return self._turn(
                     user_message,
@@ -559,12 +559,8 @@ class ConversationRouterService:
         changes = [change for change, _ in resolved if change is not None]
         if not changes:
             return (), "\n".join(deadline_notes) or "No tracker change was applied."
-        committed, reviewed = ProjectTrackerService.apply_validated_changes(
-            self.store,
-            project,
-            user_message,
-            changes,
-            list(candidates.project_records),
+        committed, reviewed = apply_validated_changes(
+            self.store, project, user_message, changes, list(candidates.project_records)
         )
         operations = tuple([*committed, *reviewed])
         summaries = [

@@ -4,13 +4,7 @@ import unittest
 from datetime import date, datetime
 from pathlib import Path
 
-from captureflow.llm import ModelError
-from captureflow.local_context_service import (
-    LocalContextService,
-    is_local_context_query,
-    is_local_event_statement,
-    is_local_write_request,
-)
+from captureflow.local_context_service import LocalContextService
 from captureflow.models import (
     CalendarEvent,
     Conversation,
@@ -20,40 +14,6 @@ from captureflow.models import (
     SavedItem,
 )
 from captureflow.storage import CaptureStore
-
-
-class ScriptedLocalContextModel:
-    def __init__(self, decisions, repairs=()):
-        self.decisions = list(decisions)
-        self.repairs = list(repairs)
-        self.calls = []
-
-    def answer_local_context(
-        self, user_message, runtime_context, events, saved_items, project_records
-    ):
-        self.calls.append(("answer", runtime_context, events, saved_items, project_records))
-        candidate = self.decisions.pop(0)
-        if isinstance(candidate, Exception):
-            raise candidate
-        return candidate
-
-    def repair_local_context_answer(
-        self,
-        user_message,
-        runtime_context,
-        events,
-        saved_items,
-        project_records,
-        invalid_decision,
-        validation_error,
-    ):
-        self.calls.append(
-            ("repair", runtime_context, events, saved_items, project_records, invalid_decision)
-        )
-        candidate = self.repairs.pop(0)
-        if isinstance(candidate, Exception):
-            raise candidate
-        return candidate
 
 
 class LocalContextServiceTests(unittest.TestCase):
@@ -141,13 +101,10 @@ class LocalContextServiceTests(unittest.TestCase):
         )
 
         turn = self.service.submit(self.later.id, "我后天有什么安排？")
-        payload = self.service._event_for_model(event)
 
         self.assertEqual([source.id for source in turn.sources], [event.id])
         self.assertIn(event.description, turn.assistant_message.content)
         self.assertIn(event.end_at.isoformat(), turn.assistant_message.content)
-        self.assertEqual(payload["description"], event.description)
-        self.assertEqual(payload["end_at"], event.end_at.isoformat())
 
     def test_deleted_event_and_unrelated_notes_are_not_returned(self) -> None:
         unrelated = self.store.save_saved_item(
@@ -168,157 +125,12 @@ class LocalContextServiceTests(unittest.TestCase):
         self.assertEqual([source.id for source in turn.sources], [self.note.id])
         self.assertNotIn(unrelated.content, turn.assistant_message.content)
 
-    def test_missing_local_context_returns_unknown_without_a_model(self) -> None:
+    def test_missing_local_context_returns_unknown(self) -> None:
         turn = self.service.submit(self.later.id, "What is the calendar agenda for Friday?")
 
         self.assertEqual(turn.outcome, "insufficient_context")
         self.assertIn("do not have matching local", turn.assistant_message.content)
         self.assertEqual(self.store.list_local_context_answer_sources(turn.assistant_message.id), [])
-
-    def test_model_synthesizes_only_selected_local_sources_and_python_renders_time(self) -> None:
-        model = ScriptedLocalContextModel(
-            [
-                {
-                    "outcome": "answer",
-                    "selected_event_ids": [self.event.id],
-                    "selected_item_ids": [self.note.id],
-                    "summary_points": [
-                        {
-                            "text": "The meeting uses voting and idea merging.",
-                            "source_ids": [self.note.id],
-                        }
-                    ],
-                    "preparation_suggestions": [
-                        {
-                            "text": "Bring the existing ideas ready for voting.",
-                            "based_on_source_ids": [self.note.id],
-                        }
-                    ],
-                    "missing_information": ["preparation"],
-                    "clarification_question": None,
-                }
-            ]
-        )
-        service = LocalContextService(
-            self.store,
-            reference_date=date(2026, 9, 8),
-            timezone="America/Vancouver",
-            model=model,
-        )
-
-        turn = service.submit(self.later.id, "What time is my meeting tomorrow and what should I prepare?")
-
-        self.assertEqual(turn.outcome, "grounded_local_context_model")
-        self.assertEqual(turn.model_calls, 1)
-        self.assertFalse(turn.fallback_used)
-        self.assertIn("2026-09-09", turn.assistant_message.content)
-        self.assertIn("The meeting uses voting and idea merging.", turn.assistant_message.content)
-        self.assertIn("Possible preparation (inferred", turn.assistant_message.content)
-        self.assertEqual(model.calls[0][1]["target_date"], "2026-09-09")
-        self.assertEqual(
-            {source.reference.source_id for source in self.store.list_local_context_answer_sources(turn.assistant_message.id)},
-            {self.event.id, self.note.id},
-        )
-
-    def test_foreign_source_gets_one_repair_before_a_grounded_answer(self) -> None:
-        invalid = {
-            "outcome": "answer",
-            "selected_event_ids": [self.event.id],
-            "selected_item_ids": [self.note.id],
-            "summary_points": [{"text": "Unsupported.", "source_ids": ["foreign-source"]}],
-            "preparation_suggestions": [],
-            "missing_information": [],
-            "clarification_question": None,
-        }
-        repaired = {
-            **invalid,
-            "summary_points": [
-                {"text": "The meeting uses voting and idea merging.", "source_ids": [self.note.id]}
-            ],
-        }
-        model = ScriptedLocalContextModel([invalid], [repaired])
-        service = LocalContextService(
-            self.store,
-            reference_date=date(2026, 9, 8),
-            timezone="America/Vancouver",
-            model=model,
-        )
-
-        turn = service.submit(self.later.id, "What time is my meeting tomorrow?")
-
-        self.assertEqual(turn.model_calls, 2)
-        self.assertFalse(turn.fallback_used)
-        self.assertEqual([call[0] for call in model.calls], ["answer", "repair"])
-        self.assertNotIn("foreign-source", turn.assistant_message.content)
-
-    def test_model_failure_preserves_deterministic_local_recall(self) -> None:
-        model = ScriptedLocalContextModel([ModelError("unavailable")])
-        service = LocalContextService(
-            self.store,
-            reference_date=date(2026, 9, 8),
-            timezone="America/Vancouver",
-            model=model,
-        )
-
-        turn = service.submit(self.later.id, "What time is my meeting tomorrow?")
-
-        self.assertEqual(turn.outcome, "grounded_local_context")
-        self.assertEqual(turn.model_calls, 1)
-        self.assertTrue(turn.fallback_used)
-        self.assertIn(self.note.content, turn.assistant_message.content)
-        self.assertEqual([call[0] for call in model.calls], ["answer"])
-
-    def test_partial_local_evidence_is_repaired_into_an_answer(self) -> None:
-        self.store.set_calendar_event_status(self.event.id, "deleted")
-        insufficient = {
-            "outcome": "insufficient_context",
-            "selected_event_ids": [],
-            "selected_item_ids": [],
-            "summary_points": [],
-            "preparation_suggestions": [],
-            "missing_information": ["time", "agenda", "preparation"],
-            "clarification_question": None,
-        }
-        repaired = {
-            "outcome": "answer",
-            "selected_event_ids": [],
-            "selected_item_ids": [self.note.id],
-            "summary_points": [
-                {
-                    "text": "The meeting uses voting and idea merging.",
-                    "source_ids": [self.note.id],
-                }
-            ],
-            "preparation_suggestions": [
-                {
-                    "text": "Bring existing ideas ready for voting and merging.",
-                    "based_on_source_ids": [self.note.id],
-                }
-            ],
-            "missing_information": ["time"],
-            "clarification_question": None,
-        }
-        model = ScriptedLocalContextModel([insufficient], [repaired])
-        service = LocalContextService(
-            self.store,
-            reference_date=date(2026, 9, 8),
-            timezone="America/Vancouver",
-            model=model,
-        )
-
-        turn = service.submit(
-            self.later.id,
-            "明天的工作流会议几点开？会议的目的是什么？我应该准备什么？",
-        )
-
-        self.assertEqual(turn.outcome, "grounded_local_context_model")
-        self.assertEqual(turn.model_calls, 2)
-        self.assertFalse(turn.fallback_used)
-        self.assertEqual([source.id for source in turn.sources], [self.note.id])
-        self.assertIn("The meeting uses voting and idea merging.", turn.assistant_message.content)
-        self.assertIn("Bring existing ideas ready", turn.assistant_message.content)
-        self.assertIn("Not stored locally: time.", turn.assistant_message.content)
-        self.assertEqual([call[0] for call in model.calls], ["answer", "repair"])
 
     def test_same_project_record_answers_agenda_without_claiming_a_calendar_event(self) -> None:
         project = self.store.save_project(Project(id="workflow-project", name="Workflow"))
@@ -338,44 +150,15 @@ class LocalContextServiceTests(unittest.TestCase):
                 source_quote="Tomorrow at 15:00 is the workflow meeting. The meeting uses voting and idea merging.",
             )
         )
-        model = ScriptedLocalContextModel(
-            [
-                {
-                    "outcome": "answer",
-                    "selected_event_ids": [],
-                    "selected_item_ids": [],
-                    "selected_project_record_ids": [record.id],
-                    "summary_points": [
-                        {"text": record.content, "source_ids": [record.id]}
-                    ],
-                    "preparation_suggestions": [
-                        {
-                            "text": "会前整理已有点子，准备参与投票和合并。",
-                            "based_on_source_ids": [record.id],
-                        }
-                    ],
-                    "missing_information": ["time"],
-                    "clarification_question": None,
-                }
-            ]
-        )
-        service = LocalContextService(
-            self.store,
-            reference_date=date(2026, 9, 8),
-            timezone="America/Vancouver",
-            model=model,
-        )
-
-        turn = service.submit(
+        turn = self.service.submit(
             self.later.id,
             "我明天的工作流会议几点开？会议目的是什么？我应该准备什么？",
         )
 
-        self.assertEqual(turn.outcome, "grounded_local_context_model")
+        self.assertEqual(turn.outcome, "grounded_local_context")
         self.assertEqual([source.id for source in turn.sources], [record.id])
         self.assertIn("No matching Calendar event is stored", turn.assistant_message.content)
         self.assertIn(record.content, turn.assistant_message.content)
-        self.assertIn("Not stored locally: time.", turn.assistant_message.content)
         self.assertEqual(
             [source.id for source in self.store.list_project_answer_sources(turn.assistant_message.id)],
             [record.id],
@@ -383,7 +166,6 @@ class LocalContextServiceTests(unittest.TestCase):
         self.assertEqual(
             self.store.list_local_context_answer_sources(turn.assistant_message.id), []
         )
-        self.assertEqual(model.calls[0][4][0]["source_id"], record.id)
 
     def test_assigned_project_excludes_saved_items_from_other_projects(self) -> None:
         project = self.store.save_project(Project(id="selected-project", name="Selected"))
@@ -453,73 +235,3 @@ class LocalContextServiceTests(unittest.TestCase):
         self.assertEqual(
             self.store.list_project_answer_sources(turn.assistant_message.id), []
         )
-
-    def test_model_time_text_gets_repaired_so_python_is_the_time_authority(self) -> None:
-        invalid = {
-            "outcome": "answer",
-            "selected_event_ids": [self.event.id],
-            "selected_item_ids": [self.note.id],
-            "summary_points": [
-                {"text": "The meeting starts tomorrow at 15:00.", "source_ids": [self.event.id]}
-            ],
-            "preparation_suggestions": [],
-            "missing_information": [],
-            "clarification_question": None,
-        }
-        repaired = {
-            **invalid,
-            "summary_points": [
-                {"text": "The meeting uses voting and idea merging.", "source_ids": [self.note.id]}
-            ],
-        }
-        model = ScriptedLocalContextModel([invalid], [repaired])
-        service = LocalContextService(
-            self.store,
-            reference_date=date(2026, 9, 8),
-            timezone="America/Vancouver",
-            model=model,
-        )
-
-        turn = service.submit(self.later.id, "What time is my meeting tomorrow?")
-
-        self.assertEqual(turn.model_calls, 2)
-        self.assertIn("2026-09-09", turn.assistant_message.content)
-        self.assertNotIn("starts tomorrow at 15:00", turn.assistant_message.content)
-
-    def test_query_classifier_is_narrow_and_deterministic(self) -> None:
-        self.assertTrue(is_local_context_query("我明天的会议要做什么？"))
-        self.assertTrue(is_local_context_query("When is the calendar meeting?"))
-        self.assertTrue(is_local_context_query("What is the meeting schedule?"))
-        self.assertTrue(is_local_context_query("我明天有什么活动"))
-        self.assertTrue(is_local_context_query("明天有什么安排？"))
-        self.assertFalse(is_local_context_query("Track a meeting task."))
-        self.assertFalse(is_local_context_query("请在明天下午两点创建日历：工作流会议。"))
-        self.assertFalse(is_local_context_query("会议内容是关于新的工作流。"))
-        self.assertFalse(is_local_context_query("Schedule a workflow meeting tomorrow at 2 PM."))
-        self.assertTrue(is_local_write_request("请在明天下午两点创建日历：工作流会议。"))
-        self.assertTrue(is_local_write_request("Save this as an idea."))
-        self.assertFalse(is_local_write_request("我明天有什么活动"))
-
-    def test_event_statement_classifier_preempts_project_routing(self) -> None:
-        self.assertTrue(
-            is_local_event_statement(
-                "我明天下午有个系统架构与驱动集成探讨。"
-                "排查 ROS 2 发布者-订阅者节点之间的延迟问题，并测试 MoveIt 2 的运动规划框架。"
-            )
-        )
-        self.assertTrue(
-            is_local_event_statement("后天下午四点有组会，所有人都要按时到场，并带好工牌")
-        )
-        self.assertTrue(
-            is_local_event_statement(
-                "仿真环境与基准测试同步 (Simulation & Benchmark Sync)\n"
-                "会议时间：2026年9月11日 (周五) 10:30 - 11:30\n"
-                "会议主题：NVIDIA Isaac Sim 仿真环境进度汇报。"
-            )
-        )
-        self.assertFalse(is_local_event_statement("我明天有组会吗？"))
-        self.assertFalse(is_local_event_statement("老板明天下午有个会议。"))
-
-    def test_question_particles_keep_calendar_questions_read_only(self) -> None:
-        self.assertTrue(is_local_context_query("我明天有安排吗，如果有的话是什么"))
-        self.assertTrue(is_local_context_query("明天有没有组会？"))

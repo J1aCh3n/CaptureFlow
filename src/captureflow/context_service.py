@@ -1,23 +1,10 @@
-"""Bounded, project-scoped conversation replies for V2 Phase 5."""
+"""What the contextual router sees: a recent message window and a few candidate records."""
 
 from dataclasses import dataclass
 from datetime import date, datetime
-from time import perf_counter
-from uuid import NAMESPACE_URL, uuid4, uuid5
 
-from pydantic import ValidationError
-
-from .llm import ModelError, ProjectConversationModel
 from .local_context_service import match_terms
-from .models import (
-    CalendarEvent,
-    Message,
-    Project,
-    ProjectConversationDecision,
-    ProjectRecord,
-    SavedItem,
-    utc_now,
-)
+from .models import CalendarEvent, Message, ProjectRecord, SavedItem
 from .storage import CaptureStore
 
 
@@ -35,9 +22,6 @@ class ProjectContextWindow:
     def truncated(self) -> bool:
         return self.omitted_message_count > 0
 
-    def for_model(self) -> list[dict[str, str]]:
-        return [{"role": message.role, "content": message.content} for message in self.messages]
-
     def for_router(self) -> list[dict[str, str]]:
         """Expose stable message IDs for cross-message router evidence."""
 
@@ -54,17 +38,6 @@ class RouterCandidates:
     events: tuple[CalendarEvent, ...]
     saved_items: tuple[SavedItem, ...]
     project_records: tuple[ProjectRecord, ...]
-
-
-@dataclass(frozen=True)
-class ProjectConversationTurn:
-    user_message: Message
-    assistant_message: Message
-    decision: ProjectConversationDecision | None
-    context_window: ProjectContextWindow
-    model_calls: int
-    model_seconds: float
-    outcome: str
 
 
 def select_project_context(
@@ -215,111 +188,3 @@ def _logical_turn_order(messages: list[Message]) -> list[Message]:
         if message.id not in attached_reply_ids and message not in ordered
     ]
     return [*ordered, *unattached]
-
-
-class ProjectConversationService:
-    """Persist one bounded contextual reply; Phase 5 deliberately writes no ProjectRecord."""
-
-    def __init__(self, store: CaptureStore, model: ProjectConversationModel) -> None:
-        self.store = store
-        self.model = model
-
-    def submit(
-        self, conversation_id: str, content: str, message_id: str | None = None
-    ) -> ProjectConversationTurn:
-        project = self.store.begin_project_conversation(conversation_id)
-        user_message = self._user_message(conversation_id, content, message_id)
-        context_window = select_project_context(self.store.list_messages(conversation_id))
-        existing_reply = self.store.get_assistant_reply(user_message.id)
-        if existing_reply is not None:
-            return ProjectConversationTurn(
-                user_message=user_message,
-                assistant_message=existing_reply,
-                decision=None,
-                context_window=context_window,
-                model_calls=0,
-                model_seconds=0,
-                outcome="reloaded",
-            )
-
-        started = perf_counter()
-        try:
-            decision = ProjectConversationDecision.model_validate(
-                self.model.respond_to_project_turn(
-                    project, context_window.for_model(), context_window.truncated
-                )
-            )
-        except (ModelError, ValidationError, ValueError):
-            return self._failure_reply(user_message, context_window, perf_counter() - started)
-
-        reply = decision.reply
-        if decision.turn_kind == "clarify":
-            reply = f"{reply}\n\n{decision.clarification_question}"
-        if context_window.truncated:
-            reply = (
-                f"{reply}\n\n_Context note: I used only the most recent "
-                f"{len(context_window.messages)} messages; "
-                f"{context_window.omitted_message_count} older message(s) were outside this turn's context window._"
-            )
-        assistant = self._reply_message(user_message, reply)
-        return ProjectConversationTurn(
-            user_message=user_message,
-            assistant_message=assistant,
-            decision=decision,
-            context_window=context_window,
-            model_calls=1,
-            model_seconds=perf_counter() - started,
-            outcome="contextual_reply",
-        )
-
-    def _failure_reply(
-        self, user_message: Message, context_window: ProjectContextWindow, model_seconds: float
-    ) -> ProjectConversationTurn:
-        assistant = self._reply_message(
-            user_message,
-            "I could not process this project conversation turn, so no tracker record was changed.",
-        )
-        return ProjectConversationTurn(
-            user_message=user_message,
-            assistant_message=assistant,
-            decision=None,
-            context_window=context_window,
-            model_calls=1,
-            model_seconds=model_seconds,
-            outcome="model_failure",
-        )
-
-    def _user_message(self, conversation_id: str, content: str, message_id: str | None) -> Message:
-        if message_id is not None:
-            try:
-                existing = self.store.get_message(message_id)
-            except KeyError:
-                pass
-            else:
-                if (
-                    existing.role != "user"
-                    or existing.conversation_id != conversation_id
-                    or existing.content != content
-                ):
-                    raise ValueError("message ID already exists with different content")
-                return existing
-        return self.store.save_message(
-            Message(
-                id=message_id or str(uuid4()),
-                conversation_id=conversation_id,
-                role="user",
-                content=content,
-            )
-        )
-
-    def _reply_message(self, user_message: Message, content: str) -> Message:
-        return self.store.save_message(
-            Message(
-                id=str(uuid5(NAMESPACE_URL, f"captureflow:project-context:{user_message.id}")),
-                conversation_id=user_message.conversation_id,
-                role="assistant",
-                content=content,
-                reply_to_message_id=user_message.id,
-                created_at=utc_now(),
-            )
-        )
