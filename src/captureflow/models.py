@@ -546,8 +546,8 @@ class ContextualAction(BaseModel):
     @model_validator(mode="after")
     def action_fields_match_kind(self) -> "ContextualAction":
         schedule = (self.date, self.start_time, self.end_time, self.duration_minutes)
-        if self.end_time is not None and self.duration_minutes is not None:
-            raise ValueError("an event cannot have both an end time and a duration")
+        # An end time and a duration may both arrive; the router accepts them when they
+        # agree and asks about the length when they do not.
         if self.action == "create_event":
             # A creation may lack its date; Python then asks for it instead of guessing.
             if self.content is None:

@@ -434,6 +434,8 @@ class ConversationRouterService:
             return "date"
         if action.date is not None and not self._plausible_date(date.fromisoformat(action.date)):
             return "date"
+        if self._end_and_duration_disagree(action):
+            return "duration"
         if (
             action.action == "update_event"
             and action.start_time is None
@@ -444,6 +446,29 @@ class ConversationRouterService:
             # A new end or length for an all-day event still needs a start time.
             return "time"
         return None
+
+    def _end_and_duration_disagree(self, action: ContextualAction) -> bool:
+        """Whether a stated end time and a stated duration name different ends.
+
+        Both may be stated for one meeting, as in 四点到五点，开一个小时; when they
+        agree the end time is used. A start is needed to compare them: the action's
+        own, or the start of the timed event an update targets.
+        """
+
+        if action.end_time is None or action.duration_minutes is None:
+            return False
+        start_clock = None if action.start_time is None else time.fromisoformat(action.start_time)
+        if start_clock is None and action.action == "update_event" and action.target_event_id is not None:
+            existing = self.store.get_calendar_event(action.target_event_id).start_at
+            if isinstance(existing, datetime):
+                start_clock = existing.time()
+        if start_clock is None:
+            return False
+        start = datetime.combine(self.reference_date, start_clock)
+        by_end = datetime.combine(self.reference_date, time.fromisoformat(action.end_time))
+        if by_end <= start:
+            by_end += timedelta(days=1)
+        return by_end != start + timedelta(minutes=action.duration_minutes)
 
     def _plausible_date(self, value: date) -> bool:
         """A model-normalized date far outside the planning horizon is more likely a misread."""

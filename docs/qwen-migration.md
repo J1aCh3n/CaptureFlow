@@ -88,10 +88,14 @@ Overridden `qwen3.8-flash` runs at intermediate commits scored:
 
 - **Run-to-run variance is high.** One structural slip at the first turn fails
   five records. Two runs cannot measure a pass rate.
-- **End time plus duration.** A model that states both, consistently, is rejected.
-  Accepting both when they agree, and clarifying when they conflict, would follow
-  the same pattern as the fixes above. Not done yet.
-- **Latency.** Routing calls took 8–100 seconds. The OpenAI SDK retries a timed-out
+- **End time plus duration** (fixed after these runs). The rule that only one may
+  be given came with explicit durations on 2026-09-10, a day before task deadlines
+  existed; deadlines use `due_date`/`due_time` on a tracker change and never these
+  fields. The schema no longer rejects both; the router uses the end time when they
+  agree and asks for the length when they conflict. The prompt still asks for one.
+- **Latency (accepted for now).** Routing calls took 8–100 seconds, almost all of
+  it thinking tokens: `qwen3.8-flash` generated 600–950 reasoning tokens per call
+  at roughly 50 tokens a second. The OpenAI SDK retries a timed-out
   request twice by default, so one turn reached 169 seconds at a 120-second
   timeout, and a `qwen3.8-flash` turn at `8c07e0e` reached 362 seconds before timing out. The Chat UI
   waits that long.

@@ -178,17 +178,19 @@ class ModelTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             ContextualAction(action="save_note", content="纪要", recurring=True, evidence=evidence)
 
-    def test_contextual_action_rejects_an_end_time_and_duration_together(self) -> None:
-        with self.assertRaises(ValidationError):
-            ContextualAction(
-                action="create_event",
-                content="代码审查",
-                date="2026-09-10",
-                start_time="16:00",
-                end_time="17:00",
-                duration_minutes=60,
-                evidence=[EvidenceReference(message_id="message-1", source_quote="代码审查")],
-            )
+    def test_contextual_action_may_carry_an_end_time_and_a_duration_together(self) -> None:
+        # Whether they agree is the router's question, not a schema error.
+        action = ContextualAction(
+            action="create_event",
+            content="代码审查",
+            date="2026-09-10",
+            start_time="16:00",
+            end_time="17:00",
+            duration_minutes=90,
+            evidence=[EvidenceReference(message_id="message-1", source_quote="代码审查")],
+        )
+
+        self.assertEqual((action.end_time, action.duration_minutes), ("17:00", 90))
 
     def test_a_pending_update_may_lack_the_field_it_is_asking_for(self) -> None:
         evidence = [EvidenceReference(message_id="correction", source_quote="这个会议改到周四。")]

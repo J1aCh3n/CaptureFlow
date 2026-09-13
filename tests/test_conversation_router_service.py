@@ -170,6 +170,66 @@ class ConversationRouterServiceTests(unittest.TestCase):
         self.assertEqual(len(self.store.list_calendar_event_update_operations("correction-turn")), 1)
         self.assertEqual(len(model.calls), 1)
 
+    def test_an_end_time_and_a_duration_that_agree_create_the_event(self) -> None:
+        for label, start, end, minutes, expected_end in (
+            ("same-day", "16:00", "17:00", 60, "2026-09-10T17:00:00-07:00"),
+            ("past-midnight", "23:30", "00:30", 60, "2026-09-11T00:30:00-07:00"),
+        ):
+            with self.subTest(label=label):
+                content = f"明天{start}到{end}有代码审查会议，开{minutes}分钟。"
+                message_id = f"end-and-duration-{label}"
+                model = ScriptedContextualModel(
+                    [
+                        {
+                            "intent": "calendar_create",
+                            "action": {
+                                "action": "create_event",
+                                "content": f"代码审查会议 {label}",
+                                "date": "2026-09-10",
+                                "start_time": start,
+                                "end_time": end,
+                                "duration_minutes": minutes,
+                                "evidence": [{"message_id": message_id, "source_quote": content}],
+                            },
+                        }
+                    ]
+                )
+
+                turn = ConversationRouterService(self.store, model, date(2026, 9, 9)).submit(
+                    self.conversation.id, content, message_id
+                )
+
+                self.assertEqual(turn.outcome, "calendar_create")
+                event = self.store.get_calendar_event(turn.operations[0].result["event_id"])
+                self.assertEqual(event.end_at, datetime.fromisoformat(expected_end))
+
+    def test_an_end_time_and_a_duration_that_disagree_ask_for_the_length(self) -> None:
+        content = "明天下午四点到五点有代码审查会议，开一个半小时。"
+        model = ScriptedContextualModel(
+            [
+                {
+                    "intent": "calendar_create",
+                    "action": {
+                        "action": "create_event",
+                        "content": "代码审查会议",
+                        "date": "2026-09-10",
+                        "start_time": "16:00",
+                        "end_time": "17:00",
+                        "duration_minutes": 90,
+                        "evidence": [{"message_id": "end-duration-conflict", "source_quote": content}],
+                    },
+                }
+            ]
+        )
+
+        turn = ConversationRouterService(self.store, model, date(2026, 9, 9)).submit(
+            self.conversation.id, content, "end-duration-conflict"
+        )
+
+        self.assertEqual(turn.outcome, "clarification_created")
+        self.assertEqual(self.store.list_calendar_events(), [])
+        self.assertEqual(self.store.get_pending_clarification(self.conversation.id).missing_field, "duration")
+
     def test_calendar_update_applies_a_new_start_and_duration(self) -> None:
         original = "今天开始进行A测，下午三点钟要准备好，四点有个相关的说明会"
         correction = "会议延期了，时间也被缩短到半个小时，现在晚上七点才开始"
