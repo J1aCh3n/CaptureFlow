@@ -1,5 +1,10 @@
 # Phase 10 Baseline
 
+> The baseline fixture and `test_phase_ten_baseline.py` described below were
+> removed in the [redundancy cleanup](redundancy-cleanup.md), together with the
+> keyword dispatch they replayed. They remain in Git history. The acceptance
+> contract in this document still describes the contextual router.
+
 ## Scope frozen on 2026-09-09
 
 Phase 10 replaces only top-level natural-language dispatch. It must preserve

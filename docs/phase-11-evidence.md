@@ -106,11 +106,13 @@ never committed.
 
 ## Left for the separate cleanup
 
-Per decision 3, nothing was deleted from `time_tool.py` or `date_tool.py`. These
-functions now have no caller in `src/` and are kept alive only by their own tests:
-`time_tool.with_stated_period`, `parse_end_time`, `stated_timezone`,
-`parse_duration`, and `date_tool.states_recurrence`. `time_tool.parse_time` is
+Per decision 3, nothing was deleted from `time_tool.py` or `date_tool.py` in this
+phase. These functions had no caller in `src/` and were kept alive only by their
+own tests: `time_tool.with_stated_period`, `parse_end_time`, `stated_timezone`,
+`parse_duration`, and `date_tool.states_recurrence`. `time_tool.parse_time` was
 still used by the legacy V2 Phase 3 `router_service`.
+
+That cleanup has since happened; see [redundancy-cleanup.md](redundancy-cleanup.md).
 
 ## Follow-up: the current local time
 
