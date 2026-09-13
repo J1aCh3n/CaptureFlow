@@ -17,7 +17,6 @@ from .models import (
     Message,
     LocalContextSource,
     LocalContextSourceRef,
-    PendingClarification,
     Project,
     ProjectChange,
     ProjectChangeOperation,
@@ -686,7 +685,7 @@ class CaptureStore:
         if project is None or project.id != operation.project_id:
             raise ValueError("a project change source must belong to its project")
         change = ProjectChange.model_validate(operation.change)
-        self._require_source_quote(source, change.source_quote)
+        self._require_source_quote(self._change_quote_source(change, source), change.source_quote)
         if contains_credential_disclosure(change.source_quote) or (
             change.content is not None and contains_credential_disclosure(change.content)
         ):
@@ -762,7 +761,8 @@ class CaptureStore:
             project = self.get_conversation_project(source.conversation_id)
             if project is None or project.id != operation.project_id or project.status != "active":
                 raise ValueError("project change no longer has an active assigned project")
-            self._require_source_quote(source, change.source_quote)
+            quote_source = self._change_quote_source(change, source)
+            self._require_source_quote(quote_source, change.source_quote)
             if change.action == "create_record":
                 record = ProjectRecord(
                     id=str(uuid5(NAMESPACE_URL, f"captureflow:project-change-record:{operation.id}")),
@@ -773,7 +773,7 @@ class CaptureStore:
                     rationale=change.rationale,
                     due_at=change.due_at,
                     state="completed" if change.kind == "milestone" else "active",
-                    source_message_id=source.id,
+                    source_message_id=quote_source.id,
                     source_quote=change.source_quote,
                 )
                 self._insert_project_record_in_connection(connection, record)
@@ -849,7 +849,7 @@ class CaptureStore:
                     content=change.content,
                     rationale=change.rationale,
                     state="active",
-                    source_message_id=source.id,
+                    source_message_id=quote_source.id,
                     source_quote=change.source_quote,
                     supersedes_record_id=target.id,
                 )
@@ -1155,29 +1155,6 @@ class CaptureStore:
             for row in rows
         ]
 
-    def list_calendar_event_message_ids(self, event_id: str) -> set[str]:
-        """Every message that created or changed one event, including their cited sources."""
-
-        with self._connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT source_message_id FROM calendar_events WHERE id = ?
-                UNION
-                SELECT source_message_id FROM calendar_event_sources WHERE event_id = ?
-                UNION
-                SELECT source_message_id FROM calendar_event_update_operations
-                WHERE event_id = ? AND status = 'committed'
-                UNION
-                SELECT sources.source_message_id
-                FROM calendar_event_update_sources AS sources
-                JOIN calendar_event_update_operations AS operations
-                  ON operations.id = sources.update_operation_id
-                WHERE operations.event_id = ? AND operations.status = 'committed'
-                """,
-                (event_id, event_id, event_id, event_id),
-            ).fetchall()
-        return {row[0] for row in rows}
-
     def update_calendar_event(
         self, event_id: str, *, title: str, start_at: date | datetime
     ) -> CalendarEvent:
@@ -1206,8 +1183,8 @@ class CaptureStore:
     ) -> CalendarEventUpdateOperation:
         """Persist a validated update intent and its bounded message provenance."""
 
-        if operation.status != "prepared":
-            raise ValueError("only a prepared calendar update can be saved")
+        if operation.status not in {"prepared", "review"}:
+            raise ValueError("only a prepared or review calendar update can be saved")
         if not evidence:
             raise ValueError("a calendar update requires evidence")
         if len(evidence) > 3:
@@ -1330,6 +1307,36 @@ class CaptureStore:
             self._write_calendar_event(connection, operation.after)
             self._set_calendar_event_update_status(connection, operation, "committed")
         return self.get_calendar_event_update_operation(operation_id), self.get_calendar_event(operation.event_id)
+
+    def approve_calendar_event_update(
+        self, operation_id: str
+    ) -> tuple[CalendarEventUpdateOperation, CalendarEvent]:
+        """Apply a change that waited for the user, such as a deletion."""
+
+        with self._connect() as connection:
+            operation = self._calendar_event_update_operation_in_connection(connection, operation_id)
+            if operation.status == "committed":
+                return operation, self._calendar_event_in_connection(connection, operation.event_id)
+            if operation.status != "review":
+                raise ValueError("only a calendar change in review can be approved")
+            self._set_calendar_event_update_status(connection, operation, "prepared")
+        return self.commit_prepared_calendar_event_update(operation_id)
+
+    def reject_calendar_event_update(self, operation_id: str) -> CalendarEventUpdateOperation:
+        with self._connect() as connection:
+            operation = self._calendar_event_update_operation_in_connection(connection, operation_id)
+            if operation.status == "failed":
+                return operation
+            if operation.status != "review":
+                raise ValueError("only a calendar change in review can be rejected")
+            connection.execute(
+                """
+                UPDATE calendar_event_update_operations
+                SET status = ?, error = ?, updated_at = ? WHERE id = ?
+                """,
+                ("failed", "rejected by user", utc_now().isoformat(), operation.id),
+            )
+        return self.get_calendar_event_update_operation(operation_id)
 
     def undo_calendar_event_update(self, operation_id: str) -> CalendarEventUpdateOperation:
         with self._connect() as connection:
@@ -1648,93 +1655,6 @@ class CaptureStore:
             self._commit_operation(connection, operation, result)
         return self.get_tool_operation(operation_id), self.get_saved_item(item.id)
 
-    def save_pending_clarification(
-        self, clarification: PendingClarification
-    ) -> PendingClarification:
-        source = self._require_source_message(
-            clarification.source_message_id, clarification.conversation_id
-        )
-        assistant = self.get_message(clarification.assistant_message_id)
-        if (
-            assistant.role != "assistant"
-            or assistant.conversation_id != clarification.conversation_id
-            or assistant.reply_to_message_id != source.id
-        ):
-            raise ValueError("a clarification must reference the matching assistant reply")
-        with self._connect() as connection:
-            cursor = connection.execute(
-                """
-                INSERT INTO pending_clarifications
-                (id, conversation_id, source_message_id, assistant_message_id,
-                 original_action_json, missing_field, status, created_at, resolved_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO NOTHING
-                """,
-                (
-                    clarification.id,
-                    clarification.conversation_id,
-                    clarification.source_message_id,
-                    clarification.assistant_message_id,
-                    json.dumps(clarification.original_action, sort_keys=True),
-                    clarification.missing_field,
-                    clarification.status,
-                    clarification.created_at.isoformat(),
-                    None
-                    if clarification.resolved_at is None
-                    else clarification.resolved_at.isoformat(),
-                ),
-            )
-            inserted = cursor.rowcount == 1
-        if not inserted:
-            existing = self.get_clarification(clarification.id)
-            if existing != clarification:
-                raise ValueError("clarification ID already exists with different content")
-        return self.get_clarification(clarification.id)
-
-    def get_clarification(self, clarification_id: str) -> PendingClarification:
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM pending_clarifications WHERE id = ?", (clarification_id,)
-            ).fetchone()
-        if row is None:
-            raise KeyError(f"clarification not found: {clarification_id}")
-        return _decode_clarification(row)
-
-    def get_pending_clarification(
-        self, conversation_id: str
-    ) -> PendingClarification | None:
-        with self._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT * FROM pending_clarifications
-                WHERE conversation_id = ? AND status = 'pending'
-                """,
-                (conversation_id,),
-            ).fetchone()
-        return None if row is None else _decode_clarification(row)
-
-    def resolve_pending_clarification(
-        self, clarification_id: str, status: str
-    ) -> PendingClarification:
-        if status not in {"resolved", "cancelled"}:
-            raise ValueError("clarification must resolve or cancel")
-        existing = self.get_clarification(clarification_id)
-        if existing.status != "pending":
-            if existing.status == status:
-                return existing
-            raise ValueError("a resolved clarification cannot change state")
-        resolved_at = utc_now()
-        with self._connect() as connection:
-            connection.execute(
-                """
-                UPDATE pending_clarifications
-                SET status = ?, resolved_at = ?
-                WHERE id = ? AND status = 'pending'
-                """,
-                (status, resolved_at.isoformat(), clarification_id),
-            )
-        return self.get_clarification(clarification_id)
-
     def _validate_project_event_source(
         self, record: ProjectRecord, source_message_id: str | None
     ) -> None:
@@ -1904,8 +1824,17 @@ class CaptureStore:
             ),
         )
 
+    def _change_quote_source(self, change: ProjectChange, source: Message) -> Message:
+        """The user message a tracker change quotes: the one it names, else its operation's."""
+
+        if change.source_message_id is None or change.source_message_id == source.id:
+            return source
+        return self._require_source_message(change.source_message_id, source.conversation_id)
+
     @staticmethod
-    def _require_source_quote(message: Message, source_quote: str) -> None:
+    def _require_source_quote(message: Message, source_quote: str | None) -> None:
+        if not source_quote:
+            raise ValueError("a project record needs a source quote")
         normalized_message = " ".join(message.content.split())
         normalized_quote = " ".join(source_quote.split())
         if normalized_quote not in normalized_message:
@@ -2094,12 +2023,6 @@ def _decode_calendar_event_update_operation(row: sqlite3.Row) -> CalendarEventUp
     payload["before"] = CalendarEvent.model_validate_json(payload.pop("before_json"))
     payload["after"] = CalendarEvent.model_validate_json(payload.pop("after_json"))
     return CalendarEventUpdateOperation(**payload)
-
-
-def _decode_clarification(row: sqlite3.Row) -> PendingClarification:
-    payload = dict(row)
-    payload["original_action"] = json.loads(payload.pop("original_action_json"))
-    return PendingClarification(**payload)
 
 
 def _decode_project_record_event(row: sqlite3.Row) -> ProjectRecordEvent:

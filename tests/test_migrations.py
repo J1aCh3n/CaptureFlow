@@ -178,6 +178,59 @@ class MigrationTests(unittest.TestCase):
 
         self.assertEqual(clarification, ("date", "pending"))
 
+    def test_calendar_updates_and_their_sources_survive_the_review_status_rebuild(self) -> None:
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            connection.execute("PRAGMA foreign_keys = ON")
+            apply_migrations(connection, target_version=16)
+            connection.executescript(
+                """
+                INSERT INTO workspaces (id, created_at) VALUES ('default', '2026-09-08');
+                INSERT INTO conversations (id, workspace_id, title, created_at)
+                VALUES ('conversation-1', 'default', 'Calendar', '2026-09-08');
+                INSERT INTO messages (id, conversation_id, role, content, created_at)
+                VALUES ('message-1', 'conversation-1', 'user', 'Meeting', '2026-09-08');
+                INSERT INTO calendar_events
+                (id, workspace_id, conversation_id, title, source_message_id, source_quote, start_at,
+                 all_day, timezone, status, created_at, updated_at)
+                VALUES ('event-1', 'default', 'conversation-1', 'Meeting', 'message-1', 'Meeting',
+                        '2026-09-10', 1, 'America/Vancouver', 'active', '2026-09-08', '2026-09-08');
+                INSERT INTO calendar_event_update_operations
+                (id, source_message_id, action_index, event_id, workspace_id, before_json, after_json,
+                 status, error, created_at, updated_at)
+                VALUES ('update-1', 'message-1', 0, 'event-1', 'default', '{}', '{}', 'committed', NULL,
+                        '2026-09-08', '2026-09-08');
+                INSERT INTO calendar_event_update_sources
+                (update_operation_id, source_message_id, source_quote, source_rank)
+                VALUES ('update-1', 'message-1', 'Meeting', 0);
+                """
+            )
+            connection.commit()
+
+            apply_migrations(connection)
+            connection.execute(
+                """
+                INSERT INTO calendar_event_update_operations
+                (id, source_message_id, action_index, event_id, workspace_id, before_json, after_json,
+                 status, error, created_at, updated_at)
+                VALUES ('delete-1', 'message-1', 1, 'event-1', 'default', '{}', '{}', 'review', NULL,
+                        '2026-09-08', '2026-09-08')
+                """
+            )
+            operations = connection.execute(
+                "SELECT id, status FROM calendar_event_update_operations ORDER BY id"
+            ).fetchall()
+            sources = connection.execute(
+                "SELECT update_operation_id FROM calendar_event_update_sources"
+            ).fetchall()
+            foreign_keys = connection.execute("PRAGMA foreign_keys").fetchone()[0]
+            connection.execute("DELETE FROM calendar_event_update_operations WHERE id = 'update-1'")
+            cascaded = connection.execute("SELECT COUNT(*) FROM calendar_event_update_sources").fetchone()[0]
+
+        self.assertEqual(operations, [("delete-1", "review"), ("update-1", "committed")])
+        self.assertEqual(sources, [("update-1",)])
+        self.assertEqual(foreign_keys, 1)
+        self.assertEqual(cascaded, 0)
+
     def test_repeated_initialize_does_not_repeat_migrations(self) -> None:
         store = CaptureStore(self.database_path)
         store.initialize()

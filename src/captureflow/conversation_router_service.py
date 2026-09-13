@@ -1,6 +1,5 @@
 """One bounded, contextual entry point for ordinary CaptureFlow chat."""
 
-import re
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from time import perf_counter
@@ -22,7 +21,6 @@ from .models import (
     EvidenceReference,
     LocalContextSourceRef,
     Message,
-    PendingClarification,
     ProjectChange,
     ProjectChangeOperation,
     ProjectRecord,
@@ -37,22 +35,10 @@ from .storage import CaptureStore
 
 RouterOperation = ToolOperation | CalendarEventUpdateOperation | ProjectChangeOperation
 
-# The committed intents that answer a pending question about each kind of action.
-_CALENDAR_WRITES = {"calendar_create", "calendar_update", "calendar_delete"}
 _SAVED_ITEM_WRITES = {"save_idea", "save_note"}
-_ANSWERING_INTENTS = {
-    "create_event": _CALENDAR_WRITES,
-    "update_event": _CALENDAR_WRITES,
-    "delete_event": _CALENDAR_WRITES,
-    "save_idea": _SAVED_ITEM_WRITES,
-    "save_note": _SAVED_ITEM_WRITES,
-}
-
-# Words that point at "a meeting" without saying which one.
-_GENERIC_EVENT_TERMS = {
-    "会议", "例会", "开会", "这个", "那个", "这场", "那场", "这次", "那次", "日程", "安排", "活动",
-    "meeting", "meetings", "event", "call", "sync", "this", "that", "the", "it",
-}
+_CALENDAR_WRITES = {"calendar_create", "calendar_update", "calendar_delete"}
+# A stored event keeps at most this many source messages.
+MAX_EVENT_SOURCES = 3
 
 
 @dataclass(frozen=True)
@@ -127,27 +113,24 @@ class ConversationRouterService:
                 outcome="blocked_credential",
             )
 
-        pending = self.store.get_pending_clarification(conversation_id)
         started = perf_counter()
         try:
             decision = ConversationDecision.model_validate(
                 self.model.propose_conversation_decision(
                     current_message=self._message_for_router(user_message),
                     recent_messages=context_window.for_router(),
-                    candidate_events=[self._event_for_router(event) for event in candidates.events],
-                    candidate_saved_items=[self._item_for_router(item) for item in candidates.saved_items],
-                    candidate_project_records=[self._record_for_router(record) for record in candidates.project_records],
+                    **candidates.for_router(),
+                    truncated_candidate_lists=list(candidates.truncated_kinds),
                     reference_date=self.reference_date.isoformat(),
                     reference_time=(
                         None if self.reference_time is None else self.reference_time.strftime("%H:%M")
                     ),
                     timezone=self.timezone,
-                    pending_clarification=None if pending is None else pending.original_action,
                     context_truncated=context_window.truncated,
                     calendar=calendar_reference(self.reference_date),
                 )
             )
-            self._validate_decision(decision, user_message, context_window, candidates)
+            self._validate_decision(decision, candidates)
         except (InvalidStructuredOutput, ModelError, ValidationError, ValueError) as error:
             return self._reply(
                 user_message,
@@ -181,16 +164,14 @@ class ConversationRouterService:
 
         try:
             if decision.intent in _CALENDAR_WRITES and (
-                missing_field := self._calendar_clarification_field(
-                    decision.action, user_message, context_window
-                )
+                missing_field := self._calendar_clarification_field(decision.action)
             ):
-                assistant = self._save_pending_question(user_message, missing_field, decision.action)
+                # Python's policy question is a plain reply; nothing waits for the answer.
+                assistant = self._assistant_message(user_message, self._question(missing_field))
                 return turn_without_writes(assistant, "clarification_created")
-            if decision.intent == "clarify" and pending is None:
-                return turn_without_writes(
-                    self._save_clarification(user_message, decision), "clarification_created"
-                )
+            if decision.intent == "clarify":
+                assistant = self._assistant_message(user_message, decision.reply or "")
+                return turn_without_writes(assistant, "clarification_created")
             if decision.intent == "local_answer":
                 local_turn = LocalContextService(self.store, self.reference_date).submit(
                     conversation_id,
@@ -201,7 +182,7 @@ class ConversationRouterService:
                 return turn_without_writes(local_turn.assistant_message, local_turn.outcome)
             if decision.intent == "project_answer":
                 return self._answer_project(user_message, decision, context_window, candidates, model_seconds)
-            operations, reply = self._execute(decision, user_message, candidates)
+            operations, reply = self._execute(decision, user_message, context_window, candidates)
         except (KeyError, ValidationError, ValueError) as error:
             return self._reply(
                 user_message,
@@ -220,17 +201,12 @@ class ConversationRouterService:
         outcome = decision.intent if decision.intent != "reply_only" or operations else "reply_only"
         if decision.intent == "calendar_update" and not operations:
             outcome = "calendar_unchanged"
-        if pending is not None and operations and decision.intent in _ANSWERING_INTENTS.get(
-            pending.original_action.get("action"), set()
-        ):
-            # Only a write of the pending kind answers it; an unrelated task must not
-            # silently discard a calendar event that is still waiting for its time.
-            self.store.resolve_pending_clarification(pending.id, "resolved")
-        # A second item is asked about only once this turn has committed its one action.
-        deferred = decision.deferred_action if operations else None
-        if deferred is not None:
+        if decision.intent == "calendar_delete":
+            outcome = "calendar_delete_review"
+        # A second item is asked about only once this turn has saved its own.
+        if operations and decision.follow_up_question:
             reply = f"{reply}\n\n{decision.follow_up_question}"
-        turn = self._reply(
+        return self._reply(
             user_message,
             reply,
             decision,
@@ -242,9 +218,6 @@ class ConversationRouterService:
             local_seconds=perf_counter() - local_started,
             outcome=outcome,
         )
-        if deferred is not None:
-            self._save_follow_up_clarification(user_message, turn.assistant_message, deferred)
-        return turn
 
     @staticmethod
     def _named_candidates(
@@ -326,30 +299,31 @@ class ConversationRouterService:
         )
 
     def _execute(
-        self, decision: ConversationDecision, user_message: Message, candidates: RouterCandidates
+        self,
+        decision: ConversationDecision,
+        user_message: Message,
+        context_window: ContextWindow,
+        candidates: RouterCandidates,
     ) -> tuple[tuple[RouterOperation, ...], str]:
         """Commit the decision's one local write, or return the reply for a turn with none."""
 
         if decision.intent == "calendar_create":
-            return self._create_event(user_message, decision.action)
+            return self._create_event(user_message, decision.action, context_window)
         if decision.intent == "calendar_update":
-            return self._update_event(user_message, decision.action)
+            return self._update_event(user_message, decision.action, context_window)
         if decision.intent == "calendar_delete":
-            return self._delete_event(user_message, decision.action)
+            return self._delete_event(user_message, decision.action, context_window)
         if decision.intent in _SAVED_ITEM_WRITES:
             return self._save_item(user_message, decision.action)
         if decision.intent == "tracker_change":
-            return self._apply_tracker_change(user_message, decision, candidates)
-        if decision.intent == "clarify":
-            # A question is already pending, so this one is asked without replacing it.
-            return (), decision.clarification_question or "Which local event do you mean?"
+            return self._apply_tracker_change(user_message, decision, context_window, candidates)
         return (), decision.reply or "I cannot take a local action for that."
 
     def _create_event(
-        self, user_message: Message, action: ContextualAction | None
+        self, user_message: Message, action: ContextualAction | None, context_window: ContextWindow
     ) -> tuple[tuple[ToolOperation, ...], str]:
         assert action is not None
-        source = self._current_evidence(action, user_message)
+        sources = self._event_sources(action, user_message, context_window)
         if action.date is None:
             raise ValueError("calendar date needs clarification")
         event_date = date.fromisoformat(action.date)
@@ -363,9 +337,9 @@ class ConversationRouterService:
             id=_stable_id(user_message.id, "contextual-event"),
             conversation_id=user_message.conversation_id,
             title=action.content or "",
-            description=self._quoted_description(action, user_message),
-            source_message_id=source.message_id,
-            source_quote=source.source_quote,
+            description=action.description,
+            source_message_id=user_message.id,
+            source_quote=user_message.content,
             start_at=start_at,
             end_at=end_at,
             all_day=all_day,
@@ -382,7 +356,7 @@ class ConversationRouterService:
                 "title": event.title,
                 "description": event.description,
                 "source_quote": event.source_quote,
-                "evidence": [reference.model_dump(mode="json") for reference in action.evidence],
+                "evidence": [reference.model_dump(mode="json") for reference in sources],
                 "start_at": event.start_at.isoformat(),
                 "end_at": None if event.end_at is None else event.end_at.isoformat(),
                 "all_day": event.all_day,
@@ -393,26 +367,21 @@ class ConversationRouterService:
             updated_at=user_message.created_at,
         )
         saved = self.store.save_tool_operation(operation)
-        committed, saved_event = self.store.commit_prepared_calendar_event(
-            saved.id, event, action.evidence
-        )
+        committed, saved_event = self.store.commit_prepared_calendar_event(saved.id, event, sources)
         return (
             (committed,),
             f"Created local calendar event: {saved_event.title} — {_event_schedule(saved_event)}.",
         )
 
     def _update_event(
-        self, user_message: Message, action: ContextualAction | None
+        self, user_message: Message, action: ContextualAction | None, context_window: ContextWindow
     ) -> tuple[tuple[CalendarEventUpdateOperation, ...], str]:
         assert action is not None and action.target_event_id is not None
-        self._current_evidence(action, user_message)
         existing = self.store.get_calendar_event(action.target_event_id)
         target_date = existing.start_date
         if action.date is not None:
             target_date = date.fromisoformat(action.date)
-        after = self._updated_event(
-            existing, action, target_date, self._quoted_description(action, user_message)
-        )
+        after = self._updated_event(existing, action, target_date)
         if after.model_copy(update={"updated_at": existing.updated_at}) == existing:
             # An update that changes nothing is not a change; do not audit it as one.
             return (), (
@@ -431,38 +400,37 @@ class ConversationRouterService:
             created_at=user_message.created_at,
             updated_at=user_message.created_at,
         )
-        saved = self.store.prepare_calendar_event_update(operation, action.evidence)
+        saved = self.store.prepare_calendar_event_update(
+            operation, self._event_sources(action, user_message, context_window)
+        )
         committed, event = self.store.commit_prepared_calendar_event_update(saved.id)
         return (committed,), f"Updated local calendar event: {event.title} — {_event_schedule(event)}."
 
-    def _quoted_description(
-        self, action: ContextualAction, user_message: Message
-    ) -> str | None:
-        """Keep a description only while it is the user's own words.
+    def _event_sources(
+        self, action: ContextualAction, user_message: Message, context_window: ContextWindow
+    ) -> list[EvidenceReference]:
+        """The user messages an event comes from, each quoted whole, in conversation order.
 
-        `source_quote` is validated everywhere else; `description` was the one stored
-        Calendar field a model could write freely, so an unquoted one is dropped rather
-        than kept as if the user had said it. A clarification answer may still describe
-        the event from the earlier message it cites, so every cited message counts.
+        The model names them; Python keeps the ones that are user messages in the context
+        and always includes the current message, which is what authorizes the write. An
+        assistant or unknown ID is dropped rather than failing the turn.
         """
 
-        if action.description is None:
-            return None
-        cited = [user_message.content] + [
-            self.store.get_message(evidence.message_id).content
-            for evidence in action.evidence
-            if evidence.message_id != user_message.id
-        ]
-        normalized = _normalized(action.description)
-        if any(normalized in _normalized(source) for source in cited):
-            return action.description
-        return None
+        named = {
+            message_id
+            for message_id in action.source_message_ids
+            if message_id != user_message.id and context_window.user_message(message_id) is not None
+        }
+        earlier = [message for message in context_window.messages if message.id in named]
+        kept = [*earlier[-(MAX_EVENT_SOURCES - 1) :], user_message]
+        return [EvidenceReference(message_id=message.id, source_quote=message.content) for message in kept]
 
     def _delete_event(
-        self, user_message: Message, action: ContextualAction | None
+        self, user_message: Message, action: ContextualAction | None, context_window: ContextWindow
     ) -> tuple[tuple[CalendarEventUpdateOperation, ...], str]:
+        """Prepare a deletion that waits for the user to confirm it."""
+
         assert action is not None and action.target_event_id is not None
-        self._current_evidence(action, user_message)
         existing = self.store.get_calendar_event(action.target_event_id)
         operation = CalendarEventUpdateOperation(
             id=_stable_id(user_message.id, f"contextual-delete-event:{existing.id}"),
@@ -472,26 +440,23 @@ class ConversationRouterService:
             workspace_id=existing.workspace_id,
             before=existing,
             after=existing.model_copy(update={"status": "deleted", "updated_at": utc_now()}),
-            status="prepared",
+            status="review",
             created_at=user_message.created_at,
             updated_at=user_message.created_at,
         )
-        saved = self.store.prepare_calendar_event_update(operation, action.evidence)
-        committed, event = self.store.commit_prepared_calendar_event_update(saved.id)
-        return (committed,), f"Deleted local calendar event: {event.title}. It can be undone."
+        saved = self.store.prepare_calendar_event_update(
+            operation, self._event_sources(action, user_message, context_window)
+        )
+        return (saved,), (
+            f"Delete local calendar event {existing.title} — {_event_schedule(existing)}? "
+            "Confirm or keep it below."
+        )
 
-    def _calendar_clarification_field(
-        self,
-        action: ContextualAction | None,
-        user_message: Message,
-        context_window: ContextWindow,
-    ) -> str | None:
+    def _calendar_clarification_field(self, action: ContextualAction | None) -> str | None:
         """The field a calendar action must ask about before it may be written, if any."""
 
         if action is None:
             return None
-        if self._target_is_ungrounded(action, user_message, context_window):
-            return "target"
         if action.timezone is not None and action.timezone != self.timezone:
             return "timezone"
         if action.recurring:
@@ -562,39 +527,18 @@ class ConversationRouterService:
             return start_at + timedelta(minutes=action.duration_minutes)
         return None
 
-    def _target_is_ungrounded(
-        self, action: ContextualAction, user_message: Message, context_window: ContextWindow
-    ) -> bool:
-        """Whether an update or delete binds to an event this conversation never identified.
-
-        The model still chooses the target. This only refuses to write when nothing in the
-        current conversation supports that choice: the event was not created or changed by
-        a message in the bounded window, and the current message does not name it. A
-        demonstrative such as `这个会议` in a new conversation must not silently bind to
-        whichever event happens to exist.
-        """
-
-        if action.action not in {"update_event", "delete_event"} or action.target_event_id is None:
-            return False
-        window_ids = {message.id for message in context_window.messages} - {user_message.id}
-        if window_ids & self.store.list_calendar_event_message_ids(action.target_event_id):
-            return False
-        title = self.store.get_calendar_event(action.target_event_id).title
-        return not (_distinctive_terms(user_message.content) & _distinctive_terms(title))
-
     def _save_item(
         self, user_message: Message, action: ContextualAction | None
     ) -> tuple[tuple[ToolOperation, ...], str]:
         assert action is not None
-        source = self._current_evidence(action, user_message)
         kind = "idea" if action.action == "save_idea" else "note"
         item = SavedItem(
             id=_stable_id(user_message.id, f"contextual-{kind}"),
             conversation_id=user_message.conversation_id,
             kind=kind,
             content=action.content or "",
-            source_message_id=source.message_id,
-            source_quote=source.source_quote,
+            source_message_id=user_message.id,
+            source_quote=user_message.content,
             created_at=user_message.created_at,
             updated_at=user_message.created_at,
         )
@@ -616,6 +560,7 @@ class ConversationRouterService:
         self,
         user_message: Message,
         decision: ConversationDecision,
+        context_window: ContextWindow,
         candidates: RouterCandidates,
     ) -> tuple[tuple[ProjectChangeOperation, ...], str]:
         project = self.store.get_conversation_project(user_message.conversation_id)
@@ -627,7 +572,12 @@ class ConversationRouterService:
         if not changes:
             return (), "\n".join(deadline_notes) or "No tracker change was applied."
         committed, reviewed = apply_validated_changes(
-            self.store, project, user_message, changes, list(candidates.project_records)
+            self.store,
+            project,
+            user_message,
+            changes,
+            list(candidates.project_records),
+            context_window.messages,
         )
         operations = tuple([*committed, *reviewed])
         summaries = [
@@ -688,53 +638,6 @@ class ConversationRouterService:
                 summaries.append(f"Deadline on the calendar: {record.due_at.isoformat()}.")
         return summaries
 
-    def _save_clarification(self, user_message: Message, decision: ConversationDecision) -> Message:
-        assert decision.pending_action is not None
-        assistant = self._assistant_message(
-            user_message, decision.clarification_question or "Which local event do you mean?"
-        )
-        clarification = PendingClarification(
-            id=_stable_id(user_message.id, "contextual-clarification"),
-            conversation_id=user_message.conversation_id,
-            source_message_id=user_message.id,
-            assistant_message_id=assistant.id,
-            original_action=decision.pending_action.model_dump(mode="json"),
-            missing_field=self._unresolved_field(decision.pending_action),
-            created_at=user_message.created_at,
-        )
-        self.store.save_pending_clarification(clarification)
-        return assistant
-
-    @staticmethod
-    def _unresolved_field(pending_action: ContextualAction) -> str:
-        """Record why the turn stopped, rather than defaulting every reason to a date."""
-
-        if pending_action.action in {"update_event", "delete_event"}:
-            if pending_action.target_event_id is None:
-                return "target"
-        return "date"
-
-    def _save_pending_question(
-        self, user_message: Message, missing_field: str, action: ContextualAction | None
-    ) -> Message:
-        """Ask one bounded question and keep the unexecuted action, writing nothing."""
-
-        assert action is not None
-        self._replace_unanswered_question(user_message)
-        assistant = self._assistant_message(user_message, self._question(missing_field))
-        self.store.save_pending_clarification(
-            PendingClarification(
-                id=_stable_id(user_message.id, f"contextual-calendar-{missing_field}-clarification"),
-                conversation_id=user_message.conversation_id,
-                source_message_id=user_message.id,
-                assistant_message_id=assistant.id,
-                original_action=action.model_dump(mode="json"),
-                missing_field=missing_field,
-                created_at=user_message.created_at,
-            )
-        )
-        return assistant
-
     def _question(self, missing_field: str) -> str:
         return {
             "date": "Which exact date should I use for this local event?",
@@ -748,36 +651,7 @@ class ConversationRouterService:
                 "I cannot store a repeating schedule, only single dated records. "
                 "Which one exact date should I use?"
             ),
-            "target": (
-                "This conversation has not mentioned that event yet. "
-                "Which local calendar event do you mean? Please name it."
-            ),
         }[missing_field]
-
-    def _replace_unanswered_question(self, user_message: Message) -> None:
-        """Only one question may be pending; a newer one replaces a question left unanswered."""
-
-        stale = self.store.get_pending_clarification(user_message.conversation_id)
-        if stale is not None and stale.source_message_id != user_message.id:
-            self.store.resolve_pending_clarification(stale.id, "cancelled")
-
-    def _save_follow_up_clarification(
-        self, user_message: Message, assistant: Message, deferred_action: ContextualAction
-    ) -> PendingClarification:
-        """Keep the unexecuted second item of a compound message as one pending question."""
-
-        self._replace_unanswered_question(user_message)
-        return self.store.save_pending_clarification(
-            PendingClarification(
-                id=_stable_id(user_message.id, "contextual-follow-up-clarification"),
-                conversation_id=user_message.conversation_id,
-                source_message_id=user_message.id,
-                assistant_message_id=assistant.id,
-                original_action=deferred_action.model_dump(mode="json"),
-                missing_field="follow_up",
-                created_at=user_message.created_at,
-            )
-        )
 
     def _resume_persisted_operations(self, user_message: Message) -> tuple[RouterOperation, ...]:
         operations: list[RouterOperation] = []
@@ -854,7 +728,6 @@ class ConversationRouterService:
         existing: CalendarEvent,
         action: ContextualAction,
         target_date: date,
-        description: str | None,
     ) -> CalendarEvent:
         start_at = existing.start_at
         end_at = existing.end_at
@@ -881,7 +754,7 @@ class ConversationRouterService:
         return existing.model_copy(
             update={
                 "title": action.content if action.content is not None else existing.title,
-                "description": description if description is not None else existing.description,
+                "description": action.description if action.description is not None else existing.description,
                 "start_at": start_at,
                 "end_at": end_at,
                 "all_day": all_day,
@@ -890,39 +763,15 @@ class ConversationRouterService:
         )
 
     @staticmethod
-    def _current_evidence(action: ContextualAction, user_message: Message) -> EvidenceReference:
-        for evidence in action.evidence:
-            if evidence.message_id == user_message.id:
-                return evidence
-        raise ValueError("a local write must cite the current user message")
+    def _validate_decision(decision: ConversationDecision, candidates: RouterCandidates) -> None:
+        """Every ID a decision writes to or cites must be one the router supplied."""
 
-    @staticmethod
-    def _validate_decision(
-        decision: ConversationDecision,
-        user_message: Message,
-        context_window: ContextWindow,
-        candidates: RouterCandidates,
-    ) -> None:
-        messages = {message.id: message for message in context_window.messages}
         event_ids = {event.id for event in candidates.events}
         item_ids = {item.id for item in candidates.saved_items}
         record_ids = {record.id for record in candidates.project_records}
-        for action in (decision.action, decision.pending_action, decision.deferred_action):
-            if action is None:
-                continue
-            if action.target_event_id is not None and action.target_event_id not in event_ids:
+        if decision.action is not None and decision.action.target_event_id is not None:
+            if decision.action.target_event_id not in event_ids:
                 raise ValueError("calendar update target is outside supplied candidates")
-            for evidence in action.evidence:
-                message = messages.get(evidence.message_id)
-                if (
-                    message is None
-                    or message.role != "user"
-                    or _normalized(evidence.source_quote) not in _normalized(message.content)
-                ):
-                    raise ValueError("action evidence is outside bounded message context")
-        if decision.intent in {"calendar_create", "save_idea", "save_note", "calendar_update"}:
-            assert decision.action is not None
-            ConversationRouterService._current_evidence(decision.action, user_message)
         if any(change.due_at is not None for change in decision.project_changes):
             raise ValueError("a tracker deadline must be resolved locally, not supplied by the model")
         if any(
@@ -997,26 +846,6 @@ class ConversationRouterService:
     def _message_for_router(message: Message) -> dict[str, str]:
         return {"message_id": message.id, "role": message.role, "content": message.content}
 
-    @staticmethod
-    def _event_for_router(event: CalendarEvent) -> dict:
-        return {
-            "id": event.id,
-            "title": event.title,
-            "description": event.description,
-            "start_at": event.start_at.isoformat(),
-            "end_at": None if event.end_at is None else event.end_at.isoformat(),
-            "all_day": event.all_day,
-            "timezone": event.timezone,
-        }
-
-    @staticmethod
-    def _item_for_router(item: SavedItem) -> dict:
-        return {"id": item.id, "kind": item.kind, "content": item.content}
-
-    @staticmethod
-    def _record_for_router(record: ProjectRecord) -> dict:
-        return {"id": record.id, "kind": record.kind, "content": record.content, "state": record.state}
-
 
 def _failure_reason(error: Exception) -> str:
     detail = describe_validation_error(error) if isinstance(error, ValidationError) else str(error)
@@ -1025,26 +854,6 @@ def _failure_reason(error: Exception) -> str:
 
 def _stable_id(message_id: str, suffix: str) -> str:
     return str(uuid5(NAMESPACE_URL, f"captureflow:{message_id}:{suffix}"))
-
-
-def _normalized(value: str) -> str:
-    return " ".join(value.split())
-
-
-def _distinctive_terms(value: str) -> set[str]:
-    """Chinese character pairs and Latin words that can name one event, minus generic ones.
-
-    Pairs rather than single characters, so `周四` in a date does not match `周例会`.
-    """
-
-    lowered = value.casefold()
-    words = {word for word in re.findall(r"[a-z0-9]{2,}", lowered)}
-    pairs = {
-        run[index : index + 2]
-        for run in re.findall(r"[一-鿿]{2,}", value)
-        for index in range(len(run) - 1)
-    }
-    return (words | pairs) - _GENERIC_EVENT_TERMS
 
 
 def _parse_start_at(value: str) -> date | datetime:

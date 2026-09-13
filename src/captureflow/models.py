@@ -158,32 +158,6 @@ class ToolOperation(BaseModel):
         return self
 
 
-class PendingClarification(BaseModel):
-    """The one question a conversation is waiting on, with the action it would complete."""
-
-    model_config = ConfigDict(frozen=True)
-
-    id: str = Field(default_factory=lambda: str(uuid4()))
-    conversation_id: str
-    source_message_id: str
-    assistant_message_id: str
-    original_action: dict
-    missing_field: Literal[
-        "date", "time", "duration", "timezone", "recurrence", "target", "follow_up"
-    ] = "date"
-    status: Literal["pending", "resolved", "cancelled"] = "pending"
-    created_at: datetime = Field(default_factory=utc_now)
-    resolved_at: datetime | None = None
-
-    @model_validator(mode="after")
-    def resolution_time_matches_status(self) -> "PendingClarification":
-        if self.status == "pending" and self.resolved_at is not None:
-            raise ValueError("a pending clarification cannot have a resolution time")
-        if self.status != "pending" and self.resolved_at is None:
-            raise ValueError("a resolved or cancelled clarification needs a resolution time")
-        return self
-
-
 ProjectRecordKind = Literal[
     "task", "milestone", "decision", "constraint", "open_question", "blocker"
 ]
@@ -320,7 +294,12 @@ class ProjectChange(BaseModel):
     due_time: str | None = Field(default=None, pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
     recurring: bool = False
     due_at: date | datetime | None = None
-    source_quote: str = Field(min_length=1, max_length=8_000)
+    # The model's quote and the user message it comes from. Python checks the quote
+    # against that message and falls back to the whole message, so a stored change
+    # always carries a quote. A change stored before Phase 13 has no message ID and
+    # quotes its operation's own source message.
+    source_quote: str | None = Field(default=None, max_length=8_000)
+    source_message_id: str | None = None
     target_record_id: str | None = None
     target_state: Literal["completed", "resolved"] | None = None
 
@@ -352,7 +331,7 @@ class ProjectChange(BaseModel):
                 current["due_time"] = stored_due_at[11:16]
         return current
 
-    @field_validator("content", "rationale")
+    @field_validator("content", "rationale", "source_quote", "source_message_id")
     @classmethod
     def optional_text_is_not_whitespace(cls, value: str | None) -> str | None:
         if value is None:
@@ -477,7 +456,7 @@ ConversationIntent = Literal[
 
 
 class EvidenceReference(BaseModel):
-    """One exact quote from a persisted conversation message."""
+    """One stored source of a Calendar event: a user message and the quote kept from it."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -493,13 +472,14 @@ class EvidenceReference(BaseModel):
 
 
 class ContextualAction(BaseModel):
-    """One untrusted local action with one or more persisted-message citations.
+    """One untrusted local action and the user messages it comes from.
 
     Dates and times arrive already normalized by the model. Python checks their
     structure and attaches the configured timezone; it does not interpret wording.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    # A key the schema does not have, such as a retired evidence list, is noise.
+    model_config = ConfigDict(extra="ignore")
 
     action: Literal["create_event", "update_event", "delete_event", "save_idea", "save_note"]
     content: str | None = Field(default=None, max_length=4_000)
@@ -511,7 +491,9 @@ class ContextualAction(BaseModel):
     timezone: str | None = Field(default=None, min_length=1, max_length=100)
     recurring: bool = False
     target_event_id: str | None = Field(default=None, min_length=1)
-    evidence: list[EvidenceReference] = Field(min_length=1, max_length=3)
+    # The user messages the item comes from. Python keeps the IDs it can verify and
+    # always adds the current message, so a wrong or missing ID is not a failure.
+    source_message_ids: list[str] = Field(default_factory=list)
 
     @field_validator("recurring", mode="before")
     @classmethod
@@ -519,6 +501,15 @@ class ContextualAction(BaseModel):
         # The prompt asks for null on anything the message does not state; for this
         # flag, unstated means not repeating.
         return False if value is None else value
+
+    @field_validator("source_message_ids", mode="before")
+    @classmethod
+    def source_message_ids_are_a_list_without_repeats(cls, value: object) -> object:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return list(dict.fromkeys(value))
+        return value
 
     @field_validator("content", "description", "timezone")
     @classmethod
@@ -533,14 +524,6 @@ class ContextualAction(BaseModel):
     def date_is_a_real_calendar_day(cls, value: str | None) -> str | None:
         if value is not None:
             date.fromisoformat(value)
-        return value
-
-    @field_validator("evidence")
-    @classmethod
-    def evidence_messages_are_unique(cls, value: list[EvidenceReference]) -> list[EvidenceReference]:
-        message_ids = [reference.message_id for reference in value]
-        if len(message_ids) != len(set(message_ids)):
-            raise ValueError("an action cannot cite the same message more than once")
         return value
 
     @model_validator(mode="after")
@@ -564,8 +547,6 @@ class ContextualAction(BaseModel):
             # than rejecting a model that could not tell what the new value is.
             pass
         elif self.action == "delete_event":
-            # A committed deletion needs one candidate target; an unresolved one may
-            # still be carried as the pending action of a clarification.
             if any(value is not None for value in (self.content, self.description, *schedule, self.timezone)):
                 raise ValueError("an event deletion cannot change event fields")
             if self.recurring:
@@ -594,22 +575,30 @@ class ContextualAction(BaseModel):
         )
 
 
+_WRITE_INTENTS = {
+    "calendar_create",
+    "calendar_update",
+    "calendar_delete",
+    "save_idea",
+    "save_note",
+    "tracker_change",
+}
+
+
 class ConversationDecision(BaseModel):
     """The one decision a model makes per chat turn; it does not write storage itself."""
 
-    model_config = ConfigDict(extra="forbid")
+    # A key the schema does not have, such as a retired pending action, is noise.
+    model_config = ConfigDict(extra="ignore")
 
     intent: ConversationIntent
     action: ContextualAction | None = None
     project_changes: list[ProjectChange] = Field(default_factory=list, max_length=3)
-    clarification_question: str | None = Field(default=None, max_length=300)
-    pending_action: ContextualAction | None = None
-    deferred_action: ContextualAction | None = None
     follow_up_question: str | None = Field(default=None, max_length=300)
     reply: str | None = Field(default=None, max_length=1_000)
     source_ids: list[str] = Field(default_factory=list, max_length=6)
 
-    @field_validator("clarification_question", "follow_up_question", "reply")
+    @field_validator("follow_up_question", "reply")
     @classmethod
     def optional_reply_text_is_not_whitespace(cls, value: str | None) -> str | None:
         if value is None:
@@ -619,12 +608,19 @@ class ConversationDecision(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def ignore_sources_outside_answers(cls, value: object) -> object:
-        # source_ids only feed an answer's source cards. A write or a question that cites
-        # the event or record it concerns is not wrong, so the list is dropped, not rejected.
-        if isinstance(value, dict) and value.get("intent") not in {"local_answer", "project_answer", "reply_only"}:
-            return {key: item for key, item in value.items() if key != "source_ids"}
-        return value
+    def ignore_payloads_the_intent_does_not_use(cls, value: object) -> object:
+        # A field the intent never reads is not wrong, so it is dropped rather than
+        # rejected: source_ids only feed an answer's source cards, a question or an
+        # answer writes nothing, and a follow-up question is only appended to a write.
+        if not isinstance(value, dict):
+            return value
+        intent = value.get("intent")
+        unused = set()
+        if intent not in {"local_answer", "project_answer", "reply_only"}:
+            unused.add("source_ids")
+        if intent not in _WRITE_INTENTS:
+            unused.update({"action", "project_changes", "follow_up_question"})
+        return {key: item for key, item in value.items() if key not in unused}
 
     @field_validator("source_ids")
     @classmethod
@@ -635,7 +631,6 @@ class ConversationDecision(BaseModel):
 
     @model_validator(mode="after")
     def intent_matches_payload(self) -> "ConversationDecision":
-        self._deferred_second_item_is_bounded()
         action_for_intent = {
             "calendar_create": "create_event",
             "calendar_update": "update_event",
@@ -652,27 +647,17 @@ class ConversationDecision(BaseModel):
                 and self.action.target_event_id is None
             ):
                 raise ValueError(f"a {self.intent.replace('_', ' ')} requires a candidate event target")
-            if extra := self._present("project_changes", "clarification_question", "pending_action"):
-                raise ValueError(f"a local write cannot include tracker or clarification payload: {extra}")
+            if self.project_changes:
+                raise ValueError("a local write cannot include tracker changes")
         elif self.intent == "tracker_change":
             if not self.project_changes:
                 raise ValueError("a tracker change requires project changes")
-            if extra := self._present("action", "clarification_question", "pending_action"):
-                raise ValueError(f"a tracker change requires project changes only: {extra}")
+            if self.action is not None:
+                raise ValueError("a tracker change cannot include a calendar or idea action")
         elif self.intent == "clarify":
-            if not self.clarification_question:
-                raise ValueError("a clarification requires a clarification question")
-            if extra := self._present("action", "project_changes"):
-                raise ValueError(f"a clarification cannot include a committed action or tracker change: {extra}")
-            if self.pending_action is None or self.pending_action.action not in {
-                "create_event",
-                "update_event",
-                "delete_event",
-            }:
-                raise ValueError("a clarification requires one pending calendar action")
+            if not self.reply:
+                raise ValueError("a clarification requires its question in reply")
         else:
-            if extra := self._present("action", "project_changes", "clarification_question", "pending_action"):
-                raise ValueError(f"a read-only decision cannot include a write or clarification payload: {extra}")
             if self.intent == "reply_only" and self.source_ids:
                 raise ValueError("a reply-only decision cannot cite local sources")
             # An answer's text is written by Python or by a second call, never taken
@@ -680,30 +665,6 @@ class ConversationDecision(BaseModel):
             if self.intent == "reply_only" and not self.reply:
                 raise ValueError("a reply-only decision requires a reply")
         return self
-
-    def _present(self, *fields: str) -> str:
-        """The named fields that carry a value, by name only, for a precise error."""
-
-        return ", ".join(field for field in fields if getattr(self, field))
-
-    def _deferred_second_item_is_bounded(self) -> None:
-        """One turn still commits one action; a second item may only be asked about."""
-
-        if (self.deferred_action is None) != (self.follow_up_question is None):
-            raise ValueError("a deferred second item needs both an action and a follow-up question")
-        if self.deferred_action is None:
-            return
-        if self.intent not in {
-            "calendar_create",
-            "calendar_update",
-            "calendar_delete",
-            "save_idea",
-            "save_note",
-            "tracker_change",
-        }:
-            raise ValueError("only a committed local action may defer a second item")
-        if self.deferred_action.action not in {"create_event", "save_idea", "save_note"}:
-            raise ValueError("a deferred second item may only create a new local record")
 
 
 class CalendarEventUpdateOperation(BaseModel):
@@ -718,7 +679,8 @@ class CalendarEventUpdateOperation(BaseModel):
     workspace_id: str = DEFAULT_WORKSPACE_ID
     before: CalendarEvent
     after: CalendarEvent
-    status: Literal["prepared", "committed", "failed", "undone"]
+    # A deletion waits in review until the user confirms it.
+    status: Literal["prepared", "committed", "review", "failed", "undone"]
     error: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)

@@ -2,7 +2,7 @@
 
 CaptureFlow is a local, single-user project continuity assistant. Its interface is
 persisted text chat: it keeps bounded conversation context and maintains
-source-grounded local records in SQLite â€” Calendar events, Ideas & Notes, and
+source-grounded local records in SQLite — Calendar events, Ideas & Notes, and
 per-project tracker records such as tasks, decisions, and blockers. The default
 workspace keeps chat beside a read-only snapshot of the selected project;
 Calendar, Tracker, and Ideas & Notes are also available as full management views.
@@ -12,8 +12,8 @@ messages, calendar events, ideas, and notes as unassigned local records.
 
 It is deliberately not a general chatbot. On each ordinary chat turn one model
 call reads the message in its bounded conversation context and returns a typed
-decision; only a question about a whole project makes a second call. Python validates the source quote, candidate target, lifecycle,
-duplicate/conflict, and credential rules before any SQLite write. The working
+decision; only a question about a whole project makes a second call. Python validates the candidate target, time policy,
+lifecycle, duplicate/conflict, and credential rules before any SQLite write. The working
 principle is: understanding belongs to the model; authorization stays in Python.
 It has no external calendar synchronization, email, meetings, vector retrieval,
 or access to external services.
@@ -26,17 +26,20 @@ message goes to the contextual router
 
 1. A deterministic credential check runs first and blocks the turn without a
    model call.
-2. The model receives the bounded recent message window (at most eight messages
-   and 12,000 characters), at most three candidate events, ideas/notes, and
-   project records, the current local date and time, a calendar table, and any
-   pending clarification.
+2. The model receives the context in layers: the recent conversation within
+   12,000 characters, where the last two turns are always whole and an older long
+   message is a one-line reference; the stored state as one line per item (up to
+   15 events from the calendar window, 30 active project records, and 20 ideas or
+   notes, plus up to five further events the message names); the current local
+   date and time; and a calendar table. A message the credential check blocked is
+   never included.
 3. It returns one `ConversationDecision`: `calendar_create`, `calendar_update`,
    `calendar_delete`, `save_idea`, `save_note`, `tracker_change` (for a
    conversation assigned to a project), `local_answer`, `project_answer`,
    `clarify`, or `reply_only`.
-4. Python checks every cited quote and candidate ID, applies policy, and commits
-   at most one local write through an audited, restart-safe operation. Every
-   committed change is visible in Chat and has a guarded Undo.
+4. Python checks every candidate ID, applies policy, and commits at most one
+   local write through an audited, restart-safe operation. Every committed change
+   is visible in Chat and has a guarded Undo.
 
 Dates and times arrive already normalized by the model as `date`, `start_time`,
 `end_time`, `duration_minutes`, `timezone`, and `recurring` fields. Python attaches
@@ -45,14 +48,22 @@ interpret date or time wording.
 
 Behavior worth knowing:
 
-- A follow-up such as `æŠŠè¿™åœºä¼šè®®æ”¹åˆ°æ˜Žå¤©ä¸‹åˆä¸¤ç‚¹åˆ°ä¸‰ç‚¹` updates the event the
-  conversation created. An update or delete that names no event the conversation
-  identified asks which event is meant.
+- Stored state is current; the conversation is only used to understand what the
+  user refers to. Only the current message can ask for a write.
+- A follow-up such as `把这场会议改到明天下午两点到三点` updates the event the
+  conversation mentioned. When the model cannot find the event in the conversation
+  or the message, it asks which one is meant, and the answer completes the change.
+- A question is an ordinary reply; nothing waits in storage, and the next turn
+  continues from the conversation.
+- A deletion from Chat waits for its **Delete** button; **Keep** leaves the event.
 - A stated foreign timezone or a repeating schedule is clarified rather than
   stored, because neither is supported.
 - A meeting reported as already held becomes a note, not a Calendar event.
-- One turn commits one action. When a message states a second item, CaptureFlow
-  asks about it in a follow-up question.
+- One turn commits one action or up to three tracker changes. When a message
+  states a second item, CaptureFlow asks about it in a follow-up question.
+- An event's source card shows the whole user messages it came from. A tracker
+  record keeps a short quote, which may come from an earlier message such as
+  pasted minutes; a quote that is not exact falls back to the whole message.
 - A task deadline appears on the Calendar without becoming an event.
 - Replacing an active decision or constraint waits for approval from its Chat card.
 - A question about specific stored items (`local_answer`) — a meeting, an idea or
@@ -66,10 +77,11 @@ Behavior worth knowing:
   times under the answer. See
   [phase-12-answer-intents-design.md](docs/phase-12-answer-intents-design.md).
 
-Known limits: a bare hour such as `æ˜Žå¤©åç‚¹` is resolved to 10:00 without a
-question, and the reply states it; a message that only mentions an event by name
-does not count as identifying it for an update; range questions such as
-`æˆ‘ä¸‹å‘¨æœ‰ä»€ä¹ˆå®‰æŽ’ï¼Ÿ` are not answered.
+Known limits: a bare hour such as `明天十点` is resolved to 10:00 without a
+question, and the reply states it; range questions such as `我下周有什么安排？` are
+not answered; pasted text that leaves the last two turns before everything in it
+is saved is seen only as a reference. See
+[phase-13-simplified-router-design.md](docs/phase-13-simplified-router-design.md).
 
 These explicit commands need no model call:
 
@@ -94,7 +106,7 @@ rows.
 
 ## Status and evidence
 
-The deterministic suite passes 177 tests. It verifies the database, validation,
+The deterministic suite passes 184 tests. It verifies the database, validation,
 and model-write boundaries with scripted model decisions.
 
 The frozen Phase 10 live acceptance (16 ordered assertions) exercises calendar creation and correction, task distinction,
@@ -108,11 +120,13 @@ from the redundancy cleanup onward.
 | [phase-9-local-context-evidence.md](docs/phase-9-local-context-evidence.md) | Deterministic local recall |
 | [phase-10-baseline.md](docs/phase-10-baseline.md) | The contextual router's acceptance contract |
 | [phase-10-live-evidence.md](docs/phase-10-live-evidence.md) | First frozen live acceptance |
-| [phase-10.4](docs/phase-10.4-calendar-deletion-and-noon-times.md) â€“ [phase-10.7](docs/phase-10.7-capability-boundary-probe.md) | Feedback rounds: deletion, compound turns, deadlines, boundary probe |
+| [phase-10.4](docs/phase-10.4-calendar-deletion-and-noon-times.md) – [phase-10.7](docs/phase-10.7-capability-boundary-probe.md) | Feedback rounds: deletion, compound turns, deadlines, boundary probe |
 | [phase-10.8-frozen-acceptance-rerun.md](docs/phase-10.8-frozen-acceptance-rerun.md) | Acceptance reruns after those rounds |
 | [phase-11-model-normalized-time-design.md](docs/phase-11-model-normalized-time-design.md) | Moving date and time understanding to the model |
 | [phase-11-evidence.md](docs/phase-11-evidence.md) | Phase 11 results and acceptance reruns |
 | [redundancy-cleanup.md](docs/redundancy-cleanup.md) | Removal of code the app no longer reaches |
+| [phase-12-answer-intents-design.md](docs/phase-12-answer-intents-design.md) | What `local_answer` and `project_answer` mean |
+| [phase-13-simplified-router-design.md](docs/phase-13-simplified-router-design.md) | A simpler router: plain questions, model-judged targets, layered context |
 
 The live acceptance needs explicit API-cost approval. It creates only an isolated
 local database and writes a trace without credentials or raw model output to the

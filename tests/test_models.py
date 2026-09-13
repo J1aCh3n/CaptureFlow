@@ -9,9 +9,7 @@ from captureflow.models import (
     ContextualAction,
     ConversationDecision,
     Conversation,
-    EvidenceReference,
     Message,
-    PendingClarification,
     ProjectChange,
     SavedItem,
     ToolOperation,
@@ -82,80 +80,56 @@ class ModelTests(unittest.TestCase):
                 status="failed",
             )
 
-    def test_resolved_clarification_requires_resolution_time(self) -> None:
-        with self.assertRaises(ValidationError):
-            PendingClarification(
-                conversation_id="conversation-1",
-                source_message_id="message-1",
-                assistant_message_id="message-2",
-                original_action={"title": "Submit report"},
-                status="resolved",
-            )
-
-    def test_contextual_calendar_update_accepts_two_message_evidence(self) -> None:
-        decision = ConversationDecision(
-            intent="calendar_update",
-            action=ContextualAction(
-                action="update_event",
-                date="2026-09-10",
-                start_time="14:00",
-                end_time="15:00",
-                target_event_id="algorithm-review-event",
-                evidence=[
-                    EvidenceReference(
-                        message_id="meeting-message",
-                        source_quote="我这周四下午四点到五点有算法优化与代码审查会议。",
-                    ),
-                    EvidenceReference(
-                        message_id="correction-message",
-                        source_quote="这个会议在周四 14:00 - 15:00",
-                    ),
-                ],
-            ),
+    def test_contextual_calendar_update_names_its_source_messages(self) -> None:
+        decision = ConversationDecision.model_validate(
+            {
+                "intent": "calendar_update",
+                "action": {
+                    "action": "update_event",
+                    "date": "2026-09-10",
+                    "start_time": "14:00",
+                    "end_time": "15:00",
+                    "target_event_id": "algorithm-review-event",
+                    "source_message_ids": ["meeting-message", "correction-message", "meeting-message"],
+                },
+            }
         )
 
         self.assertEqual(decision.action.target_event_id, "algorithm-review-event")
-        self.assertEqual(len(decision.action.evidence), 2)
+        self.assertEqual(decision.action.source_message_ids, ["meeting-message", "correction-message"])
+        self.assertEqual(ContextualAction(action="save_note", content="纪要", source_message_ids=None).source_message_ids, [])
 
     def test_contextual_calendar_update_requires_candidate_target(self) -> None:
         with self.assertRaises(ValidationError):
             ConversationDecision(
                 intent="calendar_update",
-                action=ContextualAction(
-                    action="update_event",
-                    start_time="14:00",
-                    evidence=[
-                        EvidenceReference(
-                            message_id="correction-message",
-                            source_quote="这个会议改到下午两点。",
-                        )
-                    ],
-                ),
+                action=ContextualAction(action="update_event", start_time="14:00"),
             )
 
-    def test_contextual_action_rejects_duplicate_message_evidence(self) -> None:
-        with self.assertRaises(ValidationError):
-            ContextualAction(
-                action="create_event",
-                content="代码审查",
-                date="2026-09-10",
-                evidence=[
-                    EvidenceReference(message_id="message-1", source_quote="代码审查"),
-                    EvidenceReference(message_id="message-1", source_quote="这周四"),
-                ],
-            )
+    def test_retired_evidence_and_pending_fields_are_ignored(self) -> None:
+        decision = ConversationDecision.model_validate(
+            {
+                "intent": "save_note",
+                "action": {
+                    "action": "save_note",
+                    "content": "纪要",
+                    "evidence": [{"message_id": "message-1", "source_quote": "纪要"}],
+                },
+                "evidence": [{"message_id": "message-1", "source_quote": "纪要"}],
+                "pending_action": None,
+                "deferred_action": {"action": "create_event", "content": "提交修复"},
+                "clarification_question": None,
+            }
+        )
+
+        self.assertEqual(decision.action.content, "纪要")
+        self.assertEqual(decision.action.source_message_ids, [])
 
     def test_normalized_calendar_fields_are_checked_structurally(self) -> None:
-        evidence = [EvidenceReference(message_id="message-1", source_quote="评审会")]
         created = ContextualAction(
-            action="create_event",
-            content="评审会",
-            date="2026-09-13",
-            start_time="15:00",
-            end_time="16:00",
-            evidence=evidence,
+            action="create_event", content="评审会", date="2026-09-13", start_time="15:00", end_time="16:00"
         )
-        undated = ContextualAction(action="create_event", content="评审会", evidence=evidence)
+        undated = ContextualAction(action="create_event", content="评审会")
 
         self.assertEqual((created.date, created.start_time, created.end_time), ("2026-09-13", "15:00", "16:00"))
         self.assertIsNone(undated.date)
@@ -170,13 +144,11 @@ class ModelTests(unittest.TestCase):
             {"date": "2026-09-13", "start_time": "15:00", "duration_minutes": 721},
         ):
             with self.subTest(invalid=invalid), self.assertRaises(ValidationError):
-                ContextualAction(action="create_event", content="评审会", evidence=evidence, **invalid)
-        repeating = ContextualAction(
-            action="create_event", content="团队例会", start_time="15:00", recurring=True, evidence=evidence
-        )
+                ContextualAction(action="create_event", content="评审会", **invalid)
+        repeating = ContextualAction(action="create_event", content="团队例会", start_time="15:00", recurring=True)
         self.assertIsNone(repeating.date)
         with self.assertRaises(ValidationError):
-            ContextualAction(action="save_note", content="纪要", recurring=True, evidence=evidence)
+            ContextualAction(action="save_note", content="纪要", recurring=True)
 
     def test_contextual_action_may_carry_an_end_time_and_a_duration_together(self) -> None:
         # Whether they agree is the router's question, not a schema error.
@@ -187,82 +159,48 @@ class ModelTests(unittest.TestCase):
             start_time="16:00",
             end_time="17:00",
             duration_minutes=90,
-            evidence=[EvidenceReference(message_id="message-1", source_quote="代码审查")],
         )
 
         self.assertEqual((action.end_time, action.duration_minutes), ("17:00", 90))
 
-    def test_a_pending_update_may_lack_the_field_it_is_asking_for(self) -> None:
-        evidence = [EvidenceReference(message_id="correction", source_quote="这个会议改到周四。")]
-        decision = ConversationDecision(
-            intent="clarify",
-            clarification_question="你是指 9月10日还是 9月17日的周四？",
-            pending_action=ContextualAction(
-                action="update_event", target_event_id="event-1", evidence=evidence
-            ),
-        )
-
-        self.assertIsNone(decision.pending_action.date)
-        # A proposed update may lack its new value too; the router turns it into a question.
+    def test_a_proposed_update_may_lack_its_new_value(self) -> None:
+        # The router turns it into a question instead of rejecting the decision.
         undecided = ConversationDecision(
             intent="calendar_update",
-            action=ContextualAction(action="update_event", target_event_id="event-1", evidence=evidence),
+            action=ContextualAction(action="update_event", target_event_id="event-1"),
         )
+
         self.assertFalse(undecided.action.has_replacement())
 
-    def test_contextual_clarification_retains_an_unresolved_calendar_update(self) -> None:
-        decision = ConversationDecision(
-            intent="clarify",
-            clarification_question="Which existing meeting should I update?",
-            pending_action=ContextualAction(
-                action="update_event",
-                start_time="14:00",
-                evidence=[
-                    EvidenceReference(
-                        message_id="correction-message",
-                        source_quote="这个会议改到下午两点。",
-                    )
-                ],
-            ),
+    def test_a_clarification_is_its_question_in_reply_and_writes_nothing(self) -> None:
+        decision = ConversationDecision.model_validate(
+            {
+                "intent": "clarify",
+                "reply": "你是指 9月10日还是 9月17日的周四？",
+                "action": {"action": "update_event", "target_event_id": "event-1"},
+                "project_changes": [{"action": "create_record", "kind": "task", "content": "改会议"}],
+                "follow_up_question": "还有别的吗？",
+            }
         )
 
-        self.assertEqual(decision.pending_action.action, "update_event")
+        self.assertEqual(decision.reply, "你是指 9月10日还是 9月17日的周四？")
+        self.assertIsNone(decision.action)
+        self.assertEqual(decision.project_changes, [])
+        self.assertIsNone(decision.follow_up_question)
+        with self.assertRaises(ValidationError):
+            ConversationDecision(intent="clarify", reply="  ")
 
     def test_contextual_calendar_delete_requires_a_bare_candidate_target(self) -> None:
         decision = ConversationDecision(
             intent="calendar_delete",
-            action=ContextualAction(
-                action="delete_event",
-                target_event_id="expired-meeting-event",
-                evidence=[
-                    EvidenceReference(
-                        message_id="delete-message",
-                        source_quote="昨天的会议已结束，删除过期会议",
-                    )
-                ],
-            ),
+            action=ContextualAction(action="delete_event", target_event_id="expired-meeting-event"),
         )
 
         self.assertEqual(decision.action.target_event_id, "expired-meeting-event")
         with self.assertRaises(ValidationError):
-            ConversationDecision(
-                intent="calendar_delete",
-                action=ContextualAction(
-                    action="delete_event",
-                    evidence=[
-                        EvidenceReference(message_id="delete-message", source_quote="删除过期会议")
-                    ],
-                ),
-            )
+            ConversationDecision(intent="calendar_delete", action=ContextualAction(action="delete_event"))
         with self.assertRaises(ValidationError):
-            ContextualAction(
-                action="delete_event",
-                target_event_id="expired-meeting-event",
-                start_time="16:00",
-                evidence=[
-                    EvidenceReference(message_id="delete-message", source_quote="删除过期会议")
-                ],
-            )
+            ContextualAction(action="delete_event", target_event_id="expired-meeting-event", start_time="16:00")
 
     def test_a_stored_pre_phase_11_deadline_change_still_validates(self) -> None:
         stored = {
@@ -279,17 +217,27 @@ class ModelTests(unittest.TestCase):
 
         self.assertEqual((change.due_date, change.due_time), ("2026-09-16", "20:00"))
         self.assertEqual(change.due_at, datetime.fromisoformat("2026-09-16T20:00:00-07:00"))
+        self.assertIsNone(change.source_message_id)
+
+    def test_a_tracker_change_may_omit_its_quote_and_name_its_source_message(self) -> None:
+        change = ProjectChange.model_validate(
+            {
+                "action": "create_record",
+                "kind": "task",
+                "content": "整理部署文档",
+                "source_quote": " ",
+                "source_message_id": "pasted-minutes",
+            }
+        )
+
+        self.assertIsNone(change.source_quote)
+        self.assertEqual(change.source_message_id, "pasted-minutes")
 
     def test_a_write_that_cites_its_own_target_as_a_source_is_accepted(self) -> None:
         decision = ConversationDecision.model_validate(
             {
                 "intent": "calendar_update",
-                "action": {
-                    "action": "update_event",
-                    "target_event_id": "event-1",
-                    "start_time": "14:00",
-                    "evidence": [{"message_id": "message-1", "source_quote": "改到下午两点。"}],
-                },
+                "action": {"action": "update_event", "target_event_id": "event-1", "start_time": "14:00"},
                 "source_ids": ["event-1"],
             }
         )
@@ -300,9 +248,7 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(decision.source_ids, [])
         self.assertEqual(answer.source_ids, ["record-1"])
         with self.assertRaises(ValidationError):
-            ConversationDecision.model_validate(
-                {"intent": "reply_only", "reply": "好的。", "source_ids": ["event-1"]}
-            )
+            ConversationDecision.model_validate({"intent": "reply_only", "reply": "好的。", "source_ids": ["event-1"]})
 
     def test_an_unstated_recurrence_may_arrive_as_null(self) -> None:
         change = ProjectChange.model_validate(
@@ -316,12 +262,7 @@ class ModelTests(unittest.TestCase):
             }
         )
         action = ContextualAction.model_validate(
-            {
-                "action": "update_event",
-                "target_event_id": "event-1",
-                "recurring": None,
-                "evidence": [{"message_id": "message-1", "source_quote": "这个会议改到周四。"}],
-            }
+            {"action": "update_event", "target_event_id": "event-1", "recurring": None}
         )
 
         self.assertFalse(change.recurring)
@@ -365,67 +306,18 @@ class ModelTests(unittest.TestCase):
                 source_quote="这个任务做完了",
             )
 
-    def test_contextual_decision_bounds_a_deferred_second_item(self) -> None:
-        note_evidence = [
-            EvidenceReference(
-                message_id="compound-message",
-                source_quote="今天中午十二点的会议是关于系统架构与驱动集成，修复需要下周三晚上八点之前提交",
-            )
-        ]
-        decision = ConversationDecision(
+    def test_a_follow_up_question_belongs_only_to_a_write(self) -> None:
+        note = ConversationDecision(
             intent="save_note",
-            action=ContextualAction(
-                action="save_note", content="系统架构与驱动集成会议纪要。", evidence=note_evidence
-            ),
-            deferred_action=ContextualAction(
-                action="create_event",
-                content="提交修复",
-                date="2026-09-16",
-                start_time="20:00",
-                evidence=note_evidence,
-            ),
+            action=ContextualAction(action="save_note", content="系统架构与驱动集成会议纪要。"),
             follow_up_question="Should I also add that deadline to the local calendar?",
         )
-
-        self.assertEqual(decision.deferred_action.action, "create_event")
-        with self.assertRaises(ValidationError):
-            ConversationDecision(
-                intent="save_note",
-                action=ContextualAction(
-                    action="save_note", content="会议纪要。", evidence=note_evidence
-                ),
-                deferred_action=ContextualAction(
-                    action="create_event",
-                    content="提交修复",
-                    date="2026-09-16",
-                    evidence=note_evidence,
-                ),
-            )
-        with self.assertRaises(ValidationError):
-            ConversationDecision(
-                intent="save_note",
-                action=ContextualAction(
-                    action="save_note", content="会议纪要。", evidence=note_evidence
-                ),
-                deferred_action=ContextualAction(
-                    action="delete_event", target_event_id="event-1", evidence=note_evidence
-                ),
-                follow_up_question="Should I also delete that meeting?",
-            )
-
-    def test_contextual_clarification_retains_an_unresolved_calendar_delete(self) -> None:
-        decision = ConversationDecision(
-            intent="clarify",
-            clarification_question="Which local calendar event should I delete?",
-            pending_action=ContextualAction(
-                action="delete_event",
-                evidence=[
-                    EvidenceReference(message_id="delete-message", source_quote="删除过期会议")
-                ],
-            ),
+        reply = ConversationDecision.model_validate(
+            {"intent": "reply_only", "reply": "好的。", "follow_up_question": "Should I also add it?"}
         )
 
-        self.assertIsNone(decision.pending_action.target_event_id)
+        self.assertEqual(note.follow_up_question, "Should I also add that deadline to the local calendar?")
+        self.assertIsNone(reply.follow_up_question)
 
     def test_contextual_answer_sources_are_unique_and_reply_only_has_none(self) -> None:
         with self.assertRaises(ValidationError):
@@ -459,7 +351,7 @@ class ModelTests(unittest.TestCase):
             event_id=before.id,
             before=before,
             after=before.model_copy(update={"status": "deleted"}),
-            status="prepared",
+            status="review",
         )
 
         self.assertEqual(operation.after.status, "deleted")

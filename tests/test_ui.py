@@ -11,7 +11,6 @@ from captureflow.models import (
     CalendarEvent,
     Conversation,
     Message,
-    PendingClarification,
     Project,
     ProjectChangeOperation,
     ProjectRecord,
@@ -28,24 +27,17 @@ class _CalendarRoutingUiModel:
         self,
         *,
         current_message: dict[str, str],
-        candidate_events: list[dict],
+        candidate_events: list[str],
         reference_date: str,
         **_: object,
     ) -> dict:
-        evidence = [
-            {
-                "message_id": current_message["message_id"],
-                "source_quote": current_message["content"],
-            }
-        ]
         if candidate_events:
             return {
                 "intent": "calendar_update",
                 "action": {
                     "action": "update_event",
-                    "target_event_id": candidate_events[0]["id"],
+                    "target_event_id": _candidate_id(candidate_events[0]),
                     "start_time": "15:00",
-                    "evidence": evidence,
                 },
             }
         return {
@@ -57,7 +49,7 @@ class _CalendarRoutingUiModel:
                 "date": (date.fromisoformat(reference_date) + timedelta(days=1)).isoformat(),
                 "start_time": "14:00",
                 "end_time": "15:00",
-                "evidence": evidence,
+                "source_message_ids": [current_message["message_id"]],
             },
         }
 
@@ -66,18 +58,27 @@ class _LocalAnswerUiModel:
     def propose_conversation_decision(
         self,
         *,
-        candidate_events: list[dict],
-        candidate_saved_items: list[dict],
+        candidate_events: list[str],
+        candidate_saved_items: list[str],
         **_: object,
     ) -> dict:
         return {
             "intent": "local_answer",
             "reply": "Use the selected local records.",
-            "source_ids": [
-                *[event["id"] for event in candidate_events],
-                *[item["id"] for item in candidate_saved_items],
-            ],
+            "source_ids": [_candidate_id(line) for line in [*candidate_events, *candidate_saved_items]],
         }
+
+
+class _CalendarDeleteUiModel:
+    def propose_conversation_decision(self, *, candidate_events: list[str], **_: object) -> dict:
+        return {
+            "intent": "calendar_delete",
+            "action": {"action": "delete_event", "target_event_id": _candidate_id(candidate_events[0])},
+        }
+
+
+def _candidate_id(line: str) -> str:
+    return line.split(" | ", 1)[0]
 
 
 class UiTests(unittest.TestCase):
@@ -328,45 +329,23 @@ class UiTests(unittest.TestCase):
         )
         self.assertTrue(any("Intent: calendar_update" in caption.value for caption in app.caption))
 
-    def test_pending_clarification_has_a_visible_cancel_control(self) -> None:
-        app = AppTest.from_file("app.py").run()
-        store = CaptureStore(os.environ["CAPTUREFLOW_DATABASE_PATH"])
-        store.initialize()
-        conversation = store.list_conversations()[0]
-        user_message = store.save_message(
-            Message(
-                id="clarification-user",
-                conversation_id=conversation.id,
-                role="user",
-                content="My report is due Tuesday.",
-            )
-        )
-        assistant_message = store.save_message(
-            Message(
-                id="clarification-assistant",
-                conversation_id=conversation.id,
-                role="assistant",
-                content="Which exact date should I use?",
-                reply_to_message_id=user_message.id,
-            )
-        )
-        clarification = store.save_pending_clarification(
-            PendingClarification(
-                id="pending-date",
-                conversation_id=conversation.id,
-                source_message_id=user_message.id,
-                assistant_message_id=assistant_message.id,
-                original_action={"action": "create_event", "content": "Submit report"},
-            )
-        )
+    def test_a_chat_deletion_waits_for_the_delete_button(self) -> None:
+        os.environ["CAPTUREFLOW_API_KEY"] = "ui-test-key"
+        os.environ["CAPTUREFLOW_MODEL"] = "ui-test-model"
+        tomorrow = configured_reference_date("America/Vancouver") + timedelta(days=1)
+        with patch("captureflow.ui.OpenAICompatibleModel", return_value=_CalendarDeleteUiModel()):
+            app = AppTest.from_file("app.py").run()
+            app.chat_input[0].set_value(f"/event {tomorrow.isoformat()} | Design review").run()
+            app.chat_input[0].set_value("Delete the design review.").run()
+            store = CaptureStore(os.environ["CAPTUREFLOW_DATABASE_PATH"])
+            store.initialize()
 
-        app.run()
-        next(
-            button
-            for button in app.button
-            if button.key == f"cancel-clarification-{clarification.id}"
-        ).click().run()
-        self.assertIsNone(store.get_pending_clarification(conversation.id))
+            self.assertEqual(len(store.list_calendar_events()), 1)
+            self.assertTrue(any(button.key.startswith("keep-calendar-update-") for button in app.button))
+            next(button for button in app.button if button.key.startswith("confirm-calendar-update-")).click().run()
+
+        self.assertEqual(store.list_calendar_events(), [])
+        self.assertTrue(any(button.key.startswith("undo-calendar-update-") for button in app.button))
 
     def test_calendar_page_shows_tracker_deadlines_without_making_them_events(self) -> None:
         app = AppTest.from_file("app.py").run()

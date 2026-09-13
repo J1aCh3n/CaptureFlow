@@ -22,13 +22,16 @@ def apply_validated_changes(
     user_message: Message,
     changes: list[ProjectChange],
     candidates: list[ProjectRecord],
+    context_messages: tuple[Message, ...] = (),
 ) -> tuple[list[ProjectChangeOperation], list[ProjectChangeOperation]]:
     """Return (committed or failed, awaiting review) operations for one turn's changes.
 
     Every change is checked before any is saved, so one invalid change leaves the
-    tracker untouched. Replacing a decision or constraint is saved for review.
+    tracker untouched. Replacing a decision or constraint is saved for review. Each
+    change's quote may come from any user message in the context.
     """
 
+    changes = [_with_resolved_source(change, user_message, context_messages) for change in changes]
     committed: list[ProjectChangeOperation] = []
     reviewed: list[ProjectChangeOperation] = []
     for operation in _prepare_operations(project, user_message, changes, candidates):
@@ -54,7 +57,7 @@ def _prepare_operations(
     signatures: set[tuple[str, str, str]] = set()
     review_indexes: set[int] = set()
     for index, change in enumerate(changes):
-        _validate_change_source(change, user_message)
+        _validate_change_source(change)
         signature = (change.action, change.target_record_id or "", _normalized(change.content or ""))
         if signature in signatures:
             raise ValueError("duplicate project changes in the same turn are not allowed")
@@ -97,10 +100,33 @@ def _prepare_operations(
     ]
 
 
-def _validate_change_source(change: ProjectChange, user_message: Message) -> None:
-    if _normalized(change.source_quote) not in _normalized(user_message.content):
-        raise ValueError("a project change source quote must occur in the current user message")
-    if contains_credential_disclosure(change.source_quote) or (
+def _with_resolved_source(
+    change: ProjectChange, user_message: Message, context_messages: tuple[Message, ...]
+) -> ProjectChange:
+    """Keep the model's quote when it is exact; otherwise quote the whole message.
+
+    The quote comes from the user message the change names, if that message is in the
+    context, else from the current message. A wrong quote costs only a longer source,
+    never the turn. The current message still authorizes the write either way.
+    """
+
+    source = next(
+        (
+            message
+            for message in context_messages
+            if message.id == change.source_message_id and message.role == "user"
+        ),
+        user_message,
+    )
+    quote = change.source_quote
+    if not quote or _whitespace_normalized(quote) not in _whitespace_normalized(source.content):
+        # A prefix of the message is still a quote of it; the field has a length bound.
+        quote = source.content[:8_000].strip()
+    return change.model_copy(update={"source_quote": quote, "source_message_id": source.id})
+
+
+def _validate_change_source(change: ProjectChange) -> None:
+    if contains_credential_disclosure(change.source_quote or "") or (
         change.content is not None and contains_credential_disclosure(change.content)
     ):
         raise ValueError("credentials cannot be persisted in a project change")
@@ -108,3 +134,8 @@ def _validate_change_source(change: ProjectChange, user_message: Message) -> Non
 
 def _normalized(value: str) -> str:
     return " ".join(value.split()).casefold()
+
+
+def _whitespace_normalized(value: str) -> str:
+    # The same comparison storage makes: whitespace collapsed, case kept.
+    return " ".join(value.split())

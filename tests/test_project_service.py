@@ -2,7 +2,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from captureflow.models import Conversation, Message, Project, ProjectChange, ProjectRecord
+from captureflow.models import (
+    Conversation,
+    Message,
+    Project,
+    ProjectChange,
+    ProjectChangeOperation,
+    ProjectRecord,
+)
 from captureflow.project_service import apply_validated_changes
 from captureflow.storage import CaptureStore
 
@@ -106,17 +113,82 @@ class ApplyValidatedChangesTests(unittest.TestCase):
         for message_id in ("message-mark-the-milestone-complete", "message-finish-the-task"):
             self.assertEqual(self.store.list_project_change_operations(message_id), [])
 
-    def test_quote_must_come_from_the_current_message(self) -> None:
-        with self.assertRaisesRegex(ValueError, "current user message"):
-            self._apply(
-                "Thanks for the summary.",
-                {
+    def test_a_quote_not_in_its_message_falls_back_to_the_whole_message(self) -> None:
+        committed, _ = self._apply(
+            "Thanks for the summary.",
+            {
+                "action": "create_record",
+                "kind": "task",
+                "content": "Implement Phase 6.",
+                "source_quote": "Implement Phase 6.",
+            },
+        )
+
+        record = self.store.get_project_record(committed[0].result["record_id"])
+        self.assertEqual(record.source_quote, "Thanks for the summary.")
+
+    def test_a_quote_may_come_from_an_earlier_user_message_in_the_context(self) -> None:
+        pasted = self.store.save_message(
+            Message(
+                id="pasted-minutes",
+                conversation_id=self.conversation.id,
+                role="user",
+                content="Minutes: finish the driver check. Update the deployment guide.",
+            )
+        )
+        current = self.store.save_message(
+            Message(id="continue", conversation_id=self.conversation.id, role="user", content="Keep going.")
+        )
+        change = ProjectChange.model_validate(
+            {
+                "action": "create_record",
+                "kind": "task",
+                "content": "Update the deployment guide.",
+                "source_quote": "Update the deployment guide.",
+                "source_message_id": pasted.id,
+            }
+        )
+
+        committed, _ = apply_validated_changes(
+            self.store, self.project, current, [change], [], (pasted, current)
+        )
+        undone = self.store.undo_project_change_operation(committed[0].id)
+
+        record = self.store.get_project_record(committed[0].result["record_id"])
+        self.assertEqual((record.source_message_id, record.source_quote), (pasted.id, "Update the deployment guide."))
+        self.assertEqual(committed[0].source_message_id, current.id)
+        self.assertEqual(undone.status, "undone")
+
+    def test_a_change_stored_before_phase_13_still_commits_and_undoes(self) -> None:
+        message = self.store.save_message(
+            Message(
+                id="stored-before",
+                conversation_id=self.conversation.id,
+                role="user",
+                content="Implement the stored change.",
+            )
+        )
+        operation = self.store.save_project_change_operation(
+            ProjectChangeOperation(
+                id="stored-before-operation",
+                source_message_id=message.id,
+                project_id=self.project.id,
+                change_index=0,
+                change={
                     "action": "create_record",
                     "kind": "task",
-                    "content": "Implement Phase 6.",
-                    "source_quote": "Implement Phase 6.",
+                    "content": "Implement the stored change.",
+                    "source_quote": "Implement the stored change.",
                 },
+                status="prepared",
             )
+        )
+
+        committed = self.store.commit_prepared_project_change(operation.id)
+        record = self.store.get_project_record(committed.result["record_id"])
+
+        self.assertEqual(record.source_message_id, message.id)
+        self.assertEqual(self.store.undo_project_change_operation(operation.id).status, "undone")
 
     def test_an_identical_active_record_is_not_created_twice(self) -> None:
         existing = self._record("task", "active", "Implement Phase 6.")

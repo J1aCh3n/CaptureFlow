@@ -1,6 +1,6 @@
 import tempfile
 import unittest
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from captureflow.context_service import select_context_window, select_router_candidates
@@ -17,7 +17,7 @@ from captureflow.storage import CaptureStore
 
 class RouterContextTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.temporary_directory = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.database_path = Path(self.temporary_directory.name) / "captureflow.sqlite3"
         self.store = CaptureStore(self.database_path)
         self.store.initialize()
@@ -30,16 +30,58 @@ class RouterContextTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary_directory.cleanup()
 
-    def test_context_window_is_recent_contiguous_and_reports_omission(self) -> None:
+    def test_the_last_two_turns_stay_whole_and_older_messages_fill_the_budget(self) -> None:
         messages = [
             Message(id=f"message-{index}", conversation_id="conversation", role="user", content="x" * 10)
-            for index in range(4)
+            for index in range(8)
         ]
 
-        window = select_context_window(messages, max_messages=2, max_characters=30)
+        window = select_context_window(messages, max_characters=60)
 
-        self.assertEqual([message.id for message in window.messages], ["message-2", "message-3"])
+        self.assertEqual([message.id for message in window.messages], [f"message-{index}" for index in range(2, 8)])
         self.assertEqual(window.omitted_message_count, 2)
+        self.assertTrue(window.truncated)
+
+    def test_the_last_two_turns_are_kept_even_over_the_budget(self) -> None:
+        messages = [
+            Message(id=f"long-{index}", conversation_id="conversation", role="user", content="y" * 700)
+            for index in range(5)
+        ]
+
+        window = select_context_window(messages, max_characters=1_000)
+
+        self.assertEqual([message.id for message in window.messages], ["long-1", "long-2", "long-3", "long-4"])
+
+    def test_an_older_long_message_becomes_a_one_line_reference(self) -> None:
+        pasted = "会议纪要：" + "内容" * 500
+        messages = [
+            Message(id="pasted", conversation_id="conversation", role="user", content=pasted),
+            *[
+                Message(id=f"later-{index}", conversation_id="conversation", role="user", content="继续")
+                for index in range(4)
+            ],
+        ]
+
+        older = select_context_window(messages).for_router()
+        recent = select_context_window(messages[:4]).for_router()
+
+        self.assertEqual(older[0]["message_id"], "pasted")
+        self.assertNotIn("content", older[0])
+        self.assertIn(f"{len(pasted)} characters", older[0]["reference"])
+        self.assertIn(pasted[:80], older[0]["reference"])
+        self.assertEqual(recent[0]["content"], pasted)
+
+    def test_a_blocked_credential_message_is_left_out_of_the_context(self) -> None:
+        messages = [
+            Message(
+                id="secret", conversation_id="conversation", role="user", content="我的密钥是 sk-test-1234567890abcdef"
+            ),
+            Message(id="after", conversation_id="conversation", role="user", content="你好"),
+        ]
+
+        window = select_context_window(messages)
+
+        self.assertEqual([message.id for message in window.messages], ["after"])
 
     def test_context_window_uses_reply_link_when_timestamp_order_is_ambiguous(self) -> None:
         user = Message(
@@ -87,43 +129,38 @@ class RouterContextTests(unittest.TestCase):
             ],
         )
 
-    def test_router_candidates_are_bounded_and_project_scoped(self) -> None:
-        source = self.store.save_message(
+    def _source(self, message_id: str = "candidate-source", conversation_id: str | None = None) -> Message:
+        return self.store.save_message(
             Message(
-                id="candidate-source",
-                conversation_id=self.conversation.id,
+                id=message_id,
+                conversation_id=conversation_id or self.conversation.id,
                 role="user",
                 content="Candidate source.",
             )
         )
-        other_conversation = self.store.save_conversation(
-            Conversation(id="candidate-other", title="Other project")
+
+    def _event(self, event_id: str, title: str, start_at: date | datetime, source: Message, **fields) -> CalendarEvent:
+        return self.store.save_calendar_event(
+            CalendarEvent(
+                id=event_id,
+                conversation_id=source.conversation_id,
+                title=title,
+                source_message_id=source.id,
+                source_quote=source.content,
+                start_at=start_at,
+                all_day=not isinstance(start_at, datetime),
+                timezone="America/Vancouver",
+                **fields,
+            )
         )
+
+    def test_records_and_ideas_stay_in_the_project_but_events_are_shared(self) -> None:
+        source = self._source()
+        other_conversation = self.store.save_conversation(Conversation(id="candidate-other", title="Other project"))
         other_project = self.store.save_project(Project(id="project-other", name="Other"))
         self.store.assign_conversation_project(other_conversation.id, other_project.id)
-        other_source = self.store.save_message(
-            Message(
-                id="candidate-other-source",
-                conversation_id=other_conversation.id,
-                role="user",
-                content="Other candidate source.",
-            )
-        )
-        events = [
-            self.store.save_calendar_event(
-                CalendarEvent(
-                    id=f"candidate-event-{index}",
-                    conversation_id=self.conversation.id,
-                    title=f"Event {index}",
-                    source_message_id=source.id,
-                    source_quote=source.content,
-                    start_at=date(2026, 9, 10 + index),
-                    all_day=True,
-                    timezone="America/Vancouver",
-                )
-            )
-            for index in range(4)
-        ]
+        other_source = self._source("candidate-other-source", other_conversation.id)
+        shared_event = self._event("other-project-event", "牙医预约", date(2026, 9, 12), other_source)
         same_project_item = self.store.save_saved_item(
             SavedItem(
                 id="same-project-item",
@@ -134,7 +171,7 @@ class RouterContextTests(unittest.TestCase):
                 source_quote=source.content,
             )
         )
-        other_project_item = self.store.save_saved_item(
+        self.store.save_saved_item(
             SavedItem(
                 id="other-project-item",
                 conversation_id=other_conversation.id,
@@ -169,130 +206,121 @@ class RouterContextTests(unittest.TestCase):
             )
         )
 
-        candidates = select_router_candidates(self.store, self.conversation.id)
+        candidates = select_router_candidates(self.store, self.conversation.id, date(2026, 9, 11))
 
-        self.assertEqual([event.id for event in candidates.events], [event.id for event in events[:3]])
+        self.assertEqual([event.id for event in candidates.events], [shared_event.id])
         self.assertEqual([item.id for item in candidates.saved_items], [same_project_item.id])
-        self.assertNotIn(other_project_item.id, [item.id for item in candidates.saved_items])
         self.assertEqual([record.id for record in candidates.project_records], [active_record.id])
+        self.assertEqual(candidates.truncated_kinds, ())
 
-    def test_router_candidates_follow_the_reference_date_not_the_oldest_events(self) -> None:
-        source = self.store.save_message(
-            Message(
-                id="nearest-source",
-                conversation_id=self.conversation.id,
-                role="user",
-                content="Nearest candidate source.",
-            )
-        )
-        starts = {
-            "stale-1": "2026-08-03T10:00:00-07:00",
-            "stale-2": "2026-08-10T10:00:00-07:00",
-            "stale-3": "2026-08-17T10:00:00-07:00",
+    def test_events_come_from_the_calendar_window_nearest_the_reference_date(self) -> None:
+        source = self._source()
+        for suffix, start_at in {
+            "stale": "2026-08-03T10:00:00-07:00",
             "yesterday": "2026-09-10T16:00:00-07:00",
             "tomorrow": "2026-09-12T09:00:00-07:00",
             "next-week": "2026-09-16T20:00:00-07:00",
-            "far": "2026-12-01T09:00:00-07:00",
-        }
-        for suffix, start_at in starts.items():
-            self.store.save_calendar_event(
-                CalendarEvent(
-                    id=f"nearest-{suffix}",
-                    conversation_id=self.conversation.id,
-                    title=suffix,
-                    source_message_id=source.id,
-                    source_quote=source.content,
-                    start_at=datetime.fromisoformat(start_at),
-                    all_day=False,
-                    timezone="America/Vancouver",
-                )
-            )
+            "far": "2026-12-01T09:00:00-08:00",
+        }.items():
+            self._event(f"nearest-{suffix}", suffix, datetime.fromisoformat(start_at), source)
 
-        candidates = select_router_candidates(
-            self.store, self.conversation.id, date(2026, 9, 11)
-        )
+        candidates = select_router_candidates(self.store, self.conversation.id, date(2026, 9, 11))
 
         self.assertEqual(
             [event.id for event in candidates.events],
             ["nearest-yesterday", "nearest-tomorrow", "nearest-next-week"],
         )
 
-    def _active_tasks(self, contents: list[str]) -> list[ProjectRecord]:
-        records = []
-        for index, content in enumerate(contents):
-            source = self.store.save_message(
-                Message(
-                    id=f"relevance-source-{index}",
+    def test_a_cut_event_list_is_marked_and_keeps_the_nearest(self) -> None:
+        source = self._source()
+        for offset in range(-7, 20):
+            self._event(f"day-{offset + 7:02d}", f"Sync {offset}", date(2026, 9, 11) + timedelta(days=offset), source)
+
+        candidates = select_router_candidates(self.store, self.conversation.id, date(2026, 9, 11))
+
+        self.assertEqual(len(candidates.events), 15)
+        self.assertIn("events", candidates.truncated_kinds)
+        self.assertEqual(candidates.events[0].start_date, date(2026, 9, 4))
+        self.assertEqual(candidates.events[-1].start_date, date(2026, 9, 18))
+
+    def test_an_event_the_message_names_is_added_beyond_the_window(self) -> None:
+        source = self._source()
+        roadmap = self._event("roadmap", "季度路线图评审", date(2026, 12, 1), source)
+        self._event("other-far", "年终总结", date(2026, 12, 20), source)
+
+        named = select_router_candidates(self.store, self.conversation.id, date(2026, 9, 11), "季度路线图评审改到下午")
+        vague = select_router_candidates(self.store, self.conversation.id, date(2026, 9, 11), "这个评审改到下午")
+
+        self.assertEqual([event.id for event in named.events], [roadmap.id])
+        self.assertEqual(vague.events, ())
+
+    def test_records_are_bounded_most_recently_updated_first(self) -> None:
+        source = self._source("tasks-source")
+        for index in range(31):
+            self.store.save_project_record(
+                ProjectRecord(
+                    id=f"task-{index:02d}",
+                    project_id=self.project.id,
                     conversation_id=self.conversation.id,
-                    role="user",
-                    content=content,
-                )
-            )
-            records.append(
-                self.store.save_project_record(
-                    ProjectRecord(
-                        id=f"relevance-task-{index}",
-                        project_id=self.project.id,
-                        conversation_id=self.conversation.id,
-                        kind="task",
-                        content=content,
-                        state="active",
-                        source_message_id=source.id,
-                        source_quote=content,
-                        updated_at=datetime(2026, 9, 1 + index, tzinfo=timezone.utc),
-                    )
-                )
-            )
-        return records
-
-    def test_router_record_candidates_follow_the_message_not_only_recency(self) -> None:
-        self._active_tasks(
-            ["完成驱动调试", "完成代码审查", "整理会议纪要", "更新部署文档", "修复登录页样式"]
-        )
-
-        about_oldest = select_router_candidates(
-            self.store, self.conversation.id, message="驱动调试的任务已经做完了"
-        )
-        unrelated = select_router_candidates(
-            self.store, self.conversation.id, message="hello"
-        )
-
-        self.assertEqual(about_oldest.project_records[0].id, "relevance-task-0")
-        self.assertEqual(len(about_oldest.project_records), 3)
-        self.assertEqual(
-            [record.id for record in unrelated.project_records],
-            ["relevance-task-4", "relevance-task-3", "relevance-task-2"],
-        )
-
-    def test_router_candidates_keep_the_stored_order_without_a_reference_date(self) -> None:
-        source = self.store.save_message(
-            Message(
-                id="ordered-source",
-                conversation_id=self.conversation.id,
-                role="user",
-                content="Ordered candidate source.",
-            )
-        )
-        for suffix, start_at in {
-            "stale": "2026-08-03T10:00:00-07:00",
-            "tomorrow": "2026-09-12T09:00:00-07:00",
-        }.items():
-            self.store.save_calendar_event(
-                CalendarEvent(
-                    id=f"ordered-{suffix}",
-                    conversation_id=self.conversation.id,
-                    title=suffix,
+                    kind="task",
+                    content=f"Task {index}",
+                    state="active",
                     source_message_id=source.id,
                     source_quote=source.content,
-                    start_at=datetime.fromisoformat(start_at),
-                    all_day=False,
-                    timezone="America/Vancouver",
+                    updated_at=datetime(2026, 9, 1, 0, index, tzinfo=timezone.utc),
                 )
             )
 
-        candidates = select_router_candidates(self.store, self.conversation.id, max_per_kind=1)
+        candidates = select_router_candidates(self.store, self.conversation.id, date(2026, 9, 11))
 
-        self.assertEqual([event.id for event in candidates.events], ["ordered-stale"])
+        self.assertEqual(len(candidates.project_records), 30)
+        self.assertEqual(candidates.project_records[0].id, "task-30")
+        self.assertNotIn("task-00", [record.id for record in candidates.project_records])
+        self.assertEqual(candidates.truncated_kinds, ("project_records",))
+
+    def test_candidates_for_the_router_are_one_line_each(self) -> None:
+        source = self._source()
+        self._event(
+            "review",
+            "算法优化与代码审查会议",
+            datetime.fromisoformat("2026-09-17T14:00:00-07:00"),
+            source,
+            end_at=datetime.fromisoformat("2026-09-17T15:00:00-07:00"),
+        )
+        self._event("offsite", "团建", date(2026, 9, 18), source)
+        self.store.save_project_record(
+            ProjectRecord(
+                id="r-12",
+                project_id=self.project.id,
+                conversation_id=self.conversation.id,
+                kind="task",
+                content="排查延迟",
+                state="active",
+                due_at=datetime.fromisoformat("2026-09-20T18:00:00-07:00"),
+                source_message_id=source.id,
+                source_quote=source.content,
+            )
+        )
+        self.store.save_saved_item(
+            SavedItem(
+                id="i-3",
+                conversation_id=self.conversation.id,
+                kind="idea",
+                content="用 " + "很长的想法 " * 100,
+                source_message_id=source.id,
+                source_quote=source.content,
+            )
+        )
+
+        lines = select_router_candidates(self.store, self.conversation.id, date(2026, 9, 11)).for_router()
+
+        self.assertEqual(
+            lines["candidate_events"],
+            ["review | 算法优化与代码审查会议 | 2026-09-17 14:00–15:00", "offsite | 团建 | 2026-09-18 all day"],
+        )
+        self.assertEqual(lines["candidate_project_records"], ["r-12 | task | 排查延迟 | active | due 2026-09-20 18:00"])
+        self.assertTrue(lines["candidate_saved_items"][0].startswith("i-3 | idea | 用 "))
+        self.assertLess(len(lines["candidate_saved_items"][0]), 230)
 
     def test_unassigned_router_candidates_exclude_project_records(self) -> None:
         unassigned = self.store.save_conversation(
@@ -317,7 +345,7 @@ class RouterContextTests(unittest.TestCase):
             )
         )
 
-        candidates = select_router_candidates(self.store, unassigned.id)
+        candidates = select_router_candidates(self.store, unassigned.id, date(2026, 9, 11))
 
         self.assertIn(item.id, [candidate.id for candidate in candidates.saved_items])
         self.assertEqual(candidates.project_records, ())
@@ -396,7 +424,7 @@ class RouterContextTests(unittest.TestCase):
             )
         )
 
-        candidates = select_router_candidates(self.store, self.conversation.id)
+        candidates = select_router_candidates(self.store, self.conversation.id, date(2026, 9, 11))
 
         self.assertNotIn(deleted_event.id, [candidate.id for candidate in candidates.events])
         self.assertNotIn(deleted_item.id, [candidate.id for candidate in candidates.saved_items])

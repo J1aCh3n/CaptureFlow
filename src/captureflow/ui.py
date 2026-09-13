@@ -650,19 +650,6 @@ def render_chat_page(
                 if diagnostics_enabled:
                     _render_turn_diagnostics(message.reply_to_message_id)
 
-    if pending := store.get_pending_clarification(conversation_id):
-        question = store.get_message(pending.assistant_message_id).content
-        follow_up = pending.missing_field == "follow_up"
-        if follow_up:
-            question = question.rsplit("\n\n", 1)[-1]
-        st.warning(question)
-        if st.button(
-            "Dismiss suggestion" if follow_up else "Cancel pending event",
-            key=f"cancel-clarification-{pending.id}",
-        ):
-            store.resolve_pending_clarification(pending.id, "cancelled")
-            st.rerun()
-
 
 def render_chat_input(
     store: CaptureStore, conversation_id: str, diagnostics_enabled: bool = False
@@ -713,7 +700,7 @@ def render_chat_input(
                     )
             except (ModelError, ValueError) as error:
                 project = store.get_conversation_project(conversation_id)
-                if project is not None and store.get_pending_clarification(conversation_id) is None:
+                if project is not None:
                     try:
                         store.begin_project_conversation(conversation_id)
                     except ValueError as project_error:
@@ -798,6 +785,20 @@ def _render_calendar_update_card(service: DeterministicChatService, operation_id
         ):
             service.undo(operation.id)
             st.rerun()
+        if operation.status == "review":
+            confirm, keep = st.columns(2)
+            if confirm.button("Delete", key=f"confirm-calendar-update-{operation.id}"):
+                try:
+                    service.store.approve_calendar_event_update(operation.id)
+                except (KeyError, ValueError) as error:
+                    st.error(str(error))
+                else:
+                    st.rerun()
+            if keep.button("Keep", key=f"keep-calendar-update-{operation.id}"):
+                service.store.reject_calendar_event_update(operation.id)
+                st.rerun()
+        if operation.status == "failed" and operation.error:
+            st.caption(f"Not applied: {operation.error}")
 
 
 def _render_project_change_card(store: CaptureStore, operation_id: str) -> None:

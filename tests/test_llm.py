@@ -70,34 +70,28 @@ class OpenAICompatibleModelTests(unittest.TestCase):
         self.assertIn("intent:", str(raised.exception))
         self.assertNotIn("SECRET_VALUE", str(raised.exception))
 
-    def test_contextual_router_receives_bounded_context_and_candidates_once(self) -> None:
+    def test_contextual_router_receives_the_layered_context_once(self) -> None:
         completions = RecordingCompletions(
             '{"intent":"calendar_create","action":{"action":"create_event",'
             '"content":"Algorithm & Code Review","description":"讨论前缀树与最小堆。",'
-            '"date":"2026-09-10","start_time":"16:00",'
-            '"end_time":"17:00","target_event_id":null,'
-            '"evidence":[{"message_id":"message-1",'
-            '"source_quote":"我这周四下午四点到五点有算法优化与代码审查会议。"}]},'
-            '"project_changes":[],"clarification_question":null,'
-            '"pending_action":null,"reply":null}'
+            '"date":"2026-09-10","start_time":"16:00","end_time":"17:00",'
+            '"source_message_ids":["message-1"]},"project_changes":[],"reply":null}'
         )
         model = OpenAICompatibleModel.__new__(OpenAICompatibleModel)
         model.settings = ModelSettings(api_key="test-key", model="gpt-5.6-terra")
         model.client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
         recent_messages = [
-            {
-                "message_id": "message-1",
-                "role": "user",
-                "content": "我这周四下午四点到五点有算法优化与代码审查会议。",
-            }
+            {"message_id": "message-0", "role": "user", "reference": "long message, 900 characters, starting: 会议纪要…"},
+            {"message_id": "message-1", "role": "user", "content": "我这周四下午四点到五点有算法优化与代码审查会议。"},
         ]
 
         decision = model.propose_conversation_decision(
-            current_message=recent_messages[0],
+            current_message=recent_messages[1],
             recent_messages=recent_messages,
-            candidate_events=[{"id": "event-1", "title": "Existing meeting"}],
-            candidate_saved_items=[{"id": "idea-1", "kind": "idea", "content": "An idea."}],
-            candidate_project_records=[{"id": "record-1", "kind": "task", "state": "active"}],
+            candidate_events=["event-1 | Existing meeting | 2026-09-10 10:00"],
+            candidate_saved_items=["idea-1 | idea | An idea."],
+            candidate_project_records=["record-1 | task | 排查延迟 | active"],
+            truncated_candidate_lists=["events"],
             reference_date="2026-09-09",
             timezone="America/Vancouver",
         )
@@ -105,30 +99,40 @@ class OpenAICompatibleModelTests(unittest.TestCase):
         prompt = completions.kwargs["messages"][0]["content"]
         payload = json.loads(completions.kwargs["messages"][1]["content"])["input"]
         self.assertEqual(decision.intent, "calendar_create")
-        self.assertEqual(decision.action.evidence[0].message_id, "message-1")
+        self.assertEqual(decision.action.source_message_ids, ["message-1"])
         self.assertEqual(completions.calls, 1)
-        self.assertIn("calendar_create", prompt)
-        self.assertIn("tracker_change", prompt)
-        self.assertIn("exactly one supplied candidate_events ID", prompt)
-        self.assertIn("duration_minutes", prompt)
-        self.assertIn("calendar table", prompt)
-        self.assertIn("never write a UTC offset", prompt)
-        self.assertIn("due_date is YYYY-MM-DD", prompt)
-        self.assertNotIn("_expression", prompt)
-        self.assertIn("mutually exclusive", prompt)
-        self.assertIn("deferred_action", prompt)
-        self.assertIn("never kind, content, or rationale", prompt)
-        self.assertIn("is transition_record, not a new record", prompt)
-        self.assertIn("One turn commits exactly one local action", prompt)
-        self.assertIn("must always quote current_message exactly", prompt)
-        self.assertEqual(payload["current_message"]["message_id"], "message-1")
+        for rule in (
+            "Stored state is current",
+            "Only current_message can ask for a write",
+            "It is found when the current conversation mentioned it",
+            "An item that appeared only in an older, different conversation is not found",
+            "clarify is a plain question in reply",
+            "truncated_candidate_lists",
+            "source_message_ids",
+            "source_message_id",
+            "in your own short words",
+            "confirm a deletion",
+            "calendar table",
+            "never write a UTC offset",
+            "due_date is YYYY-MM-DD",
+            "mutually exclusive",
+            "never kind, content, or rationale",
+            "is transition_record, not a new record",
+            "follow_up_question",
+            "reference_time, when supplied, is the current local time",
+        ):
+            with self.subTest(rule=rule):
+                self.assertIn(rule, prompt)
+        for retired in ("pending", "deferred_action", "EvidenceReference", "_expression"):
+            with self.subTest(retired=retired):
+                self.assertNotIn(retired, prompt)
         self.assertEqual(payload["recent_messages"], recent_messages)
-        self.assertEqual(payload["candidate_events"][0]["id"], "event-1")
-        self.assertEqual(payload["candidate_saved_items"][0]["id"], "idea-1")
-        self.assertEqual(payload["candidate_project_records"][0]["id"], "record-1")
+        self.assertEqual(payload["candidate_events"], ["event-1 | Existing meeting | 2026-09-10 10:00"])
+        self.assertEqual(payload["candidate_project_records"], ["record-1 | task | 排查延迟 | active"])
+        self.assertEqual(payload["truncated_candidate_lists"], ["events"])
+        self.assertNotIn("pending_clarification", payload)
         self.assertEqual(payload["calendar"], [])
         self.assertIsNone(payload["reference_time"])
-        self.assertIn("reference_time, when supplied, is the current local time", prompt)
 
     def test_contextual_router_keeps_a_finished_meeting_as_a_note(self) -> None:
         content = "今天中午十二点的会议是关于系统架构与驱动集成，主要分析了驱动调试。"
@@ -137,9 +141,8 @@ class OpenAICompatibleModelTests(unittest.TestCase):
             '"content":"系统架构与驱动集成会议：主要分析了驱动调试。",'
             '"description":null,"date":null,"start_time":null,'
             '"end_time":null,"duration_minutes":null,'
-            '"target_event_id":null,"evidence":[{"message_id":"minutes-message",'
-            f'"source_quote":"{content}"}}]}},"project_changes":[],'
-            '"clarification_question":null,"pending_action":null,"reply":null}'
+            '"target_event_id":null,"source_message_ids":["minutes-message"]},'
+            '"project_changes":[],"reply":null}'
         )
         model = OpenAICompatibleModel.__new__(OpenAICompatibleModel)
         model.settings = ModelSettings(api_key="test-key", model="gpt-5.6-terra")
@@ -168,8 +171,7 @@ class OpenAICompatibleModelTests(unittest.TestCase):
             '{"intent":"tracker_change","action":null,"project_changes":['
             '{"action":"create_record","kind":"task","content":"完成代码审查。",'
             '"rationale":null,"source_quote":"我这周四需要完成代码审查。",'
-            '"target_record_id":null,"target_state":null}],'
-            '"clarification_question":null,"pending_action":null,"reply":null}'
+            '"target_record_id":null,"target_state":null}],"reply":null}'
         )
         model = OpenAICompatibleModel.__new__(OpenAICompatibleModel)
         model.settings = ModelSettings(api_key="test-key", model="gpt-5.6-terra")
@@ -194,33 +196,3 @@ class OpenAICompatibleModelTests(unittest.TestCase):
         self.assertEqual(decision.project_changes[0].kind, "task")
         self.assertEqual(completions.calls, 1)
 
-    def test_contextual_router_rejects_an_event_outside_its_candidates(self) -> None:
-        completions = RecordingCompletions(
-            '{"intent":"calendar_update","action":{"action":"update_event",'
-            '"content":null,"description":null,"date":null,'
-            '"start_time":"14:00","end_time":null,'
-            '"target_event_id":"foreign-event","evidence":[{"message_id":"message-1",'
-            '"source_quote":"这个会议改到下午两点。"}]},"project_changes":[],'
-            '"clarification_question":null,"pending_action":null,"reply":null}'
-        )
-        model = OpenAICompatibleModel.__new__(OpenAICompatibleModel)
-        model.settings = ModelSettings(api_key="test-key", model="gpt-5.6-terra")
-        model.client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
-        message = {
-            "message_id": "message-1",
-            "role": "user",
-            "content": "这个会议改到下午两点。",
-        }
-
-        with self.assertRaisesRegex(InvalidStructuredOutput, "outside the supplied candidates"):
-            model.propose_conversation_decision(
-                current_message=message,
-                recent_messages=[message],
-                candidate_events=[{"id": "event-1", "title": "Known meeting"}],
-                candidate_saved_items=[],
-                candidate_project_records=[],
-                reference_date="2026-09-09",
-                timezone="America/Vancouver",
-            )
-
-        self.assertEqual(completions.calls, 1)

@@ -9,6 +9,9 @@ class Migration:
     version: int
     name: str
     statements: tuple[str, ...]
+    # Rebuilding a table that other tables reference must not cascade deletes into
+    # them, so foreign keys are off while it runs and checked before it commits.
+    rebuilds_referenced_table: bool = False
 
 
 MIGRATION_TABLE_SQL = """
@@ -611,6 +614,43 @@ MIGRATIONS = (
             """,
         ),
     ),
+    Migration(
+        version=17,
+        name="v2_calendar_update_review_status",
+        statements=(
+            """
+            CREATE TABLE calendar_event_update_operations_rebuilt (
+                id TEXT PRIMARY KEY,
+                source_message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+                action_index INTEGER NOT NULL CHECK (action_index BETWEEN 0 AND 2),
+                event_id TEXT NOT NULL REFERENCES calendar_events(id) ON DELETE CASCADE,
+                workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+                before_json TEXT NOT NULL,
+                after_json TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (
+                    status IN ('prepared', 'committed', 'review', 'failed', 'undone')
+                ),
+                error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE (source_message_id, action_index, event_id)
+            )
+            """,
+            """
+            INSERT INTO calendar_event_update_operations_rebuilt
+            (id, source_message_id, action_index, event_id, workspace_id, before_json,
+             after_json, status, error, created_at, updated_at)
+            SELECT id, source_message_id, action_index, event_id, workspace_id, before_json,
+                   after_json, status, error, created_at, updated_at
+            FROM calendar_event_update_operations
+            """,
+            "DROP TABLE calendar_event_update_operations",
+            "ALTER TABLE calendar_event_update_operations_rebuilt RENAME TO calendar_event_update_operations",
+            "CREATE INDEX calendar_event_update_operations_event_status ON calendar_event_update_operations(event_id, status, updated_at, id)",
+            "CREATE INDEX calendar_event_update_operations_message ON calendar_event_update_operations(source_message_id, action_index)",
+        ),
+        rebuilds_referenced_table=True,
+    ),
 )
 
 LATEST_SCHEMA_VERSION = MIGRATIONS[-1].version
@@ -639,10 +679,16 @@ def apply_migrations(
 
 
 def _apply_migration(connection: sqlite3.Connection, migration: Migration) -> None:
+    foreign_keys = connection.execute("PRAGMA foreign_keys").fetchone()[0]
+    if migration.rebuilds_referenced_table:
+        # The pragma has no effect inside a transaction, so it is set before BEGIN.
+        connection.execute("PRAGMA foreign_keys = OFF")
     try:
         connection.execute("BEGIN IMMEDIATE")
         for statement in migration.statements:
             connection.execute(statement)
+        if migration.rebuilds_referenced_table and connection.execute("PRAGMA foreign_key_check").fetchall():
+            raise RuntimeError(f"migration {migration.version} left broken foreign keys")
         connection.execute(
             "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
             (migration.version, migration.name, utc_now().isoformat()),
@@ -651,3 +697,5 @@ def _apply_migration(connection: sqlite3.Connection, migration: Migration) -> No
     except Exception:
         connection.rollback()
         raise
+    finally:
+        connection.execute(f"PRAGMA foreign_keys = {'ON' if foreign_keys else 'OFF'}")

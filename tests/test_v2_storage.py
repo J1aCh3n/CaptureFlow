@@ -10,7 +10,6 @@ from captureflow.models import (
     Conversation,
     EvidenceReference,
     Message,
-    PendingClarification,
     SavedItem,
     ToolOperation,
 )
@@ -250,34 +249,6 @@ class V2StorageTests(unittest.TestCase):
                 [EvidenceReference(message_id=foreign_message.id, source_quote="Move the architecture review")],
             )
 
-    def test_only_one_pending_clarification_is_allowed_per_conversation(self) -> None:
-        assistant = self.store.save_message(
-            Message(
-                id="message-2",
-                conversation_id=self.conversation.id,
-                role="assistant",
-                content="Which day next week?",
-                reply_to_message_id=self.user_message.id,
-            )
-        )
-        clarification = self.store.save_pending_clarification(
-            PendingClarification(
-                id="clarification-1",
-                conversation_id=self.conversation.id,
-                source_message_id=self.user_message.id,
-                assistant_message_id=assistant.id,
-                original_action={"title": "Submit report"},
-            )
-        )
-
-        self.assertEqual(
-            self.store.get_pending_clarification(self.conversation.id), clarification
-        )
-        with self.assertRaises(sqlite3.IntegrityError):
-            self.store.save_pending_clarification(
-                clarification.model_copy(update={"id": "clarification-2"})
-            )
-
     def test_v2_records_cannot_reference_a_different_conversation(self) -> None:
         other = self.store.save_conversation(
             Conversation(id="conversation-2", title="Other")
@@ -380,16 +351,6 @@ class V2StorageTests(unittest.TestCase):
                 status="prepared",
             )
         )
-        clarification = self.store.save_pending_clarification(
-            PendingClarification(
-                id="clarification-1",
-                conversation_id=self.conversation.id,
-                source_message_id=self.user_message.id,
-                assistant_message_id=assistant.id,
-                original_action={"title": "Submit report"},
-            )
-        )
-
         self.assertTrue(self.store.delete_conversation(self.conversation.id))
 
         for getter, item_id in (
@@ -397,7 +358,6 @@ class V2StorageTests(unittest.TestCase):
             (self.store.get_calendar_event, event.id),
             (self.store.get_saved_item, item.id),
             (self.store.get_tool_operation, operation.id),
-            (self.store.get_clarification, clarification.id),
         ):
             with self.assertRaises(KeyError):
                 getter(item_id)

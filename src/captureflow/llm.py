@@ -23,13 +23,13 @@ class ContextualConversationModel(Protocol):
     def propose_conversation_decision(
         self,
         current_message: dict[str, str],
-        recent_messages: list[dict[str, str]],
-        candidate_events: list[dict],
-        candidate_saved_items: list[dict],
-        candidate_project_records: list[dict],
+        recent_messages: list[dict],
+        candidate_events: list[str],
+        candidate_saved_items: list[str],
+        candidate_project_records: list[str],
         reference_date: str,
         timezone: str,
-        pending_clarification: dict | None = None,
+        truncated_candidate_lists: list[str] | None = None,
         context_truncated: bool = False,
         calendar: list[dict[str, str]] | None = None,
         reference_time: str | None = None,
@@ -84,30 +84,53 @@ class OpenAICompatibleModel:
     def propose_conversation_decision(
         self,
         current_message: dict[str, str],
-        recent_messages: list[dict[str, str]],
-        candidate_events: list[dict],
-        candidate_saved_items: list[dict],
-        candidate_project_records: list[dict],
+        recent_messages: list[dict],
+        candidate_events: list[str],
+        candidate_saved_items: list[str],
+        candidate_project_records: list[str],
         reference_date: str,
         timezone: str,
-        pending_clarification: dict | None = None,
+        truncated_candidate_lists: list[str] | None = None,
         context_truncated: bool = False,
         calendar: list[dict[str, str]] | None = None,
         reference_time: str | None = None,
     ) -> ConversationDecision:
-        """Make one untrusted, context-aware routing proposal; storage remains downstream."""
+        """Make one untrusted, context-aware routing proposal; Python validates it downstream."""
 
-        decision = self._complete(
+        return self._complete(
             ConversationDecision,
             system=(
-                "You are CaptureFlow's Phase 10 contextual conversation router. Return JSON only. "
-                "You do not execute tools or write SQLite. Choose exactly one intent and use only "
-                "the supplied current_message, recent_messages, candidates, reference_date, reference_time, "
-                "timezone, calendar, and pending clarification. This is not a general chatbot. "
+                "You are CaptureFlow's contextual conversation router. Return JSON only. You do not execute "
+                "tools or write SQLite. Choose exactly one intent from current_message, recent_messages, the "
+                "candidate lists, reference_date, reference_time, timezone, and calendar. This is not a general "
+                "chatbot. "
+                "What you see: recent_messages is the recent conversation. An older long message appears only "
+                "as a reference with its ID and first characters; do not assume what the rest says. Each "
+                "candidate is one line starting with its ID: candidate_events are Calendar events (ID, title, "
+                "local time), candidate_project_records are this project's active tracker records (ID, kind, "
+                "content, state, deadline), and candidate_saved_items are ideas and notes. "
+                "truncated_candidate_lists names the lists cut at their bound, so an item missing from them may "
+                "still exist. If context_truncated is true, older messages were not supplied. "
+                "Stored state is current: the candidate lines show each item as it is now. Use the conversation "
+                "only to understand what the user refers to; when an earlier message or reply disagrees with a "
+                "candidate line, the candidate line is right. "
+                "Only current_message can ask for a write. A request in an earlier message was already handled "
+                "in its own turn; never carry it out again, unless current_message answers the question you "
+                "asked about that request, which completes it. "
+                "Finding a target: calendar_update, calendar_delete, and a tracker change that targets a record "
+                "may name an existing item only when it is found. It is found when the current conversation "
+                "mentioned it, or when current_message is specific enough to match exactly one candidate. An "
+                "item that appeared only in an older, different conversation is not found, and a demonstrative "
+                "such as 这个会议 or that meeting in a conversation that never mentioned the item finds nothing. "
+                "When the target is not found, or could be more than one candidate, use clarify: ask in reply "
+                "which one the user means, in the user's language. When the user then names it, complete the "
+                "original request from the conversation. "
+                "clarify is a plain question in reply. Ask one when a calendar date, time, or target cannot be "
+                "determined; the next turn continues from the conversation. "
                 "A definite user statement that a meeting or event is still going to happen on an explicit "
                 "date must use calendar_create, even when it is not phrased as a command. Use the event title "
-                "as action content, keep agenda or attendance text in description as an exact continuous "
-                "quote from the current message, because an unquoted description is dropped. "
+                "as action content, and put agenda or attendance details in description, in your own short "
+                "words. "
                 "Normalize every date and time a calendar action states: date is YYYY-MM-DD, start_time and "
                 "end_time are 24-hour HH:MM, and duration_minutes is a whole number of minutes. Resolve words "
                 "such as 今天 or tomorrow from reference_date, and look weekday phrases such as 下周三 up in the "
@@ -129,54 +152,42 @@ class OpenAICompatibleModel:
                 "supplied timezone, put that zone's IANA name in the action's timezone field and keep the times "
                 "as stated, without converting them; otherwise leave timezone null. An update carries only what "
                 "the user changed, and a relative change such as 提前一小时 is resolved from the candidate "
-                "event's current start_at. A user-owned task or deadline "
-                "that is not a scheduled event must use tracker_change, not Calendar. When such a task "
-                "states a deadline, normalize it the same way as a calendar date: due_date is YYYY-MM-DD and "
-                "due_time, if stated, is 24-hour HH:MM. A repeating deadline sets recurring to true. Leave "
-                "due_at null, because Python sets it. Only a task may carry those fields, and a deadline is "
-                "never invented. "
-                "A tracker_change uses create_record with kind, content, and an exact source_quote; "
-                "transition_record with only one candidate target_record_id, target_state completed or "
-                "resolved, and an exact source_quote, and never kind, content, or rationale; "
-                "supersede_record replacing one active candidate decision or constraint; or "
-                "set_deadline with one candidate task target, the normalized deadline fields, and an "
-                "exact source_quote, which is how a deadline is added or corrected on a task that "
-                "already exists. Finishing or "
-                "resolving an existing candidate record is transition_record, not a new record. "
-                "Use calendar_update only when exactly one supplied candidate_events ID is the intended "
-                "active event. Its target_event_id must be copied exactly from that candidate; never invent "
-                "an ID. A correction may cite the earlier meeting message and the current correction message. "
-                "If its target or replacement information is ambiguous, use clarify with a pending calendar "
-                "action and one concise question; do not create a tracker record. "
-                "Use calendar_delete when the user asks to remove, cancel, or clear exactly one supplied "
-                "active candidate event. Its delete_event action carries only target_event_id and evidence; "
-                "it never carries content, description, or any date, time, or duration field. If the "
-                "request could name more than one candidate event, or names none of them, use clarify with a "
-                "pending delete_event action instead of guessing which event to remove. "
-                "One turn commits exactly one local action. When the current message clearly states a "
-                "second, different local item as well — for example finished meeting minutes plus a separate "
-                "future deadline — commit one of them, put the remaining item in deferred_action, and ask "
-                "about it in one short follow_up_question. When one of the two items is a tracker change, "
-                "commit that one and defer the other, because a deferred_action may only be create_event, "
-                "save_idea, or save_note, must cite the current message, and is not executed until the user "
-                "confirms it. Leave both fields null when the message states only one item; never invent a "
-                "second item or split one item into two. "
+                "event's current time. Use calendar_update or calendar_delete only with one found candidate, "
+                "copying its ID exactly into target_event_id; never invent an ID. A delete_event action carries "
+                "only target_event_id and source_message_ids, never content, description, or any date, time, "
+                "or duration. CaptureFlow asks the user to confirm a deletion before it happens. "
+                "Every calendar, idea, or note action lists in source_message_ids the IDs of the user messages "
+                "its content comes from, such as an earlier message that stated the event and the current "
+                "message that answered your question. CaptureFlow always counts current_message. "
+                "A user-owned task or deadline that is not a scheduled event must use tracker_change, not "
+                "Calendar. When such a task states a deadline, normalize it the same way as a calendar date: "
+                "due_date is YYYY-MM-DD and due_time, if stated, is 24-hour HH:MM. A repeating deadline sets "
+                "recurring to true. Leave due_at null, because Python sets it. Only a task may carry those "
+                "fields, and a deadline is never invented. "
+                "A tracker_change uses create_record with kind and content; transition_record with one found "
+                "candidate target_record_id and target_state completed or resolved, and never kind, content, "
+                "or rationale; supersede_record replacing one found active candidate decision or constraint; "
+                "or set_deadline with one found candidate task and the normalized deadline fields, which is how "
+                "a deadline is added or corrected on a task that already exists. Finishing or resolving an "
+                "existing candidate record is transition_record, not a new record. Every project change "
+                "carries source_quote, a short exact quote of the words it comes from, and source_message_id, "
+                "the ID of the user message that quote is in; a pasted text saved over several turns is quoted "
+                "from the message that contains it. "
+                "Pasted long text such as meeting minutes: save what you can in this turn with the intents above, "
+                "and say in reply what is still unsaved, so the user can ask you to continue. "
+                "One turn commits one local action or up to three tracker changes. When current_message clearly "
+                "states a second, different item as well, commit one and ask about the other in one short "
+                "follow_up_question; never invent a second item or split one item into two. "
                 "Neither answer intent proposes a write, and CaptureFlow writes both answers itself. "
                 "local_answer is a question about one or a few specific stored items: a Calendar event, an "
                 "idea or note, or a single project record such as one task's deadline. Put the IDs of the "
-                "supplied candidates the question is about in source_ids, or leave source_ids empty when none "
-                "of them is it. project_answer is a question about the project as a whole: progress, outstanding "
-                "work, blockers, deadlines across tasks, or why a decision changed; CaptureFlow gathers the "
-                "project's records for it, so source_ids and reply are not needed. Save only an explicit idea or "
-                "note with save_idea or save_note. Use reply_only for unsupported conversation. "
-                "Every local action needs one to three EvidenceReference entries. Each entry must copy an "
-                "exact quote from one supplied recent_messages message and its exact message_id; do not cite "
-                "the same message twice. One entry must always quote current_message exactly, even when that "
-                "message only confirms an earlier pending item; cite the earlier message as a second entry "
-                "when the committed content comes from it. "
-                "Any candidate ID you provide may reference only supplied candidates. "
-                "Never invent a source quote, candidate ID, date, time, task, meeting, project "
-                "fact, or external information. If context_truncated is true, do not imply older messages were seen."
+                "candidates the question is about in source_ids, or leave source_ids empty when none of them is "
+                "it. project_answer is a question about the project as a whole: progress, outstanding work, "
+                "blockers, deadlines across tasks, or why a decision changed; CaptureFlow gathers the project's "
+                "records for it, so source_ids and reply are not needed. Save only an explicit idea or note with "
+                "save_idea or save_note. Use reply_only for unsupported conversation. "
+                "Never invent a candidate ID, message ID, date, time, task, meeting, project fact, or external "
+                "information."
             ),
             payload={
                 "current_message": current_message,
@@ -184,22 +195,14 @@ class OpenAICompatibleModel:
                 "candidate_events": candidate_events,
                 "candidate_saved_items": candidate_saved_items,
                 "candidate_project_records": candidate_project_records,
+                "truncated_candidate_lists": truncated_candidate_lists or [],
                 "reference_date": reference_date,
                 "reference_time": reference_time,
                 "timezone": timezone,
-                "pending_clarification": pending_clarification,
                 "context_truncated": context_truncated,
                 "calendar": calendar or [],
             },
         )
-        self._validate_contextual_references(
-            decision,
-            recent_messages,
-            candidate_events,
-            candidate_saved_items,
-            candidate_project_records,
-        )
-        return decision
 
     def answer_project_question(
         self,
@@ -232,45 +235,6 @@ class OpenAICompatibleModel:
                 "reference_date": reference_date,
             },
         )
-
-    @staticmethod
-    def _validate_contextual_references(
-        decision: ConversationDecision,
-        recent_messages: list[dict[str, str]],
-        candidate_events: list[dict],
-        candidate_saved_items: list[dict],
-        candidate_project_records: list[dict],
-    ) -> None:
-        messages_by_id = {
-            message["message_id"]: message["content"]
-            for message in recent_messages
-            if "message_id" in message and "content" in message
-        }
-        event_ids = {candidate["id"] for candidate in candidate_events if "id" in candidate}
-        saved_item_ids = {
-            candidate["id"] for candidate in candidate_saved_items if "id" in candidate
-        }
-        record_ids = {
-            candidate["id"] for candidate in candidate_project_records if "id" in candidate
-        }
-        for action in (decision.action, decision.pending_action, decision.deferred_action):
-            if action is None:
-                continue
-            if action.target_event_id is not None and action.target_event_id not in event_ids:
-                raise InvalidStructuredOutput("The model selected a calendar event outside the supplied candidates.")
-            for evidence in action.evidence:
-                source_message = messages_by_id.get(evidence.message_id)
-                if source_message is None:
-                    raise InvalidStructuredOutput("The model cited a message outside the supplied recent context.")
-                if _normalized_text(evidence.source_quote) not in _normalized_text(source_message):
-                    raise InvalidStructuredOutput("The model cited text that is not present in its supplied message.")
-        if any(
-            change.target_record_id is not None and change.target_record_id not in record_ids
-            for change in decision.project_changes
-        ):
-            raise InvalidStructuredOutput("The model selected a project record outside the supplied candidates.")
-        if any(source_id not in event_ids | saved_item_ids | record_ids for source_id in decision.source_ids):
-            raise InvalidStructuredOutput("The model cited a local answer source outside the supplied candidates.")
 
     def _complete(self, schema: type[Schema], system: str, payload: dict[str, Any]) -> Schema:
         prompt = json.dumps(
@@ -309,7 +273,3 @@ def describe_validation_error(error: ValidationError) -> str:
         f"{'.'.join(str(part) for part in detail['loc']) or '<root>'}: {detail['msg']}"
         for detail in error.errors(include_input=False, include_url=False)
     )
-
-
-def _normalized_text(value: str) -> str:
-    return " ".join(value.split())
