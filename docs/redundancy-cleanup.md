@@ -78,3 +78,7 @@ a Calendar source. These cross-model runs demonstrate provider-specific variance
 they are not a reliability measure or a replacement for the frozen
 `gpt-5.6-terra` acceptance. No product code, prompt, or fixture was changed in
 response.
+
+The router then moved to Qwen, and the acceptance protocol model changed with it;
+see [qwen-migration.md](qwen-migration.md). With `qwen3.8-flash` at `750bde5`,
+the protocol acceptance passed 16 of 16 once and 11 of 16 once.
