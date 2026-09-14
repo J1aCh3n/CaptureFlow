@@ -1448,6 +1448,85 @@ class ConversationRouterServiceTests(unittest.TestCase):
         self.assertEqual(turn.model_calls, 1)
         self.assertEqual(model.project_answer_calls, [])
 
+    # Failures around a decision
+
+    def test_a_write_the_local_rules_refuse_is_a_dispatch_failure(self) -> None:
+        unassigned = self.store.save_conversation(Conversation(id="unassigned-tracker-chat", title="Loose"))
+        content = "排查 ROS 2 节点延迟。"
+        model = ScriptedContextualModel(
+            [
+                {
+                    "intent": "tracker_change",
+                    "project_changes": [{"action": "create_record", "kind": "task", "content": content, "source_quote": content}],
+                }
+            ]
+        )
+
+        turn = self.submit(model, content, "unassigned-tracker-turn", conversation_id=unassigned.id)
+
+        self.assertEqual(turn.outcome, "write_or_dispatch_failure")
+        self.assertEqual(turn.model_calls, 1)
+        self.assertEqual(turn.operations, ())
+        self.assertEqual(turn.decision.intent, "tracker_change")
+        self.assertIn("assign a project", turn.failure_reason)
+        self.assertEqual(self.store.list_project_records(self.project.id), [])
+
+    def test_a_reused_message_id_with_different_content_raises_before_the_model(self) -> None:
+        model = ScriptedContextualModel([{"intent": "reply_only", "reply": "好的。"}])
+        self.submit(model, "第一条消息。", "reused-message-id")
+
+        with self.assertRaisesRegex(ValueError, "different content"):
+            self.submit(ScriptedContextualModel([]), "另一条消息。", "reused-message-id")
+
+    # The turn graph
+
+    def test_a_turn_runs_through_the_router_graph_without_a_checkpointer(self) -> None:
+        service = ConversationRouterService(self.store, ScriptedContextualModel([]), date(2026, 9, 9))
+        graph = service.graph.get_graph()
+
+        self.assertIsNone(service.graph.checkpointer)
+        self.assertEqual(
+            set(graph.nodes) - {"__start__", "__end__"},
+            {
+                "load_turn",
+                "reload",
+                "resume",
+                "guard_credentials",
+                "decide",
+                "calendar_policy",
+                "clarify",
+                "local_answer",
+                "project_answer",
+                "execute",
+            },
+        )
+        # docs/langgraph-router-migration.md draws these edges; keep the two in step.
+        self.assertEqual(
+            {(edge.source, edge.target) for edge in graph.edges},
+            {
+                ("__start__", "load_turn"),
+                ("load_turn", "reload"),
+                ("load_turn", "resume"),
+                ("reload", "__end__"),
+                ("resume", "__end__"),
+                ("resume", "guard_credentials"),
+                ("guard_credentials", "__end__"),
+                ("guard_credentials", "decide"),
+                ("decide", "__end__"),
+                ("decide", "calendar_policy"),
+                ("decide", "clarify"),
+                ("decide", "local_answer"),
+                ("decide", "project_answer"),
+                ("decide", "execute"),
+                ("calendar_policy", "__end__"),
+                ("calendar_policy", "execute"),
+                ("clarify", "__end__"),
+                ("local_answer", "__end__"),
+                ("project_answer", "__end__"),
+                ("execute", "__end__"),
+            },
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,11 +1,15 @@
 """One bounded, contextual entry point for ordinary CaptureFlow chat."""
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from time import perf_counter
+from typing import TypedDict
 from uuid import NAMESPACE_URL, uuid4, uuid5
 from zoneinfo import ZoneInfo
 
+from langgraph.graph import END, START, StateGraph
+from langgraph.graph.state import CompiledStateGraph
 from pydantic import ValidationError
 
 from .context_service import ContextWindow, RouterCandidates, select_context_window, select_router_candidates
@@ -57,6 +61,23 @@ class ConversationRouterTurn:
     failure_reason: str | None = None
 
 
+class RouterState(TypedDict, total=False):
+    """One turn as it moves through the router graph; it lives only for one submit()."""
+
+    conversation_id: str
+    content: str
+    message_id: str | None
+    user_message: Message
+    context_window: ContextWindow
+    candidates: RouterCandidates
+    existing_reply: Message | None
+    decision: ConversationDecision
+    model_seconds: float
+    local_started: float
+    # Set by the node that finishes the turn; None while the turn continues.
+    turn: ConversationRouterTurn | None
+
+
 class ConversationRouterService:
     """Persist one normal-language turn, then execute exactly one validated decision."""
 
@@ -73,46 +94,115 @@ class ConversationRouterService:
         self.reference_date = reference_date
         self.timezone = timezone
         self.reference_time = reference_time
+        self.graph = self._build_graph()
 
     def submit(
         self, conversation_id: str, content: str, message_id: str | None = None
     ) -> ConversationRouterTurn:
-        user_message = self._user_message(conversation_id, content, message_id)
-        context_window = select_context_window(self.store.list_messages(conversation_id))
-        candidates = select_router_candidates(
-            self.store, conversation_id, self.reference_date, user_message.content
+        state = self.graph.invoke(
+            {"conversation_id": conversation_id, "content": content, "message_id": message_id}
         )
-        if existing_reply := self.store.get_assistant_reply(user_message.id):
-            return ConversationRouterTurn(
+        return state["turn"]
+
+    def _build_graph(self) -> CompiledStateGraph:
+        """One turn as a LangGraph state graph; every path ends in a node that sets ``turn``.
+
+        It is compiled without a checkpointer: a turn interrupted by a crash is recovered
+        from its SQLite operations by the ``resume`` node, and the graph keeps no state of
+        its own between turns.
+        """
+
+        graph = StateGraph(RouterState)
+        graph.add_node("load_turn", self._load_turn)
+        graph.add_node("reload", self._reload)
+        graph.add_node("resume", self._resume)
+        graph.add_node("guard_credentials", self._guard_credentials)
+        graph.add_node("decide", self._decide)
+        graph.add_node("calendar_policy", self._guarded(self._calendar_policy))
+        graph.add_node("clarify", self._guarded(self._clarify))
+        graph.add_node("local_answer", self._guarded(self._local_answer))
+        graph.add_node("project_answer", self._guarded(self._project_answer))
+        graph.add_node("execute", self._execute_decision)
+
+        graph.add_edge(START, "load_turn")
+        graph.add_conditional_edges("load_turn", _reload_or_resume, ["reload", "resume"])
+        graph.add_edge("reload", END)
+        graph.add_conditional_edges("resume", _unless_finished("guard_credentials"), [END, "guard_credentials"])
+        graph.add_conditional_edges("guard_credentials", _unless_finished("decide"), [END, "decide"])
+        graph.add_conditional_edges(
+            "decide",
+            _dispatch,
+            [END, "calendar_policy", "clarify", "local_answer", "project_answer", "execute"],
+        )
+        graph.add_conditional_edges("calendar_policy", _unless_finished("execute"), [END, "execute"])
+        for node in ("clarify", "local_answer", "project_answer", "execute"):
+            graph.add_edge(node, END)
+        return graph.compile()
+
+    # Graph nodes. Each reads the turn so far and returns only the keys it sets.
+
+    def _load_turn(self, state: RouterState) -> RouterState:
+        user_message = self._user_message(state["conversation_id"], state["content"], state["message_id"])
+        return {
+            "user_message": user_message,
+            "context_window": select_context_window(self.store.list_messages(state["conversation_id"])),
+            "candidates": select_router_candidates(
+                self.store, state["conversation_id"], self.reference_date, user_message.content
+            ),
+            "existing_reply": self.store.get_assistant_reply(user_message.id),
+        }
+
+    def _reload(self, state: RouterState) -> RouterState:
+        user_message = state["user_message"]
+        return {
+            "turn": ConversationRouterTurn(
                 user_message,
-                existing_reply,
+                state["existing_reply"],
                 None,
-                context_window,
-                candidates,
+                state["context_window"],
+                state["candidates"],
                 self._persisted_operations(user_message.id),
                 outcome="reloaded",
             )
-        if resumed := self._resume_persisted_operations(user_message):
-            return self._reply(
-                user_message,
+        }
+
+    def _resume(self, state: RouterState) -> RouterState:
+        resumed = self._resume_persisted_operations(state["user_message"])
+        if not resumed:
+            return {"turn": None}
+        return {
+            "turn": self._reply(
+                state["user_message"],
                 "Resumed the saved local operation without another model call.",
                 None,
-                context_window,
-                candidates,
+                state["context_window"],
+                state["candidates"],
                 resumed,
                 outcome="resumed",
             )
-        if contains_credential_disclosure(user_message.content):
-            return self._reply(
-                user_message,
+        }
+
+    def _guard_credentials(self, state: RouterState) -> RouterState:
+        if not contains_credential_disclosure(state["user_message"].content):
+            return {"turn": None}
+        return {
+            "turn": self._reply(
+                state["user_message"],
                 "I did not process that message because it appears to contain a credential.",
                 None,
-                context_window,
-                candidates,
+                state["context_window"],
+                state["candidates"],
                 (),
                 outcome="blocked_credential",
             )
+        }
 
+    def _decide(self, state: RouterState) -> RouterState:
+        """The turn's one routing call, and the check that its IDs are candidates."""
+
+        user_message = state["user_message"]
+        context_window = state["context_window"]
+        candidates = state["candidates"]
         started = perf_counter()
         try:
             decision = ConversationDecision.model_validate(
@@ -132,71 +222,73 @@ class ConversationRouterService:
             )
             self._validate_decision(decision, candidates)
         except (InvalidStructuredOutput, ModelError, ValidationError, ValueError) as error:
-            return self._reply(
-                user_message,
-                "I could not safely validate this conversation decision, so no local record was changed.",
-                None,
-                context_window,
-                candidates,
-                (),
-                model_calls=1,
-                model_seconds=perf_counter() - started,
-                outcome="model_or_validation_failure",
-                failure_reason=_failure_reason(error),
-            )
-
-        model_seconds = perf_counter() - started
-        local_started = perf_counter()
-
-        def turn_without_writes(assistant: Message, outcome: str) -> ConversationRouterTurn:
-            return ConversationRouterTurn(
-                user_message,
-                assistant,
-                decision,
-                context_window,
-                candidates,
-                (),
-                outcome=outcome,
-                model_calls=1,
-                model_seconds=model_seconds,
-                local_seconds=perf_counter() - local_started,
-            )
-
-        try:
-            if decision.intent in _CALENDAR_WRITES and (
-                missing_field := self._calendar_clarification_field(decision.action)
-            ):
-                # Python's policy question is a plain reply; nothing waits for the answer.
-                assistant = self._assistant_message(user_message, self._question(missing_field))
-                return turn_without_writes(assistant, "clarification_created")
-            if decision.intent == "clarify":
-                assistant = self._assistant_message(user_message, decision.reply or "")
-                return turn_without_writes(assistant, "clarification_created")
-            if decision.intent == "local_answer":
-                local_turn = LocalContextService(self.store, self.reference_date).submit(
-                    conversation_id,
-                    content,
-                    user_message.id,
-                    selected=self._named_candidates(decision, candidates),
+            return {
+                "turn": self._reply(
+                    user_message,
+                    "I could not safely validate this conversation decision, so no local record was changed.",
+                    None,
+                    context_window,
+                    candidates,
+                    (),
+                    model_calls=1,
+                    model_seconds=perf_counter() - started,
+                    outcome="model_or_validation_failure",
+                    failure_reason=_failure_reason(error),
                 )
-                return turn_without_writes(local_turn.assistant_message, local_turn.outcome)
-            if decision.intent == "project_answer":
-                return self._answer_project(user_message, decision, context_window, candidates, model_seconds)
-            operations, reply = self._execute(decision, user_message, context_window, candidates)
+            }
+        return {"decision": decision, "model_seconds": perf_counter() - started, "local_started": perf_counter()}
+
+    def _guarded(
+        self, step: Callable[[RouterState], ConversationRouterTurn | None]
+    ) -> Callable[[RouterState], RouterState]:
+        """A step after the decision; a local rule it breaks fails the turn without a write."""
+
+        def node(state: RouterState) -> RouterState:
+            try:
+                return {"turn": step(state)}
+            except (KeyError, ValidationError, ValueError) as error:
+                return {"turn": self._dispatch_failure(state, error)}
+
+        return node
+
+    def _calendar_policy(self, state: RouterState) -> ConversationRouterTurn | None:
+        missing_field = self._calendar_clarification_field(state["decision"].action)
+        if missing_field is None:
+            return None
+        # Python's policy question is a plain reply; nothing waits for the answer.
+        assistant = self._assistant_message(state["user_message"], self._question(missing_field))
+        return self._turn_without_writes(state, assistant, "clarification_created")
+
+    def _clarify(self, state: RouterState) -> ConversationRouterTurn:
+        assistant = self._assistant_message(state["user_message"], state["decision"].reply or "")
+        return self._turn_without_writes(state, assistant, "clarification_created")
+
+    def _local_answer(self, state: RouterState) -> ConversationRouterTurn:
+        local_turn = LocalContextService(self.store, self.reference_date).submit(
+            state["conversation_id"],
+            state["content"],
+            state["user_message"].id,
+            selected=self._named_candidates(state["decision"], state["candidates"]),
+        )
+        return self._turn_without_writes(state, local_turn.assistant_message, local_turn.outcome)
+
+    def _project_answer(self, state: RouterState) -> ConversationRouterTurn:
+        return self._answer_project(
+            state["user_message"],
+            state["decision"],
+            state["context_window"],
+            state["candidates"],
+            state["model_seconds"],
+        )
+
+    def _execute_decision(self, state: RouterState) -> RouterState:
+        decision = state["decision"]
+        user_message = state["user_message"]
+        # Only the write is guarded: a reply that fails to save after it is not a refused write.
+        try:
+            operations, reply = self._execute(decision, user_message, state["context_window"], state["candidates"])
         except (KeyError, ValidationError, ValueError) as error:
-            return self._reply(
-                user_message,
-                f"I could not safely apply that local change: {error}",
-                decision,
-                context_window,
-                candidates,
-                (),
-                model_calls=1,
-                model_seconds=model_seconds,
-                local_seconds=perf_counter() - local_started,
-                outcome="write_or_dispatch_failure",
-                failure_reason=_failure_reason(error),
-            )
+            return {"turn": self._dispatch_failure(state, error)}
 
         outcome = decision.intent if decision.intent != "reply_only" or operations else "reply_only"
         if decision.intent == "calendar_update" and not operations:
@@ -206,17 +298,50 @@ class ConversationRouterService:
         # A second item is asked about only once this turn has saved its own.
         if operations and decision.follow_up_question:
             reply = f"{reply}\n\n{decision.follow_up_question}"
-        return self._reply(
-            user_message,
-            reply,
-            decision,
-            context_window,
-            candidates,
-            operations,
-            model_calls=1,
-            model_seconds=model_seconds,
-            local_seconds=perf_counter() - local_started,
+        return {
+            "turn": self._reply(
+                user_message,
+                reply,
+                decision,
+                state["context_window"],
+                state["candidates"],
+                operations,
+                model_calls=1,
+                model_seconds=state["model_seconds"],
+                local_seconds=perf_counter() - state["local_started"],
+                outcome=outcome,
+            )
+        }
+
+    def _turn_without_writes(
+        self, state: RouterState, assistant: Message, outcome: str
+    ) -> ConversationRouterTurn:
+        return ConversationRouterTurn(
+            state["user_message"],
+            assistant,
+            state["decision"],
+            state["context_window"],
+            state["candidates"],
+            (),
             outcome=outcome,
+            model_calls=1,
+            model_seconds=state["model_seconds"],
+            local_seconds=perf_counter() - state["local_started"],
+        )
+
+    def _dispatch_failure(self, state: RouterState, error: Exception) -> ConversationRouterTurn:
+        return self._reply(
+            state["user_message"],
+            f"I could not safely apply that local change: {error}",
+            state["decision"],
+            state["context_window"],
+            state["candidates"],
+            (),
+            model_calls=1,
+            model_seconds=state["model_seconds"],
+            local_seconds=perf_counter() - state["local_started"],
+            outcome="write_or_dispatch_failure",
+            failure_reason=_failure_reason(error),
         )
 
     @staticmethod
@@ -845,6 +970,32 @@ class ConversationRouterService:
     @staticmethod
     def _message_for_router(message: Message) -> dict[str, str]:
         return {"message_id": message.id, "role": message.role, "content": message.content}
+
+
+def _reload_or_resume(state: RouterState) -> str:
+    return "reload" if state["existing_reply"] is not None else "resume"
+
+
+def _unless_finished(next_node: str) -> Callable[[RouterState], str]:
+    """Route to ``next_node`` unless the node before it finished the turn."""
+
+    def route(state: RouterState) -> str:
+        return END if state.get("turn") is not None else next_node
+
+    return route
+
+
+def _dispatch(state: RouterState) -> str:
+    """After a valid decision, the step its intent needs; a failed decision ends the turn."""
+
+    if state.get("turn") is not None:
+        return END
+    intent = state["decision"].intent
+    if intent in _CALENDAR_WRITES:
+        return "calendar_policy"
+    if intent in {"clarify", "local_answer", "project_answer"}:
+        return intent
+    return "execute"
 
 
 def _failure_reason(error: Exception) -> str:

@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "A local, single-user project continuity assistant with source-grounded chat."
 requires-python = ">=3.11"
 dependencies = [
+    "langgraph>=1.0,<2.0",
     "openai>=1.0,<3.0",
     "pydantic>=2.0,<3.0",
     "streamlit>=1.40,<2.0",

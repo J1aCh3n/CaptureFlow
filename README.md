@@ -15,7 +15,8 @@ messages, calendar events, ideas, and notes as unassigned local records.
 
 It is deliberately not a general chatbot. On each ordinary chat turn one model
 call reads the message in its bounded conversation context and returns a typed
-decision; only a question about a whole project makes a second call. Python
+decision; only a question about a whole project makes a second call. The turn runs
+as a LangGraph state graph whose nodes are those steps. Python
 validates the candidate target, time policy, lifecycle, duplicate/conflict, and
 credential rules before any SQLite write. The working principle is: understanding
 belongs to the model; authorization stays in Python.
@@ -25,7 +26,8 @@ or access to external services.
 ## Project structure
 
 CaptureFlow is a Python 3.11 package (`src/captureflow`) with a Streamlit front
-end, Pydantic models, SQLite storage, and an OpenAI-compatible model client. It
+end, Pydantic models, SQLite storage, a LangGraph graph for each chat turn, and an
+OpenAI-compatible model client. It
 is organized in layers. Services never import the UI, and only `storage.py` and
 `migrations.py` touch SQLite:
 
@@ -33,7 +35,7 @@ is organized in layers. Services never import the UI, and only `storage.py` and
 flowchart TD
     UI["ui.py<br/>Streamlit pages: Chat, Tracker, Calendar, Ideas & Notes"]
     CMD["chat_service.py<br/>/event, /idea, /note"]
-    ROUTER["conversation_router_service.py<br/>one typed decision per turn"]
+    ROUTER["conversation_router_service.py<br/>LangGraph turn graph, one typed decision per turn"]
     CTX["context_service.py<br/>layered context"]
     LLM["llm.py<br/>OpenAI-compatible client"]
     LOCAL["local_context_service.py<br/>local_answer"]
@@ -75,7 +77,7 @@ captureflow/
 ├── .streamlit/config.toml          # Streamlit theme
 ├── src/captureflow/
 │   ├── ui.py                       # All pages, the sidebar, and chat input dispatch
-│   ├── conversation_router_service.py  # The contextual router: model decision → policy → write
+│   ├── conversation_router_service.py  # The contextual router's LangGraph graph: model decision → policy → write
 │   ├── chat_service.py             # Model-free /event, /idea, /note commands and reply-only turns
 │   ├── context_service.py          # Recent conversation and one-line stored state for the model
 │   ├── llm.py                      # ModelSettings, the OpenAI-compatible client, and its prompts
@@ -139,6 +141,10 @@ message goes to the contextual router
 4. Python checks every candidate ID, applies policy, and commits at most one
    local write through an audited, restart-safe operation. Every committed change
    is visible in Chat and has a guarded Undo.
+
+These steps are the nodes of a LangGraph `StateGraph`, compiled without a
+checkpointer: recovery after a crash comes from the stored operations alone. See
+[langgraph-router-migration.md](docs/langgraph-router-migration.md) for the graph.
 
 Dates and times arrive already normalized by the model as `date`, `start_time`,
 `end_time`, `duration_minutes`, `timezone`, and `recurring` fields. Python attaches
@@ -205,7 +211,7 @@ rows.
 
 ## Status and evidence
 
-The deterministic suite passes 187 tests. It verifies the database, validation,
+The deterministic suite passes 190 tests. It verifies the database, validation,
 and model-write boundaries with scripted model decisions.
 
 The frozen Phase 10 live acceptance (20 ordered records, protocol version 3)
@@ -228,6 +234,7 @@ from the redundancy cleanup onward.
 | [qwen-migration.md](docs/qwen-migration.md) | Moving the router and acceptance protocol to Qwen |
 | [phase-12-answer-intents-design.md](docs/phase-12-answer-intents-design.md) | What `local_answer` and `project_answer` mean |
 | [phase-13-simplified-router-design.md](docs/phase-13-simplified-router-design.md) | A simpler router: plain questions, model-judged targets, layered context |
+| [langgraph-router-migration.md](docs/langgraph-router-migration.md) | Running the router's turn as a LangGraph graph, with unchanged behavior |
 
 The live acceptance needs explicit API-cost approval. It creates only an isolated
 local database and writes a trace without credentials or raw model output to the
