@@ -28,10 +28,7 @@ artifacts/
 # Local design, acceptance, and interaction-test records
 /PREFLIGHT.md
 /PREFLIGHT_V2.md
-/docs/phase-3-evidence.md
-docs/phase-3-acceptance-examples.md
-docs/phase-3-acceptance-protocol.md
-docs/captureflow-interaction-revision.md
+/docs
 
 # Secrets and local configuration
 .env

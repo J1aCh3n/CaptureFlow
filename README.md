@@ -22,6 +22,101 @@ belongs to the model; authorization stays in Python.
 It has no external calendar synchronization, email, meetings, vector retrieval,
 or access to external services.
 
+## Project structure
+
+CaptureFlow is a Python 3.11 package (`src/captureflow`) with a Streamlit front
+end, Pydantic models, SQLite storage, and an OpenAI-compatible model client. It
+is organized in layers. Services never import the UI, and only `storage.py` and
+`migrations.py` touch SQLite:
+
+```mermaid
+flowchart TD
+    UI["ui.py<br/>Streamlit pages: Chat, Tracker, Calendar, Ideas & Notes"]
+    CMD["chat_service.py<br/>/event, /idea, /note"]
+    ROUTER["conversation_router_service.py<br/>one typed decision per turn"]
+    CTX["context_service.py<br/>layered context"]
+    LLM["llm.py<br/>OpenAI-compatible client"]
+    LOCAL["local_context_service.py<br/>local_answer"]
+    PANS["project_answer_service.py<br/>project_answer"]
+    PSVC["project_service.py<br/>tracker changes"]
+    STORE["storage.py<br/>CaptureStore"]
+    DB[("SQLite<br/>data/captureflow.sqlite3")]
+
+    UI -->|"/command"| CMD
+    UI -->|ordinary text| ROUTER
+    ROUTER --> CTX
+    ROUTER --> LLM
+    ROUTER --> LOCAL
+    ROUTER --> PANS
+    ROUTER --> PSVC
+    PANS --> LLM
+    CMD --> STORE
+    CTX --> STORE
+    LOCAL --> STORE
+    PANS --> STORE
+    PSVC --> STORE
+    STORE --> DB
+```
+
+| Layer | Modules | Responsibility |
+| --- | --- | --- |
+| Presentation | `ui.py`, `app.py` | Streamlit pages and widgets. Chooses the command service or the router for each message and renders records, source cards, and Undo. |
+| Turn handling | `conversation_router_service.py`, `chat_service.py` | Turns one user message into at most one validated write, or a reply. |
+| Understanding and answers | `context_service.py`, `llm.py`, `local_context_service.py`, `project_answer_service.py`, `project_service.py` | Builds the model's context, makes the model call, answers questions, and checks proposed tracker changes. |
+| Persistence | `storage.py`, `migrations.py`, `models.py` | Typed records, schema migrations, and audited, restart-safe writes to SQLite. |
+| Shared helpers | `credentials.py`, `date_tool.py`, `time_config.py` | Credential detection, the calendar reference table, and configured local time. |
+
+### Repository layout
+
+```text
+captureflow/
+├── app.py                          # Streamlit entry point; calls captureflow.ui.main()
+├── pyproject.toml                  # Package metadata and dependencies
+├── .streamlit/config.toml          # Streamlit theme
+├── src/captureflow/
+│   ├── ui.py                       # All pages, the sidebar, and chat input dispatch
+│   ├── conversation_router_service.py  # The contextual router: model decision → policy → write
+│   ├── chat_service.py             # Model-free /event, /idea, /note commands and reply-only turns
+│   ├── context_service.py          # Recent conversation and one-line stored state for the model
+│   ├── llm.py                      # ModelSettings, the OpenAI-compatible client, and its prompts
+│   ├── local_context_service.py    # Answers about specific events, ideas, notes, or records
+│   ├── project_answer_service.py   # Project snapshot and the second model call for project questions
+│   ├── project_service.py          # Validates tracker changes and commits those needing no review
+│   ├── models.py                   # Pydantic models: records, operations, ConversationDecision
+│   ├── storage.py                  # CaptureStore: every SQLite read and write
+│   ├── migrations.py               # Ordered, versioned schema migrations
+│   ├── credentials.py              # Deterministic credential-disclosure check
+│   ├── date_tool.py                # Calendar reference table and dates named in questions
+│   └── time_config.py              # CAPTUREFLOW_TIMEZONE and the reference "now"
+├── tests/                          # unittest suite, one file per module
+│   └── fixtures/                   # Frozen Phase 9 and Phase 10 acceptance cases
+├── scripts/
+│   ├── run_local_app.ps1           # Starts Streamlit from this checkout with Qwen defaults
+│   └── run_phase10_live_acceptance.py  # Live acceptance run against a real model
+└── docs/                           # Phase designs, evidence, and migration notes
+```
+
+Ignored local directories: `data/` holds the SQLite database, and `runs/` and
+`artifacts/` hold acceptance traces.
+
+### Data model
+
+`models.py` defines the Pydantic types, and `migrations.py` creates the matching
+tables. The database applies every pending migration when `CaptureStore` opens it.
+
+| Area | Tables | Contents |
+| --- | --- | --- |
+| Conversation | `conversations`, `messages` | Persisted chat, including failed and blocked turns |
+| Calendar | `calendar_events`, `calendar_event_sources`, `calendar_event_update_operations`, `calendar_event_update_sources` | Local events, the messages they came from, and reviewable, undoable updates |
+| Ideas & Notes | `saved_items` | Ideas and notes with their source message |
+| Projects | `projects`, `conversation_projects`, `project_records`, `project_record_events`, `project_conversation_state` | Tracker records (tasks, decisions, blockers, and so on) and their history |
+| Audit | `tool_operations`, `project_change_operations`, `project_answer_sources`, `local_context_answer_sources` | Every committed write, used for Undo and restart recovery, and the sources behind each answer |
+| Schema | `schema_migrations` | Applied migration versions |
+
+`pending_clarifications` and the version 1 capture tables (`captures`,
+`task_items`, `memory_items`, and related tables) remain from earlier designs so
+existing databases still migrate; current features do not write to them.
+
 ## How a chat turn works
 
 With `CAPTUREFLOW_API_KEY` and `CAPTUREFLOW_MODEL` configured, each ordinary
@@ -130,6 +225,7 @@ from the redundancy cleanup onward.
 | [phase-11-model-normalized-time-design.md](docs/phase-11-model-normalized-time-design.md) | Moving date and time understanding to the model |
 | [phase-11-evidence.md](docs/phase-11-evidence.md) | Phase 11 results and acceptance reruns |
 | [redundancy-cleanup.md](docs/redundancy-cleanup.md) | Removal of code the app no longer reaches |
+| [qwen-migration.md](docs/qwen-migration.md) | Moving the router and acceptance protocol to Qwen |
 | [phase-12-answer-intents-design.md](docs/phase-12-answer-intents-design.md) | What `local_answer` and `project_answer` mean |
 | [phase-13-simplified-router-design.md](docs/phase-13-simplified-router-design.md) | A simpler router: plain questions, model-judged targets, layered context |
 
