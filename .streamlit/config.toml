@@ -1,7 +1,20 @@
 [theme]
 base = "light"
 primaryColor = "#2563EB"
-backgroundColor = "#F7F9FC"
-secondaryBackgroundColor = "#FFFFFF"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F4F6FA"
 textColor = "#0F172A"
-font = "sans serif"
+borderColor = "#E2E8F0"
+showWidgetBorder = true
+baseRadius = "10px"
+buttonRadius = "8px"
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+headingFontSizes = ["28px", "22px", "18px", "16px", "14px", "12px"]
+headingFontWeights = [700, 600, 600, 600, 600, 600]
+linkUnderline = false
+showSidebarBorder = true
+blueColor = "#2563EB"
+
+[theme.sidebar]
+backgroundColor = "#F8FAFC"
+secondaryBackgroundColor = "#EEF2F7"

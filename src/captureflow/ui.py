@@ -1,8 +1,9 @@
 import os
+from calendar import Calendar
 from datetime import date, datetime
-from html import escape
 from pathlib import Path
 from time import perf_counter
+from zoneinfo import ZoneInfo
 
 import streamlit as st
 from pydantic import ValidationError
@@ -16,184 +17,137 @@ from .time_config import configured_reference_date, configured_reference_now, co
 
 
 DIAGNOSTICS_SESSION_KEY = "captureflow_turn_diagnostics"
+PAGE_SESSION_KEY = "workspace_page"
+CALENDAR_DAY_KEY = "calendar_selected_day"
+CALENDAR_MONTH_KEY = "calendar_month"
+WORKSPACE_PANEL_HEIGHT = 600
+
+PAGES = ["Chat", "Tracker", "Calendar", "Ideas & Notes"]
+PAGE_ICONS = {
+    "Chat": ":material/forum:",
+    "Tracker": ":material/view_kanban:",
+    "Calendar": ":material/calendar_month:",
+    "Ideas & Notes": ":material/lightbulb:",
+}
+KIND_STYLES = {
+    "task": ("Task", "blue", ":material/task_alt:"),
+    "milestone": ("Milestone", "violet", ":material/flag:"),
+    "decision": ("Decision", "green", ":material/gavel:"),
+    "constraint": ("Constraint", "orange", ":material/rule:"),
+    "open_question": ("Question", "violet", ":material/help:"),
+    "blocker": ("Blocker", "red", ":material/block:"),
+}
+CLOSING_TRANSITIONS = {
+    "task": ("completed", "Complete"),
+    "open_question": ("resolved", "Resolve"),
+    "blocker": ("resolved", "Resolve"),
+    "decision": ("superseded", "Supersede"),
+    "constraint": ("superseded", "Supersede"),
+}
+TRACKER_GROUPS = [
+    ("Tasks", ":material/task_alt:", ("task",)),
+    ("Blockers", ":material/block:", ("blocker",)),
+    ("Questions", ":material/help:", ("open_question",)),
+    ("Decisions", ":material/gavel:", ("decision", "constraint")),
+    ("Milestones", ":material/flag:", ("milestone",)),
+]
+TOOL_LABELS = {
+    "create_local_event": ("Calendar event", ":material/event:"),
+    "save_idea": ("Idea", ":material/lightbulb:"),
+    "save_note": ("Note", ":material/sticky_note_2:"),
+}
+STATUS_BADGES = {
+    "committed": ":green-badge[:material/check: Applied]",
+    "undone": ":gray-badge[:material/undo: Undone]",
+    "review": ":orange-badge[:material/pending: Needs review]",
+    "rejected": ":gray-badge[:material/close: Rejected]",
+    "failed": ":red-badge[:material/error: Not applied]",
+}
+WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
 
 def _inject_app_styles() -> None:
-    st.markdown(
+    st.html(
         """
         <style>
-        :root {
-            --cf-primary: #2563eb;
-            --cf-primary-soft: #eaf2ff;
-            --cf-surface: #ffffff;
-            --cf-surface-muted: #f7f9fc;
-            --cf-border: #e3e9f2;
-            --cf-text-muted: #64748b;
-        }
-        .stApp {
-            background: var(--cf-surface-muted);
-        }
         [data-testid="stMainBlockContainer"] {
-            max-width: 1540px;
-            padding-top: 1.75rem;
-            padding-bottom: 2rem;
+            max-width: 1480px;
+            padding-top: 4rem;
+            padding-bottom: 5rem;
         }
-        [data-testid="stSidebar"] {
-            background: #fbfcfe;
-            border-right: 1px solid var(--cf-border);
+        [data-testid="stSidebarUserContent"] {
+            padding-top: 1.25rem;
         }
-        [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p {
-            color: var(--cf-text-muted);
-        }
-        [data-testid="stSidebar"] [role="radiogroup"][aria-label="Conversations"] {
-            border-left: 1px solid var(--cf-border);
-            margin-left: 0.55rem;
-            padding-left: 0.8rem;
-        }
-        div[data-testid="stVerticalBlockBorderWrapper"] {
-            background: var(--cf-surface);
-            border-color: var(--cf-border);
-            border-radius: 14px;
-            box-shadow: 0 4px 18px rgba(15, 23, 42, 0.035);
-        }
-        div[data-testid="stChatMessage"] {
-            background: var(--cf-surface);
-            border: 1px solid var(--cf-border);
-            border-radius: 14px;
-            margin-bottom: 0.7rem;
-        }
-        [data-testid="stChatInput"] {
-            border-color: #cbd5e1;
-            border-radius: 12px;
-            background: var(--cf-surface);
-            box-shadow: 0 8px 26px rgba(15, 23, 42, 0.12);
-        }
-        [data-baseweb="input"] > div,
-        [data-baseweb="textarea"] > div,
-        [data-baseweb="select"] > div {
-            background: #ffffff;
-            border: 1px solid #cbd5e1;
-        }
-        [data-testid="stTextInputRootElement"],
-        [data-testid="stTextAreaRootElement"] {
-            background: #ffffff;
-            border: 1px solid #cbd5e1 !important;
-            border-radius: 8px;
-        }
-        [data-baseweb="input"] > div:focus-within,
-        [data-baseweb="textarea"] > div:focus-within,
-        [data-baseweb="select"] > div:focus-within,
-        [data-testid="stTextInputRootElement"]:focus-within,
-        [data-testid="stTextAreaRootElement"]:focus-within {
-            border-color: var(--cf-primary);
-            box-shadow: 0 0 0 1px var(--cf-primary);
-        }
-        div[data-testid="stMetric"] {
-            background: #f8fafc;
-            border: 1px solid var(--cf-border);
-            border-radius: 12px;
-            padding: 0.75rem;
-        }
-        .stButton > button {
-            border-radius: 10px;
-        }
-        .cf-sidebar-brand {
+        .cf-brand {
             display: flex;
             align-items: center;
             gap: 0.7rem;
-            margin: 0.2rem 0 1.25rem;
+            margin-bottom: 0.5rem;
         }
-        .cf-sidebar-mark {
+        .cf-brand-mark {
             display: grid;
             place-items: center;
-            width: 2.4rem;
-            height: 2.4rem;
-            border-radius: 12px;
+            width: 2.25rem;
+            height: 2.25rem;
+            border-radius: 10px;
             color: white;
             background: linear-gradient(145deg, #2563eb, #38bdf8);
-            font-weight: 750;
+            font-weight: 700;
         }
-        .cf-sidebar-name {
+        .cf-brand-name {
             color: #0f172a;
-            font-size: 1.08rem;
-            font-weight: 720;
+            font-size: 1.05rem;
+            font-weight: 700;
             line-height: 1.15;
         }
-        .cf-sidebar-tagline {
-            color: var(--cf-text-muted);
-            font-size: 0.76rem;
-            margin-top: 0.18rem;
+        .cf-brand-tagline {
+            color: #64748b;
+            font-size: 0.75rem;
         }
-        .cf-workspace-header {
-            background: linear-gradient(135deg, #ffffff 0%, #f4f8ff 100%);
-            border: 1px solid var(--cf-border);
+        [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) {
+            background: #eef4ff;
+        }
+        [data-testid="stLayoutWrapper"]:has(> .st-key-chat-timeline),
+        [data-testid="stLayoutWrapper"]:has(> .st-key-project-snapshot) {
+            flex-basis: max(24rem, calc(100vh - 23.5rem)) !important;
+            height: max(24rem, calc(100vh - 23.5rem)) !important;
+        }
+        .st-key-chat-timeline [data-testid="stChatMessage"] {
             border-radius: 14px;
-            padding: 1rem 1.15rem;
-            margin: 0.25rem 0 1rem;
+            padding: 0.75rem 1rem;
         }
-        .cf-workspace-kicker {
-            color: var(--cf-primary);
-            font-size: 0.72rem;
-            font-weight: 750;
-            letter-spacing: 0.08em;
-            text-transform: uppercase;
+        [class*="st-key-calcell-"] {
+            min-height: 7.25rem;
+            gap: 0.2rem;
+            padding: 0.35rem 0.4rem;
         }
-        .cf-workspace-title {
-            color: #0f172a;
-            font-size: 1.25rem;
-            font-weight: 730;
-            margin-top: 0.18rem;
-        }
-        .cf-workspace-copy {
-            color: var(--cf-text-muted);
-            font-size: 0.85rem;
-            margin-top: 0.2rem;
-        }
-        .cf-planned-views {
-            display: grid;
-            grid-template-columns: repeat(3, minmax(0, 1fr));
-            gap: 0.45rem;
-            margin: 0.4rem 0 1rem;
-        }
-        .cf-view-chip {
+        [class*="st-key-calcell-muted-"] {
             background: #f8fafc;
-            border: 1px solid var(--cf-border);
-            border-radius: 9px;
-            color: #94a3b8;
+            opacity: 0.55;
+        }
+        [class*="st-key-calcell-today-"] {
+            border-color: #93c5fd !important;
+            background: #f5f9ff;
+        }
+        [class*="st-key-calcell-selected-"] {
+            border-color: #2563eb !important;
+            box-shadow: 0 0 0 1px #2563eb;
+        }
+        [class*="st-key-calcell-"] button {
+            min-height: 1.8rem;
+            padding: 0 0.55rem;
+        }
+        [class*="st-key-calcell-"] [data-testid="stMarkdownContainer"] p {
             font-size: 0.72rem;
-            padding: 0.55rem 0.35rem;
-            text-align: center;
+            line-height: 1.3;
         }
-        .cf-view-chip strong {
-            color: #475569;
-            display: block;
-            font-size: 0.8rem;
-            margin-bottom: 0.08rem;
-        }
-        .cf-view-chip-active {
-            background: var(--cf-primary-soft);
-            border-color: #bfdbfe;
-        }
-        .cf-view-chip-active strong {
-            color: var(--cf-primary);
-        }
-        .cf-progress-slot {
-            align-items: center;
-            background: #f8fafc;
-            border: 1px dashed #cbd5e1;
-            border-radius: 10px;
-            display: flex;
-            justify-content: space-between;
-            margin: 0.2rem 0 0.65rem;
-            padding: 0.65rem 0.75rem;
-        }
-        .cf-progress-slot strong {
-            color: #475569;
-            font-size: 0.82rem;
-        }
-        .cf-progress-slot span {
-            color: #94a3b8;
-            font-size: 0.72rem;
+        [class*="st-key-calcell-"] [data-testid="stMarkdownContainer"] p > span {
+            white-space: normal !important;
+            display: -webkit-box !important;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+            overflow-wrap: anywhere;
         }
         @media (max-width: 900px) {
             [data-testid="stMainBlockContainer"] {
@@ -202,8 +156,7 @@ def _inject_app_styles() -> None:
             }
         }
         </style>
-        """,
-        unsafe_allow_html=True,
+        """
     )
 
 
@@ -221,52 +174,68 @@ def get_store(path: str) -> CaptureStore:
 def main() -> None:
     st.set_page_config(
         page_title="CaptureFlow",
-        page_icon="🗂️",
+        page_icon=":material/stacks:",
         layout="wide",
         initial_sidebar_state="expanded",
     )
     _inject_app_styles()
-    st.title("CaptureFlow")
-    st.caption("A local project continuity assistant for conversations, tasks, calendar, and notes.")
-
     store = get_store(str(database_path()))
-    st.sidebar.markdown(
-        """
-        <div class="cf-sidebar-brand">
-            <div class="cf-sidebar-mark">C</div>
-            <div>
-                <div class="cf-sidebar-name">CaptureFlow</div>
-                <div class="cf-sidebar-tagline">Your local project workspace</div>
+
+    with st.sidebar:
+        st.html(
+            """
+            <div class="cf-brand">
+                <div class="cf-brand-mark">C</div>
+                <div>
+                    <div class="cf-brand-name">CaptureFlow</div>
+                    <div class="cf-brand-tagline">Local project continuity assistant</div>
+                </div>
             </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    page = st.sidebar.radio(
-        "Workspace", ["Chat", "Tracker", "Calendar", "Ideas & Notes"]
-    )
-    st.sidebar.divider()
-    diagnostics_enabled = st.sidebar.toggle(
-        "Diagnostics",
-        value=False,
-        help="Show timing for turns submitted while this switch is enabled.",
-    )
+            """
+        )
+        page = st.radio(
+            "Workspace",
+            PAGES,
+            key=PAGE_SESSION_KEY,
+            format_func=lambda name: f"{PAGE_ICONS[name]}  {name}",
+            label_visibility="collapsed",
+        )
+        selected_id = select_conversation(store) if page in {"Chat", "Tracker"} else None
+        st.space("medium")
+        diagnostics_enabled = st.toggle(
+            "Diagnostics",
+            value=False,
+            key="diagnostics_enabled",
+            help="Show timing for turns submitted while this switch is enabled.",
+        )
+
     if page == "Calendar":
         render_calendar_page(store)
-        return
-    if page == "Ideas & Notes":
+    elif page == "Ideas & Notes":
         render_saved_items_page(store)
-        return
-    with st.sidebar:
-        selected_id = select_conversation(store, show_project_assignment=page != "Tracker")
-    if page == "Tracker":
+    elif selected_id is None:
+        st.title(page)
+        st.info(
+            "This project has no conversations yet. Use **New conversation** in the sidebar to start one.",
+            icon=":material/forum:",
+        )
+    elif page == "Tracker":
         render_tracker_page(store, selected_id)
-        return
-    if page == "Chat":
+    else:
         render_chat_workspace(store, selected_id, diagnostics_enabled)
 
 
-def select_conversation(store: CaptureStore, *, show_project_assignment: bool = True) -> str:
+def _go_to_page(page: str) -> None:
+    st.session_state[PAGE_SESSION_KEY] = page
+
+
+def _open_calendar_day(day: date) -> None:
+    st.session_state[CALENDAR_DAY_KEY] = day
+    st.session_state[CALENDAR_MONTH_KEY] = day.replace(day=1)
+    st.session_state[PAGE_SESSION_KEY] = "Calendar"
+
+
+def select_conversation(store: CaptureStore) -> str | None:
     if "next_sidebar_project_id" in st.session_state:
         st.session_state["sidebar_project_id"] = st.session_state.pop(
             "next_sidebar_project_id"
@@ -300,21 +269,23 @@ def select_conversation(store: CaptureStore, *, show_project_assignment: bool = 
         "Project",
         options=project_options,
         format_func=lambda project_id: (
-            "Unassigned"
+            "Unassigned conversations"
             if project_id is None
             else (
-                f"📁 {project_by_id[project_id].name} · archived"
+                f"{project_by_id[project_id].name} · archived"
                 if project_by_id[project_id].status == "archived"
-                else f"📁 {project_by_id[project_id].name}"
+                else project_by_id[project_id].name
             )
         ),
         key="sidebar_project_id",
     )
 
-    with st.expander("New conversation"):
-        title = st.text_input("Title", key="new_conversation_title")
-        selected_project = (
-            project_by_id.get(selected_project_id) if selected_project_id is not None else None
+    selected_project = (
+        project_by_id.get(selected_project_id) if selected_project_id is not None else None
+    )
+    with st.popover("New conversation", icon=":material/add:", width="stretch"):
+        title = st.text_input(
+            "Title", key="new_conversation_title", placeholder="e.g. Sprint planning"
         )
         can_create = selected_project is None or selected_project.status == "active"
         st.caption(
@@ -324,7 +295,7 @@ def select_conversation(store: CaptureStore, *, show_project_assignment: bool = 
         )
         if not can_create:
             st.caption("Restore this project before adding conversations.")
-        if st.button("Create conversation", disabled=not can_create):
+        if st.button("Create conversation", type="primary", disabled=not can_create):
             try:
                 created = store.save_conversation(Conversation(title=title))
             except ValidationError as error:
@@ -333,7 +304,6 @@ def select_conversation(store: CaptureStore, *, show_project_assignment: bool = 
                 if selected_project_id is not None:
                     store.assign_conversation_project(created.id, selected_project_id)
                 st.session_state["selected_conversation_id"] = created.id
-                st.success(f"Created {created.title}.")
                 st.rerun()
 
     visible_conversations = [
@@ -342,8 +312,8 @@ def select_conversation(store: CaptureStore, *, show_project_assignment: bool = 
         if conversation_project_ids[conversation.id] == selected_project_id
     ]
     if not visible_conversations:
-        st.info("No conversations in this project yet.")
-        st.stop()
+        st.caption("No conversations in this project yet.")
+        return None
 
     title_counts = {
         conversation.title: sum(item.title == conversation.title for item in visible_conversations)
@@ -359,127 +329,154 @@ def select_conversation(store: CaptureStore, *, show_project_assignment: bool = 
             return conversation.title
         return f"{conversation.title} · {conversation.id[:8]}"
 
-    selected_id = st.radio(
+    return st.radio(
         "Conversations",
         options=visible_ids,
         format_func=conversation_label,
         key="selected_conversation_id",
     )
 
-    if show_project_assignment:
-        with st.expander("Conversation project"):
-            current_project = store.get_conversation_project(selected_id)
-            if current_project is not None:
-                st.caption(f"Assigned project: {current_project.name}")
-            else:
-                st.caption("Unassigned: local Calendar and Note recall still work; project tracker features do not.")
-            projects = store.list_projects(statuses=("active",))
-            if not projects:
-                st.info("Create a project from Tracker to assign this conversation.")
-            elif not store.conversation_has_project_turn(selected_id) and not store.list_project_records_for_conversation(selected_id):
-                selected_project_id = st.selectbox(
-                    "Project for this conversation",
-                    options=[None, *[project.id for project in projects]],
-                    index=([None, *[project.id for project in projects]]).index(
-                        current_project.id if current_project else None
-                    ),
-                    format_func=lambda project_id: (
-                        "Unassigned" if project_id is None else next(project.name for project in projects if project.id == project_id)
-                    ),
-                    key=f"conversation-project-{selected_id}",
-                )
-                if selected_project_id is not None and selected_project_id != (current_project.id if current_project else None):
-                    if st.button("Assign project", key=f"assign-conversation-project-{selected_id}"):
-                        store.assign_conversation_project(selected_id, selected_project_id)
-                        st.session_state["next_sidebar_project_id"] = selected_project_id
-                        st.rerun()
-            else:
-                st.caption("Project assignment is locked after the first project turn or tracker record.")
 
-        current_project = store.get_conversation_project(selected_id)
-        if current_project is not None:
-            _render_project_settings(store, current_project, key_prefix="sidebar")
-
-    with st.expander("Conversation settings"):
-        st.warning(
-            "Deleting this conversation also deletes its messages, local events, saved items, "
-            "tracker records, operations, and answer sources."
-        )
-        confirmed = st.checkbox(
-            "I understand this deletes the conversation and its derived data.",
-            key=f"confirm-delete-conversation-{selected_id}",
-        )
+def _render_project_assignment(
+    store: CaptureStore, conversation_id: str, *, key_prefix: str
+) -> None:
+    current_project = store.get_conversation_project(conversation_id)
+    if store.conversation_has_project_turn(conversation_id) or store.list_project_records_for_conversation(
+        conversation_id
+    ):
+        st.caption("Project assignment is locked after the first project turn or tracker record.")
+        return
+    projects = store.list_projects(statuses=("active",))
+    if not projects:
+        st.caption("No active projects yet. Create one to link this conversation.")
+        return
+    options = [None, *[project.id for project in projects]]
+    names = {project.id: project.name for project in projects}
+    current_id = current_project.id if current_project else None
+    chosen_id = st.selectbox(
+        "Project for this conversation",
+        options=options,
+        index=options.index(current_id) if current_id in options else 0,
+        format_func=lambda project_id: "Unassigned" if project_id is None else names[project_id],
+        key=f"{key_prefix}-conversation-project-{conversation_id}",
+    )
+    if chosen_id is not None and chosen_id != current_id:
         if st.button(
-            "Delete conversation",
-            key=f"delete-conversation-{selected_id}",
-            disabled=not confirmed,
+            "Link project",
+            type="primary",
+            icon=":material/link:",
+            key=f"{key_prefix}-assign-conversation-project-{conversation_id}",
         ):
-            store.delete_conversation(selected_id)
+            try:
+                store.assign_conversation_project(conversation_id, chosen_id)
+            except ValueError as error:
+                st.error(str(error))
+            else:
+                st.session_state["next_sidebar_project_id"] = chosen_id
+                st.rerun()
+
+
+def _render_create_project(
+    store: CaptureStore, *, key_prefix: str, conversation_id: str | None = None
+) -> None:
+    with st.popover("New project", icon=":material/create_new_folder:"):
+        name = st.text_input("Project name", key=f"{key_prefix}-new-project-name")
+        description = st.text_area(
+            "Description (optional)", key=f"{key_prefix}-new-project-description"
+        )
+        if st.button("Create project", type="primary", key=f"{key_prefix}-create-project"):
+            try:
+                project = store.save_project(Project(name=name, description=description or None))
+            except ValidationError as error:
+                st.error(_validation_message(error))
+                return
+            if conversation_id is not None and store.get_conversation_project(conversation_id) is None:
+                try:
+                    store.assign_conversation_project(conversation_id, project.id)
+                except ValueError:
+                    pass
+                else:
+                    st.session_state["next_sidebar_project_id"] = project.id
             st.rerun()
-    return selected_id
 
 
 def _render_project_settings(
     store: CaptureStore, project: Project, *, key_prefix: str
 ) -> None:
-    with st.expander("Project settings"):
-        name = st.text_input(
-            "Project name",
-            value=project.name,
-            key=f"{key_prefix}-project-name-{project.id}",
-        )
-        description = st.text_area(
-            "Project description",
-            value=project.description or "",
-            key=f"{key_prefix}-project-description-{project.id}",
-        )
-        if st.button("Save project", key=f"{key_prefix}-save-project-{project.id}"):
+    name = st.text_input(
+        "Project name",
+        value=project.name,
+        key=f"{key_prefix}-project-name-{project.id}",
+    )
+    description = st.text_area(
+        "Project description",
+        value=project.description or "",
+        key=f"{key_prefix}-project-description-{project.id}",
+    )
+    with st.container(horizontal=True):
+        if st.button("Save project", type="primary", key=f"{key_prefix}-save-project-{project.id}"):
             try:
                 store.update_project(project.id, name=name, description=description or None)
             except ValidationError as error:
                 st.error(_validation_message(error))
             else:
                 st.rerun()
-
-        st.warning(
-            "Deleting this project removes its tracker records and project audit history. "
-            "Conversations, messages, calendar events, ideas, and notes are retained as unassigned."
-        )
-        confirmed = st.checkbox(
-            "I understand what project deletion removes.",
-            key=f"{key_prefix}-confirm-delete-project-{project.id}",
-        )
-        if st.button(
-            "Delete project",
-            key=f"{key_prefix}-delete-project-{project.id}",
-            disabled=not confirmed,
+        if project.status == "active":
+            if st.button(
+                "Archive",
+                icon=":material/archive:",
+                key=f"{key_prefix}-archive-project-{project.id}",
+            ):
+                store.set_project_status(project.id, "archived")
+                st.rerun()
+        elif st.button(
+            "Restore",
+            icon=":material/unarchive:",
+            key=f"{key_prefix}-restore-project-{project.id}",
         ):
-            store.delete_project(project.id)
-            st.session_state["next_sidebar_project_id"] = None
+            store.set_project_status(project.id, "active")
             st.rerun()
+
+    st.space("small")
+    st.caption(
+        "Deleting removes tracker records and project audit history. Conversations, messages, "
+        "calendar events, ideas, and notes are kept as unassigned."
+    )
+    confirmed = st.checkbox(
+        "I understand what project deletion removes.",
+        key=f"{key_prefix}-confirm-delete-project-{project.id}",
+    )
+    if st.button(
+        "Delete project",
+        icon=":material/delete:",
+        key=f"{key_prefix}-delete-project-{project.id}",
+        disabled=not confirmed,
+    ):
+        store.delete_project(project.id)
+        st.session_state["next_sidebar_project_id"] = None
+        st.rerun()
 
 
 def render_chat_workspace(
     store: CaptureStore, conversation_id: str, diagnostics_enabled: bool = False
 ) -> None:
     current_project = store.get_conversation_project(conversation_id)
-    project_name = current_project.name if current_project is not None else "Unassigned workspace"
-    project_copy = (
-        current_project.description
-        if current_project is not None and current_project.description
-        else "Conversation, project state, calendar, and notes in one local workspace."
-    )
-    st.markdown(
-        f"""
-        <div class="cf-workspace-header">
-            <div class="cf-workspace-kicker">Project workspace</div>
-            <div class="cf-workspace-title">{escape(project_name)}</div>
-            <div class="cf-workspace-copy">{escape(project_copy)}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    chat_column, snapshot_column = st.columns([1.75, 1], gap="large")
+    conversation = store.get_conversation(conversation_id)
+    with st.container(horizontal=True, vertical_alignment="bottom"):
+        with st.container(gap=None):
+            st.caption(
+                f":material/folder: {current_project.name}"
+                if current_project is not None
+                else ":material/folder_off: Unassigned conversation"
+            )
+            st.title(conversation.title)
+        if current_project is not None:
+            with st.popover("Project", icon=":material/folder:"):
+                _render_project_settings(store, current_project, key_prefix="chat")
+        with st.popover("Conversation", icon=":material/tune:"):
+            _render_conversation_settings(store, conversation_id, current_project)
+
+    chat_column, snapshot_column = st.columns([1.5, 1], gap="medium")
     with chat_column:
         render_chat_page(store, conversation_id, diagnostics_enabled)
     with snapshot_column:
@@ -487,17 +484,51 @@ def render_chat_workspace(
     render_chat_input(store, conversation_id, diagnostics_enabled)
 
 
+def _render_conversation_settings(
+    store: CaptureStore, conversation_id: str, current_project: Project | None
+) -> None:
+    if current_project is not None:
+        st.markdown("**Project link**")
+        _render_project_assignment(store, conversation_id, key_prefix="manage")
+        st.space("small")
+    st.markdown("**Delete conversation**")
+    st.caption(
+        "Also deletes its messages, local events, saved items, tracker records, operations, "
+        "and answer sources."
+    )
+    confirmed = st.checkbox(
+        "I understand this deletes the conversation and its derived data.",
+        key=f"confirm-delete-conversation-{conversation_id}",
+    )
+    if st.button(
+        "Delete conversation",
+        icon=":material/delete:",
+        key=f"delete-conversation-{conversation_id}",
+        disabled=not confirmed,
+    ):
+        store.delete_conversation(conversation_id)
+        st.rerun()
+
+
+def _close_record(store: CaptureStore, record_id: str, state: str) -> None:
+    store.transition_project_record(record_id, state)
+
+
 def render_project_snapshot(store: CaptureStore, conversation_id: str) -> None:
     current_project = store.get_conversation_project(conversation_id)
-    with st.container(border=True):
+    with st.container(border=True, height=WORKSPACE_PANEL_HEIGHT, key="project-snapshot"):
         st.subheader("Project snapshot")
-        st.caption("A read-only view of locally grounded project context.")
-        _render_planned_project_views()
         if current_project is None:
-            st.info("Assign this conversation to a project to activate the snapshot.")
+            st.caption(
+                "Link this conversation to a project to track its tasks, blockers, and deadlines here."
+            )
+            _render_project_assignment(store, conversation_id, key_prefix="snapshot")
+            _render_create_project(store, key_prefix="snapshot", conversation_id=conversation_id)
             return
+        if current_project.description:
+            st.caption(current_project.description)
 
-        conversation_ids = {
+        project_conversation_ids = {
             conversation.id
             for conversation in store.list_conversations()
             if (
@@ -509,95 +540,133 @@ def render_project_snapshot(store: CaptureStore, conversation_id: str) -> None:
             current_project.id,
             states=("active", "completed", "resolved", "superseded"),
         )
-        active_tasks = [
-            record for record in records if record.kind == "task" and record.state == "active"
-        ]
-        completed_tasks = [
-            record for record in records if record.kind == "task" and record.state == "completed"
-        ]
+        tasks = [record for record in records if record.kind == "task"]
+        completed_tasks = [record for record in tasks if record.state == "completed"]
+        active_tasks = [record for record in tasks if record.state == "active"]
         active_blockers = [
             record for record in records if record.kind == "blocker" and record.state == "active"
         ]
+        st.progress(
+            len(completed_tasks) / len(tasks) if tasks else 0.0,
+            text=(
+                f"{len(completed_tasks)} of {len(tasks)} tasks done"
+                if tasks
+                else "No tasks tracked yet"
+            ),
+        )
         active_metric, completed_metric, blocker_metric = st.columns(3)
         active_metric.metric("Active", len(active_tasks))
         completed_metric.metric("Done", len(completed_tasks))
         blocker_metric.metric("Blockers", len(active_blockers))
 
         reference_date = configured_reference_date(configured_timezone())
-        upcoming_events = [
-            event
-            for event in store.list_calendar_events()
-            if event.conversation_id in conversation_ids
-            and event.start_date >= reference_date
-        ]
-        upcoming_deadlines = [
-            deadline
-            for deadline in store.list_task_deadlines()
-            if deadline.project_id == current_project.id
-            and _day_of(deadline.due_at) >= reference_date
-        ]
-        upcoming = sorted(
-            [(event.start_date, event) for event in upcoming_events]
-            + [(_day_of(deadline.due_at), deadline) for deadline in upcoming_deadlines],
-            key=lambda entry: entry[0],
-        )[:3]
-        st.markdown("#### Upcoming")
-        if not upcoming:
-            st.caption("No upcoming project events or deadlines.")
-        for _, entry in upcoming:
-            with st.container(border=True):
+        upcoming = _upcoming_entries(
+            store,
+            reference_date,
+            conversation_ids=project_conversation_ids,
+            project_id=current_project.id,
+        )[:5]
+        open_work = sorted(
+            (record for record in records if record.state == "active" and record.kind != "milestone"),
+            key=lambda record: (record.kind != "blocker", record.kind != "task"),
+        )
+        notes = store.list_saved_items_for_project(current_project.id)[:5]
+
+        work_tab, upcoming_tab, notes_tab = st.tabs(
+            [f"Open work ({len(open_work)})", f"Upcoming ({len(upcoming)})", f"Notes ({len(notes)})"]
+        )
+
+        with work_tab:
+            if not open_work:
+                st.caption("Nothing open. New tasks and blockers from chat appear here.")
+            for record in open_work[:6]:
+                _render_snapshot_record(store, record)
+            if len(open_work) > 6:
+                st.caption(f"+{len(open_work) - 6} more in Tracker")
+            st.button(
+                "Open tracker",
+                icon=":material/arrow_forward:",
+                type="tertiary",
+                key="snapshot-open-tracker",
+                on_click=_go_to_page,
+                args=("Tracker",),
+            )
+        with upcoming_tab:
+            if not upcoming:
+                st.caption("No upcoming project events or deadlines.")
+            for day, entry in upcoming:
                 if isinstance(entry, ProjectRecord):
-                    st.caption(f"Due {_format_due_at(entry.due_at)} · deadline")
-                    st.markdown(f"**{entry.content}**")
-                    continue
-                st.caption(_format_calendar_timing(entry.start_at, entry.end_at))
-                st.markdown(f"**{entry.title}**")
-                if entry.description:
-                    st.caption(entry.description)
-
-        active_context = [
-            record
-            for record in records
-            if record.state == "active"
-            and record.kind in {"blocker", "task", "open_question", "decision", "constraint"}
-        ][:4]
-        st.markdown("#### Active work")
-        if not active_context:
-            st.caption("No active project records.")
-        for record in active_context:
-            with st.container(border=True):
-                st.caption(record.kind.replace("_", " ").title())
-                st.markdown(record.content)
-
-        recent_items = [
-            item
-            for item in store.list_saved_items()
-            if item.conversation_id in conversation_ids
-        ][:3]
-        st.markdown("#### Recent ideas & notes")
-        if not recent_items:
-            st.caption("No project ideas or notes yet.")
-        for item in recent_items:
-            with st.container(border=True):
-                st.caption(item.kind.title())
-                st.markdown(item.content)
+                    st.caption(f":orange[:material/flag: Due {_format_due_at(entry.due_at)}]")
+                    label, icon = entry.content, ":material/task_alt:"
+                else:
+                    st.caption(
+                        f":blue[:material/event: {_format_calendar_timing(entry.start_at, entry.end_at)}]"
+                    )
+                    label, icon = entry.title, ":material/calendar_month:"
+                st.button(
+                    label,
+                    icon=icon,
+                    type="tertiary",
+                    help="Open this day in Calendar",
+                    key=f"snapshot-open-day-{entry.id}",
+                    on_click=_open_calendar_day,
+                    args=(day,),
+                )
+        with notes_tab:
+            if not notes:
+                st.caption("No project ideas or notes yet.")
+            for item in notes:
+                color = "violet" if item.kind == "idea" else "gray"
+                st.markdown(f":{color}-badge[{item.kind.title()}] {item.content}")
+            st.button(
+                "Open ideas & notes",
+                icon=":material/arrow_forward:",
+                type="tertiary",
+                key="snapshot-open-notes",
+                on_click=_go_to_page,
+                args=("Ideas & Notes",),
+            )
 
 
-def _render_planned_project_views() -> None:
-    st.markdown(
-        """
-        <div class="cf-progress-slot">
-            <strong>Project progress</strong>
-            <span>Planned</span>
-        </div>
-        <div class="cf-planned-views">
-            <div class="cf-view-chip cf-view-chip-active"><strong>All</strong>Current view</div>
-            <div class="cf-view-chip"><strong>Today</strong>Planned</div>
-            <div class="cf-view-chip"><strong>Priority</strong>Planned</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
+def _render_snapshot_record(store: CaptureStore, record: ProjectRecord) -> None:
+    name, color, icon = KIND_STYLES[record.kind]
+    label = record.content if record.kind == "task" else f":{color}-badge[{icon} {name}] {record.content}"
+    if record.due_at is not None:
+        label += f"  :orange-badge[Due {_format_due_at(record.due_at)}]"
+    closing_state = {"task": "completed", "blocker": "resolved", "open_question": "resolved"}.get(
+        record.kind
     )
+    if closing_state is None:
+        st.markdown(label)
+        return
+    st.checkbox(
+        label,
+        key=f"snapshot-close-{record.id}",
+        on_change=_close_record,
+        args=(store, record.id, closing_state),
+    )
+
+
+def _upcoming_entries(
+    store: CaptureStore,
+    from_day: date,
+    *,
+    conversation_ids: set[str] | None = None,
+    project_id: str | None = None,
+) -> list[tuple[date, CalendarEvent | ProjectRecord]]:
+    events = [
+        (event.start_date, event)
+        for event in store.list_calendar_events()
+        if event.start_date >= from_day
+        and (conversation_ids is None or event.conversation_id in conversation_ids)
+    ]
+    deadlines = [
+        (_day_of(record.due_at), record)
+        for record in store.list_task_deadlines()
+        if _day_of(record.due_at) >= from_day
+        and (project_id is None or record.project_id == project_id)
+    ]
+    return sorted(events + deadlines, key=lambda entry: entry[0])
 
 
 def _day_of(moment: date | datetime) -> date:
@@ -624,31 +693,64 @@ def _format_calendar_timing(start_at: date | datetime, end_at: datetime | None) 
     return timing
 
 
+def _format_time_of_day(event: CalendarEvent) -> str:
+    if not isinstance(event.start_at, datetime):
+        return "All day"
+    timing = event.start_at.strftime("%H:%M")
+    if event.end_at is not None:
+        timing += f"–{event.end_at.strftime('%H:%M')}"
+    return timing
+
+
+def _format_timestamp(moment: datetime) -> str:
+    try:
+        moment = moment.astimezone(ZoneInfo(configured_timezone()))
+    except (ValueError, KeyError):
+        pass
+    return moment.strftime("%b %d, %H:%M")
+
+
+def _badge_text(text: str, limit: int) -> str:
+    text = " ".join(text.split()).replace("[", "(").replace("]", ")")
+    return text if len(text) <= limit else f"{text[: limit - 1]}…"
+
+
 def render_chat_page(
     store: CaptureStore, conversation_id: str, diagnostics_enabled: bool = False
 ) -> None:
-    st.subheader("Chat")
-    st.caption(
-        "Grounded in recent conversation context and locally stored project records."
-    )
     timezone = configured_timezone()
     local_service = DeterministicChatService(store, timezone)
-    for message in store.list_messages(conversation_id):
-        with st.chat_message(message.role):
-            st.write(message.content)
-            if message.role == "assistant" and message.reply_to_message_id:
-                for operation in store.list_tool_operations(message.reply_to_message_id):
-                    _render_operation_card(local_service, operation.id)
-                for operation in store.list_calendar_event_update_operations(
-                    message.reply_to_message_id
-                ):
-                    _render_calendar_update_card(local_service, operation.id)
-                for operation in store.list_project_change_operations(message.reply_to_message_id):
-                    _render_project_change_card(store, operation.id)
-                _render_project_answer_sources(store, message.id)
-                _render_local_context_answer_sources(store, message.id)
-                if diagnostics_enabled:
-                    _render_turn_diagnostics(message.reply_to_message_id)
+    messages = store.list_messages(conversation_id)
+    with st.container(height=WORKSPACE_PANEL_HEIGHT, autoscroll=True, key="chat-timeline"):
+        if not messages:
+            with st.container(horizontal_alignment="center"):
+                st.space("large")
+                st.markdown("### :material/forum: Start the conversation")
+                st.caption(
+                    "Describe what you're working on. Meetings become calendar events, "
+                    "and project updates become tracker records you can review."
+                )
+                st.caption(
+                    "Shortcuts: `/event 2026-09-20 | Title` · `/idea …` · `/note …`"
+                )
+        for message in messages:
+            with st.chat_message(message.role):
+                st.write(message.content)
+                if message.role == "assistant" and message.reply_to_message_id:
+                    for operation in store.list_tool_operations(message.reply_to_message_id):
+                        _render_operation_card(local_service, operation.id)
+                    for operation in store.list_calendar_event_update_operations(
+                        message.reply_to_message_id
+                    ):
+                        _render_calendar_update_card(local_service, operation.id)
+                    for operation in store.list_project_change_operations(
+                        message.reply_to_message_id
+                    ):
+                        _render_project_change_card(store, operation.id)
+                    _render_project_answer_sources(store, message.id)
+                    _render_local_context_answer_sources(store, message.id)
+                    if diagnostics_enabled:
+                        _render_turn_diagnostics(message.reply_to_message_id)
 
 
 def render_chat_input(
@@ -735,7 +837,7 @@ def _render_turn_diagnostics(message_id: str) -> None:
     diagnostics = st.session_state.get(DIAGNOSTICS_SESSION_KEY, {}).get(message_id)
     if diagnostics is None:
         return
-    with st.expander(f"Diagnostics · {message_id[:8]}"):
+    with st.expander(f"Diagnostics · {message_id[:8]}", icon=":material/monitoring:"):
         st.caption(
             f"Mode: {diagnostics['mode']} · Outcome: {diagnostics['outcome']} · "
             f"Model calls: {diagnostics['model_calls']}"
@@ -762,12 +864,19 @@ def _render_turn_diagnostics(message_id: str) -> None:
         st.caption("Session-only timing; prompts, raw model output, and credentials are not stored.")
 
 
+def _status_badge(status: str) -> str:
+    return STATUS_BADGES.get(status, f":blue-badge[{status}]")
+
+
 def _render_operation_card(service: DeterministicChatService, operation_id: str) -> None:
     operation = service.store.get_tool_operation(operation_id)
-    with st.container(border=True):
-        st.caption(f"Local action: {operation.tool_name}; status: {operation.status}")
+    label, icon = TOOL_LABELS.get(
+        operation.tool_name, (operation.tool_name.replace("_", " ").capitalize(), ":material/bolt:")
+    )
+    with st.container(border=True, horizontal=True, vertical_alignment="center"):
+        st.markdown(f"{icon} **{label}** saved locally  {_status_badge(operation.status)}")
         if operation.status == "committed" and st.button(
-            "Undo", key=f"undo-operation-{operation.id}"
+            "Undo", icon=":material/undo:", type="tertiary", key=f"undo-operation-{operation.id}"
         ):
             service.undo(operation.id)
             st.rerun()
@@ -776,59 +885,87 @@ def _render_operation_card(service: DeterministicChatService, operation_id: str)
 def _render_calendar_update_card(service: DeterministicChatService, operation_id: str) -> None:
     operation = service.store.get_calendar_event_update_operation(operation_id)
     deleted = operation.after.status == "deleted"
-    label = "Local calendar deletion" if deleted else "Local calendar update"
+    label = "Delete event" if deleted else "Update event"
     with st.container(border=True):
-        st.caption(f"{label}: {operation.after.title}; status: {operation.status}")
-        if operation.status == "committed" and st.button(
-            "Undo calendar deletion" if deleted else "Undo calendar update",
-            key=f"undo-calendar-update-{operation.id}",
-        ):
-            service.undo(operation.id)
-            st.rerun()
-        if operation.status == "review":
-            confirm, keep = st.columns(2)
-            if confirm.button("Delete", key=f"confirm-calendar-update-{operation.id}"):
-                try:
-                    service.store.approve_calendar_event_update(operation.id)
-                except (KeyError, ValueError) as error:
-                    st.error(str(error))
-                else:
-                    st.rerun()
-            if keep.button("Keep", key=f"keep-calendar-update-{operation.id}"):
-                service.store.reject_calendar_event_update(operation.id)
+        with st.container(horizontal=True, vertical_alignment="center"):
+            st.markdown(
+                f":material/event: **{label}** · {operation.after.title}  {_status_badge(operation.status)}"
+            )
+            if operation.status == "committed" and st.button(
+                "Undo",
+                icon=":material/undo:",
+                type="tertiary",
+                key=f"undo-calendar-update-{operation.id}",
+            ):
+                service.undo(operation.id)
                 st.rerun()
+        if operation.status == "review":
+            with st.container(horizontal=True):
+                if st.button(
+                    "Delete",
+                    type="primary",
+                    icon=":material/delete:",
+                    key=f"confirm-calendar-update-{operation.id}",
+                ):
+                    try:
+                        service.store.approve_calendar_event_update(operation.id)
+                    except (KeyError, ValueError) as error:
+                        st.error(str(error))
+                    else:
+                        st.rerun()
+                if st.button("Keep", key=f"keep-calendar-update-{operation.id}"):
+                    service.store.reject_calendar_event_update(operation.id)
+                    st.rerun()
         if operation.status == "failed" and operation.error:
             st.caption(f"Not applied: {operation.error}")
 
 
 def _render_project_change_card(store: CaptureStore, operation_id: str) -> None:
     operation = store.get_project_change_operation(operation_id)
+    action = operation.change["action"].replace("_", " ").capitalize()
+    kind = operation.change.get("kind")
     with st.container(border=True):
-        st.caption(
-            f"Project change: {operation.change['action'].replace('_', ' ')}; "
-            f"status: {operation.status}"
-        )
-        if operation.status == "committed" and st.button(
-            "Undo tracker change", key=f"undo-project-change-{operation.id}"
-        ):
-            try:
-                store.undo_project_change_operation(operation.id)
-            except ValueError as error:
-                st.error(str(error))
-            else:
-                st.rerun()
-        if operation.status == "review":
-            approve, reject = st.columns(2)
-            if approve.button("Approve tracker change", key=f"approve-project-change-{operation.id}"):
+        with st.container(horizontal=True, vertical_alignment="center"):
+            badge = ""
+            if kind in KIND_STYLES:
+                name, color, icon = KIND_STYLES[kind]
+                badge = f":{color}-badge[{icon} {name}] "
+            st.markdown(
+                f":material/view_kanban: **Tracker · {action}**  {badge}{_status_badge(operation.status)}"
+            )
+            if operation.status == "committed" and st.button(
+                "Undo",
+                icon=":material/undo:",
+                type="tertiary",
+                key=f"undo-project-change-{operation.id}",
+            ):
                 try:
-                    store.approve_project_change_operation(operation.id)
-                except (KeyError, ValueError) as error:
+                    store.undo_project_change_operation(operation.id)
+                except ValueError as error:
                     st.error(str(error))
                 else:
                     st.rerun()
-            if reject.button("Reject tracker change", key=f"reject-project-change-{operation.id}"):
-                store.reject_project_change_operation(operation.id)
-                st.rerun()
+        if content := operation.change.get("content"):
+            st.caption(content)
+        if operation.status == "review":
+            with st.container(horizontal=True):
+                if st.button(
+                    "Approve",
+                    type="primary",
+                    icon=":material/check:",
+                    key=f"approve-project-change-{operation.id}",
+                ):
+                    try:
+                        store.approve_project_change_operation(operation.id)
+                    except (KeyError, ValueError) as error:
+                        st.error(str(error))
+                    else:
+                        st.rerun()
+                if st.button(
+                    "Reject", icon=":material/close:", key=f"reject-project-change-{operation.id}"
+                ):
+                    store.reject_project_change_operation(operation.id)
+                    st.rerun()
         if operation.status == "failed" and operation.error:
             st.caption(f"Not applied: {operation.error}")
 
@@ -837,10 +974,11 @@ def _render_project_answer_sources(store: CaptureStore, assistant_message_id: st
     records = store.list_project_answer_sources(assistant_message_id)
     if not records:
         return
-    with st.container(border=True):
+    with st.expander(f"Sources ({len(records)})", icon=":material/link:"):
         st.caption("Project answer sources")
         for record in records:
-            st.markdown(f"**{record.kind} · {record.state}:** {record.content}")
+            name, color, icon = KIND_STYLES[record.kind]
+            st.markdown(f":{color}-badge[{icon} {name} · {record.state}] {record.content}")
             st.caption(f"Source: “{record.source_quote}”")
 
 
@@ -848,7 +986,7 @@ def _render_local_context_answer_sources(store: CaptureStore, assistant_message_
     sources = store.list_local_context_answer_sources(assistant_message_id)
     if not sources:
         return
-    with st.container(border=True):
+    with st.expander(f"Sources ({len(sources)})", icon=":material/link:"):
         st.caption("Local context sources")
         for source in sources:
             st.markdown(f"**{source.label}:** {source.content}")
@@ -858,171 +996,205 @@ def _render_local_context_answer_sources(store: CaptureStore, assistant_message_
 def render_tracker_page(store: CaptureStore, conversation_id: str) -> None:
     """Manage persisted project state and source-grounded records."""
 
-    st.subheader("Project Tracker")
-    st.caption(
-        "Records are grounded in chat messages, and every lifecycle change is retained locally."
-    )
     current_project = store.get_conversation_project(conversation_id)
-    projects = store.list_projects(statuses=("active", "archived"))
-
-    with st.expander("Create project"):
-        name = st.text_input("Project name", key="new-project-name")
-        description = st.text_area("Description (optional)", key="new-project-description")
-        if st.button("Create project", key="create-project"):
-            try:
-                project = store.save_project(Project(name=name, description=description or None))
-            except ValidationError as error:
-                st.error(error.errors()[0]["msg"])
-            else:
-                st.session_state["tracker-project-choice"] = project.id
-                st.success(f"Created {project.name}.")
-                st.rerun()
-
-    project_ids = [None, *[project.id for project in projects]]
-    selected_project_id = st.selectbox(
-        "Project for this conversation",
-        options=project_ids,
-        index=project_ids.index(current_project.id) if current_project else 0,
-        format_func=lambda project_id: (
-            "Unassigned"
-            if project_id is None
-            else next(project.name for project in projects if project.id == project_id)
-        ),
-        key="tracker-project-choice",
-    )
-    if selected_project_id and (
-        current_project is None or selected_project_id != current_project.id
-    ):
-        if st.button("Assign project", key="assign-conversation-project"):
-            try:
-                current_project = store.assign_conversation_project(conversation_id, selected_project_id)
-            except ValueError as error:
-                st.error(str(error))
-            else:
-                st.session_state["next_sidebar_project_id"] = current_project.id
-                st.success(f"Conversation assigned to {current_project.name}.")
-                st.rerun()
-
     if current_project is None:
-        st.info("Create or assign a project before adding tracker records.")
+        st.title("Tracker")
+        with st.container(border=True):
+            st.subheader("No project linked")
+            st.caption(
+                "Tasks, blockers, questions, and decisions are tracked per project. "
+                "Link this conversation to a project or create a new one."
+            )
+            _render_project_assignment(store, conversation_id, key_prefix="tracker")
+            _render_create_project(store, key_prefix="tracker", conversation_id=conversation_id)
         return
 
-    st.markdown(f"### {current_project.name}")
-    if current_project.description:
-        st.caption(current_project.description)
-    st.caption(f"Project status: {current_project.status}")
-    _render_project_settings(store, current_project, key_prefix="tracker")
-    if current_project.status == "active":
-        if st.button("Archive project", key=f"archive-project-{current_project.id}"):
-            store.set_project_status(current_project.id, "archived")
-            st.rerun()
-    elif st.button("Restore project", key=f"restore-project-{current_project.id}"):
-        store.set_project_status(current_project.id, "active")
-        st.rerun()
-
-    user_messages = [
-        message for message in store.list_messages(conversation_id) if message.role == "user"
-    ]
-    if current_project.status == "active":
-        with st.expander("Add source-grounded record"):
-            if not user_messages:
-                st.info("Send a chat message first; tracker records require an explicit user source.")
-            else:
-                source_id = st.selectbox(
-                    "Source user message",
-                    options=[message.id for message in user_messages],
-                    format_func=lambda message_id: store.get_message(message_id).content,
-                    key="tracker-source-message",
-                )
-                kind = st.selectbox(
-                    "Record type",
-                    ["task", "milestone", "decision", "constraint", "open_question", "blocker"],
-                    key="tracker-record-kind",
-                )
-                content = st.text_area("Tracker text", key="tracker-record-content")
-                source_message = store.get_message(source_id)
-                source_quote = st.text_area(
-                    "Exact source quote",
-                    value=source_message.content,
-                    key=f"tracker-source-quote-{source_id}",
-                )
-                if st.button("Add tracker record", key="add-tracker-record"):
-                    initial_state = "completed" if kind == "milestone" else "active"
-                    try:
-                        store.save_project_record(
-                            ProjectRecord(
-                                project_id=current_project.id,
-                                conversation_id=conversation_id,
-                                kind=kind,
-                                content=content,
-                                state=initial_state,
-                                source_message_id=source_id,
-                                source_quote=source_quote,
-                            )
-                        )
-                    except (ValidationError, ValueError) as error:
-                        st.error(_validation_message(error))
-                    else:
-                        st.rerun()
+    with st.container(horizontal=True, vertical_alignment="bottom"):
+        with st.container(gap=None):
+            st.caption(":material/view_kanban: Project tracker")
+            st.title(current_project.name)
+        if current_project.status == "active":
+            with st.popover("Add record", icon=":material/add:"):
+                _render_add_record_form(store, current_project, conversation_id)
+        with st.popover("Settings", icon=":material/settings:"):
+            _render_project_settings(store, current_project, key_prefix="tracker")
+        _render_create_project(store, key_prefix="tracker")
+    with st.container(horizontal=True, vertical_alignment="center"):
+        if current_project.status == "archived":
+            st.badge("Archived", icon=":material/archive:", color="gray")
+        else:
+            st.badge("Active", icon=":material/radio_button_checked:", color="green")
+        if current_project.description:
+            st.caption(current_project.description)
 
     records = store.list_project_records(
         current_project.id,
         states=("active", "completed", "resolved", "superseded", "deleted"),
     )
-    active_records = [record for record in records if record.state != "deleted"]
-    if not active_records:
-        st.info("No project records yet.")
-    for record in active_records:
-        _render_project_record(store, record)
+    live_records = [record for record in records if record.state != "deleted"]
+    tasks = [record for record in live_records if record.kind == "task"]
+    done_tasks = [record for record in tasks if record.state == "completed"]
+
+    def open_count(*kinds: str) -> int:
+        return sum(record.kind in kinds and record.state == "active" for record in live_records)
+
+    open_metric, done_metric, blocker_metric, question_metric = st.columns(4)
+    open_metric.metric("Open tasks", open_count("task"), border=True)
+    done_metric.metric("Completed", len(done_tasks), border=True)
+    blocker_metric.metric("Blockers", open_count("blocker"), border=True)
+    question_metric.metric("Open questions", open_count("open_question"), border=True)
+    if tasks:
+        st.progress(
+            len(done_tasks) / len(tasks), text=f"{len(done_tasks)} of {len(tasks)} tasks completed"
+        )
+
+    tab_labels = [
+        f"{icon} {name} ({open_count(*kinds)})" for name, icon, kinds in TRACKER_GROUPS
+    ]
+    for tab, (name, _, kinds) in zip(st.tabs(tab_labels), TRACKER_GROUPS):
+        with tab:
+            _render_record_group(
+                store, [record for record in live_records if record.kind in kinds], name
+            )
 
     deleted_records = [record for record in records if record.state == "deleted"]
     if deleted_records:
-        with st.expander(f"Deleted tracker records ({len(deleted_records)})"):
+        with st.expander(f"Deleted records ({len(deleted_records)})", icon=":material/delete:"):
             for record in deleted_records:
-                with st.container(border=True):
-                    st.markdown(f"**{record.kind}:** {record.content}")
-                    if st.button("Restore record", key=f"restore-project-record-{record.id}"):
+                name, color, icon = KIND_STYLES[record.kind]
+                with st.container(horizontal=True, vertical_alignment="center"):
+                    st.markdown(f":{color}-badge[{icon} {name}] {record.content}")
+                    if st.button(
+                        "Restore",
+                        icon=":material/restore:",
+                        type="tertiary",
+                        key=f"restore-project-record-{record.id}",
+                    ):
                         store.restore_project_record(record.id)
                         st.rerun()
 
 
-def _render_project_record(store: CaptureStore, record: ProjectRecord) -> None:
-    with st.container(border=True):
-        st.markdown(f"**{record.kind} · {record.state}**")
-        content = st.text_area(
-            "Tracker text", value=record.content, key=f"project-record-content-{record.id}", height=80
-        )
-        rationale = st.text_input(
-            "Rationale", value=record.rationale or "", key=f"project-record-rationale-{record.id}"
-        )
-        if st.button("Save record", key=f"save-project-record-{record.id}"):
-            try:
-                store.update_project_record(record.id, content=content, rationale=rationale or None)
-            except (ValidationError, ValueError) as error:
-                st.error(_validation_message(error))
-            else:
-                st.rerun()
-        st.caption(f"Source: {record.source_quote}")
-        st.caption(f"Updated {record.updated_at.isoformat()}")
-        if record.state == "active":
-            transition = {
-                "task": ("completed", "Complete task"),
-                "open_question": ("resolved", "Resolve question"),
-                "blocker": ("resolved", "Resolve blocker"),
-                "decision": ("superseded", "Supersede decision"),
-                "constraint": ("superseded", "Supersede constraint"),
-            }.get(record.kind)
-            if transition and st.button(transition[1], key=f"transition-project-record-{record.id}"):
-                store.transition_project_record(record.id, transition[0])
-                st.rerun()
-        if st.button("Delete record", key=f"delete-project-record-{record.id}"):
-            store.delete_project_record(record.id)
+def _render_add_record_form(
+    store: CaptureStore, project: Project, conversation_id: str
+) -> None:
+    user_messages = [
+        message for message in store.list_messages(conversation_id) if message.role == "user"
+    ]
+    if not user_messages:
+        st.caption("Send a chat message first; tracker records require an explicit user source.")
+        return
+    source_id = st.selectbox(
+        "Source user message",
+        options=[message.id for message in user_messages],
+        format_func=lambda message_id: _badge_text(store.get_message(message_id).content, 80),
+        key="tracker-source-message",
+    )
+    kind = st.selectbox(
+        "Record type",
+        list(KIND_STYLES),
+        format_func=lambda value: KIND_STYLES[value][0],
+        key="tracker-record-kind",
+    )
+    content = st.text_area("Tracker text", key="tracker-record-content")
+    source_message = store.get_message(source_id)
+    source_quote = st.text_area(
+        "Exact source quote",
+        value=source_message.content,
+        key=f"tracker-source-quote-{source_id}",
+    )
+    if st.button("Add tracker record", type="primary", key="add-tracker-record"):
+        try:
+            store.save_project_record(
+                ProjectRecord(
+                    project_id=project.id,
+                    conversation_id=conversation_id,
+                    kind=kind,
+                    content=content,
+                    state="completed" if kind == "milestone" else "active",
+                    source_message_id=source_id,
+                    source_quote=source_quote,
+                )
+            )
+        except (ValidationError, ValueError) as error:
+            st.error(_validation_message(error))
+        else:
             st.rerun()
-        events = store.list_project_record_events(record.id)
-        with st.expander(f"History ({len(events)})"):
+
+
+def _render_record_group(store: CaptureStore, records: list[ProjectRecord], name: str) -> None:
+    open_records = sorted(
+        (record for record in records if record.state == "active"),
+        key=lambda record: (record.due_at is None, str(record.due_at or "")),
+    )
+    closed_records = [record for record in records if record.state != "active"]
+    if not records:
+        st.caption(f"No {name.lower()} yet. They appear here when chat turns create them.")
+        return
+    if not open_records:
+        st.caption(f"No open {name.lower()}.")
+    for record in open_records:
+        _render_project_record(store, record)
+    if closed_records:
+        st.space("small")
+        st.caption(f"Closed · {len(closed_records)}")
+        for record in closed_records:
+            _render_project_record(store, record)
+
+
+def _render_project_record(store: CaptureStore, record: ProjectRecord) -> None:
+    name, color, icon = KIND_STYLES[record.kind]
+    is_open = record.state == "active"
+    with st.container(border=True, horizontal=True, vertical_alignment="center"):
+        with st.container(gap="small"):
+            st.markdown(record.content if is_open else f":gray[~~{record.content}~~]")
+            badges = [f":{color}-badge[{icon} {name}]"]
+            if not is_open:
+                badges.append(f":gray-badge[{record.state.capitalize()}]")
+            if record.due_at is not None:
+                badges.append(f":orange-badge[:material/schedule: Due {_format_due_at(record.due_at)}]")
+            st.markdown(" ".join(badges) + f"  :gray[Updated {_format_timestamp(record.updated_at)}]")
+        transition = CLOSING_TRANSITIONS.get(record.kind)
+        if is_open and transition and st.button(
+            transition[1],
+            icon=":material/check:",
+            key=f"transition-project-record-{record.id}",
+        ):
+            store.transition_project_record(record.id, transition[0])
+            st.rerun()
+        with st.popover("Details", icon=":material/more_horiz:"):
+            st.caption("Source quote")
+            st.markdown(f"> {record.source_quote}")
+            content = st.text_area(
+                "Tracker text",
+                value=record.content,
+                key=f"project-record-content-{record.id}",
+                height=100,
+            )
+            rationale = st.text_input(
+                "Rationale",
+                value=record.rationale or "",
+                key=f"project-record-rationale-{record.id}",
+            )
+            with st.container(horizontal=True):
+                if st.button("Save", type="primary", key=f"save-project-record-{record.id}"):
+                    try:
+                        store.update_project_record(
+                            record.id, content=content, rationale=rationale or None
+                        )
+                    except (ValidationError, ValueError) as error:
+                        st.error(_validation_message(error))
+                    else:
+                        st.rerun()
+                if st.button(
+                    "Delete", icon=":material/delete:", key=f"delete-project-record-{record.id}"
+                ):
+                    store.delete_project_record(record.id)
+                    st.rerun()
+            events = store.list_project_record_events(record.id)
+            st.caption(f"History ({len(events)})")
             for event in events:
                 st.caption(
-                    f"{event.created_at.isoformat()} · {event.action} · "
+                    f"{_format_timestamp(event.created_at)} · {event.action} · "
                     f"{event.previous_state or 'none'} → {event.new_state}"
                 )
 
@@ -1033,122 +1205,312 @@ def _validation_message(error: ValidationError | ValueError) -> str:
     return str(error)
 
 
+def _select_calendar_day(day: date) -> None:
+    st.session_state[CALENDAR_DAY_KEY] = day
+    st.session_state[CALENDAR_MONTH_KEY] = day.replace(day=1)
+
+
+def _shift_calendar_month(offset: int) -> None:
+    month = st.session_state[CALENDAR_MONTH_KEY]
+    index = month.year * 12 + month.month - 1 + offset
+    st.session_state[CALENDAR_MONTH_KEY] = date(index // 12, index % 12 + 1, 1)
+
+
 def render_calendar_page(store: CaptureStore) -> None:
-    st.subheader("Calendar")
-    st.caption("Local SQLite events only. Editing preserves the original chat source.")
-    _render_task_deadlines(store)
-    events = store.list_calendar_events()
-    if not events:
-        st.info("No active local events.")
-    for event in events:
-        with st.container(border=True):
-            edited_title = st.text_input("Title", value=event.title, key=f"event-title-{event.id}")
-            if event.all_day:
-                edited_date = st.date_input(
-                    "Date", value=event.start_at, key=f"event-date-{event.id}"
-                )
-                if st.button("Save event", key=f"save-event-{event.id}"):
-                    try:
-                        store.update_calendar_event(
-                            event.id, title=edited_title, start_at=edited_date
-                        )
-                    except ValidationError as error:
-                        st.error(error.errors()[0]["msg"])
-                    else:
-                        st.rerun()
-            else:
-                timing = event.start_at.isoformat()
-                if event.end_at is not None:
-                    timing = f"{timing} to {event.end_at.isoformat()}"
-                st.caption(f"Timed event: {timing}")
-            if event.description:
-                st.markdown(event.description)
-            _render_calendar_sources(store, event)
-            st.caption(f"Updated {event.updated_at.isoformat()}")
-            if st.button("Delete event", key=f"delete-event-{event.id}"):
-                store.set_calendar_event_status(event.id, "deleted")
-                st.rerun()
+    today = configured_reference_date(configured_timezone())
+    selected_day = st.session_state.setdefault(CALENDAR_DAY_KEY, today)
+    month = st.session_state.setdefault(CALENDAR_MONTH_KEY, selected_day.replace(day=1))
+
+    events_by_day: dict[date, list[CalendarEvent]] = {}
+    for event in store.list_calendar_events():
+        events_by_day.setdefault(event.start_date, []).append(event)
+    deadlines_by_day: dict[date, list[ProjectRecord]] = {}
+    for record in store.list_task_deadlines():
+        deadlines_by_day.setdefault(_day_of(record.due_at), []).append(record)
+
+    with st.container(horizontal=True, vertical_alignment="center"):
+        st.title("Calendar", width="content")
+        st.space("stretch")
+        st.button(
+            "",
+            icon=":material/chevron_left:",
+            help="Previous month",
+            key="calendar-previous-month",
+            on_click=_shift_calendar_month,
+            args=(-1,),
+        )
+        st.markdown(f"**{month.strftime('%B %Y')}**", width="content")
+        st.button(
+            "",
+            icon=":material/chevron_right:",
+            help="Next month",
+            key="calendar-next-month",
+            on_click=_shift_calendar_month,
+            args=(1,),
+        )
+        st.button(
+            "Today",
+            icon=":material/today:",
+            key="calendar-today",
+            on_click=_select_calendar_day,
+            args=(today,),
+        )
+
+    grid_column, day_column = st.columns([2.4, 1], gap="large")
+    with grid_column:
+        header = st.columns(7, gap="small")
+        for column, weekday in zip(header, WEEKDAYS):
+            column.caption(weekday, text_alignment="center")
+        for week in Calendar().monthdatescalendar(month.year, month.month):
+            for column, day in zip(st.columns(7, gap="small"), week):
+                with column:
+                    _render_calendar_cell(
+                        day,
+                        month=month,
+                        today=today,
+                        selected_day=selected_day,
+                        events=events_by_day.get(day, []),
+                        deadlines=deadlines_by_day.get(day, []),
+                    )
+    with day_column:
+        _render_calendar_day(
+            store,
+            selected_day,
+            today=today,
+            events=events_by_day.get(selected_day, []),
+            deadlines=deadlines_by_day.get(selected_day, []),
+        )
 
     history = store.list_calendar_events(statuses=("deleted",))
     if history:
-        with st.expander(f"Calendar history ({len(history)})"):
+        with st.expander(f"Deleted events ({len(history)})", icon=":material/history:"):
             for event in history:
-                with st.container(border=True):
-                    timing = event.start_at.isoformat()
-                    if event.end_at is not None:
-                        timing = f"{timing} to {event.end_at.isoformat()}"
-                    st.write(f"{timing} — {event.title}")
-                    if event.description:
-                        st.markdown(event.description)
-                    _render_calendar_sources(store, event)
-                    if st.button("Restore event", key=f"restore-event-{event.id}"):
+                with st.container(horizontal=True, vertical_alignment="center"):
+                    st.markdown(
+                        f":gray-badge[{_format_calendar_timing(event.start_at, event.end_at)}] "
+                        f"{event.title}"
+                    )
+                    if st.button(
+                        "Restore",
+                        icon=":material/restore:",
+                        type="tertiary",
+                        key=f"restore-event-{event.id}",
+                    ):
                         store.set_calendar_event_status(event.id, "active")
                         st.rerun()
 
 
-def _render_task_deadlines(store: CaptureStore) -> None:
-    """Show tracker deadlines read-only; they are not events and hold no time."""
+def _render_calendar_cell(
+    day: date,
+    *,
+    month: date,
+    today: date,
+    selected_day: date,
+    events: list[CalendarEvent],
+    deadlines: list[ProjectRecord],
+) -> None:
+    if day == selected_day:
+        state = "selected"
+    elif day.month != month.month:
+        state = "muted"
+    elif day == today:
+        state = "today"
+    else:
+        state = "day"
+    with st.container(border=True, key=f"calcell-{state}-{day.isoformat()}"):
+        st.button(
+            str(day.day),
+            type="primary" if day == selected_day else "tertiary",
+            key=f"calendar-day-{day.isoformat()}",
+            on_click=_select_calendar_day,
+            args=(day,),
+        )
+        chips = [
+            f":blue-badge[{_badge_text(event.start_at.strftime('%H:%M') + ' ' + event.title, 24)}]"
+            if isinstance(event.start_at, datetime)
+            else f":blue-badge[{_badge_text(event.title, 24)}]"
+            for event in events
+        ] + [f":orange-badge[{_badge_text('Due ' + record.content, 24)}]" for record in deadlines]
+        for chip in chips[:2]:
+            st.markdown(chip)
+        if len(chips) > 2:
+            st.caption(f"+{len(chips) - 2} more")
 
-    deadlines = store.list_task_deadlines()
-    if not deadlines:
-        return
-    st.markdown(f"#### Deadlines ({len(deadlines)})")
-    st.caption(
-        "Due times from the project tracker. They are not events and reserve no time; "
-        "complete or delete the task in Tracker to clear one."
-    )
-    for record in deadlines:
-        with st.container(border=True):
-            st.caption(
-                f"Due {_format_due_at(record.due_at)} · {store.get_project(record.project_id).name}"
-            )
-            st.markdown(f"**{record.content}**")
-    st.markdown("#### Events")
+
+def _render_calendar_day(
+    store: CaptureStore,
+    day: date,
+    *,
+    today: date,
+    events: list[CalendarEvent],
+    deadlines: list[ProjectRecord],
+) -> None:
+    with st.container(border=True):
+        st.subheader(day.strftime("%A, %b %d"))
+        offset = (day - today).days
+        st.caption(
+            "Today"
+            if offset == 0
+            else "Tomorrow"
+            if offset == 1
+            else "Yesterday"
+            if offset == -1
+            else f"In {offset} days"
+            if offset > 0
+            else f"{-offset} days ago"
+        )
+        if not events and not deadlines:
+            st.caption("Nothing scheduled for this day.")
+        for record in deadlines:
+            with st.container(border=True):
+                st.markdown(f":orange-badge[:material/flag: Deadline] **{record.content}**")
+                st.caption(
+                    f"Due {_format_due_at(record.due_at)} · {store.get_project(record.project_id).name}"
+                )
+        for event in events:
+            _render_calendar_event(store, event)
+
+    coming_up = [
+        entry for entry in _upcoming_entries(store, max(day, today)) if entry[0] > day
+    ][:5]
+    if coming_up:
+        st.space("small")
+        st.caption("Coming up")
+        for entry_day, entry in coming_up:
+            with st.container(horizontal=True, vertical_alignment="center"):
+                title = entry.content if isinstance(entry, ProjectRecord) else entry.title
+                color = "orange" if isinstance(entry, ProjectRecord) else "blue"
+                st.markdown(f":{color}-badge[{entry_day.strftime('%b %d')}] {title}", width="stretch")
+                st.button(
+                    "",
+                    icon=":material/arrow_forward:",
+                    type="tertiary",
+                    help="Show this day",
+                    key=f"calendar-coming-up-{entry.id}",
+                    on_click=_select_calendar_day,
+                    args=(entry_day,),
+                )
+
+
+def _render_calendar_event(store: CaptureStore, event: CalendarEvent) -> None:
+    with st.container(border=True):
+        with st.container(
+            horizontal=True, horizontal_alignment="distribute", vertical_alignment="center", gap="xsmall"
+        ):
+            st.markdown(f":blue-badge[:material/schedule: {_format_time_of_day(event)}]", width="content")
+            with st.container(horizontal=True, width="content", gap="xxsmall"):
+                with st.popover("", icon=":material/edit:", help="Edit event"):
+                    edited_title = st.text_input(
+                        "Title", value=event.title, key=f"event-title-{event.id}"
+                    )
+                    if event.all_day:
+                        edited_start = st.date_input(
+                            "Date", value=event.start_at, key=f"event-date-{event.id}"
+                        )
+                    else:
+                        edited_start = event.start_at
+                        st.caption("Ask in chat to move a timed event, so its end time stays consistent.")
+                    if st.button("Save event", type="primary", key=f"save-event-{event.id}"):
+                        try:
+                            store.update_calendar_event(
+                                event.id, title=edited_title, start_at=edited_start
+                            )
+                        except ValidationError as error:
+                            st.error(_validation_message(error))
+                        else:
+                            st.rerun()
+                if st.button(
+                    "",
+                    icon=":material/delete:",
+                    type="tertiary",
+                    help="Delete event",
+                    key=f"delete-event-{event.id}",
+                ):
+                    store.set_calendar_event_status(event.id, "deleted")
+                    st.rerun()
+        st.markdown(f"**{event.title}**")
+        if event.description:
+            st.caption(event.description)
+        _render_calendar_sources(store, event)
 
 
 def _render_calendar_sources(store: CaptureStore, event: CalendarEvent) -> None:
     sources = store.list_calendar_event_sources(event.id)
-    with st.expander(f"Sources ({len(sources)})"):
+    with st.expander(f"Sources ({len(sources)})", icon=":material/link:"):
         for source in sources:
             st.caption(source.source_quote)
+        st.caption(f"Updated {_format_timestamp(event.updated_at)}")
 
 
 def render_saved_items_page(store: CaptureStore) -> None:
-    st.subheader("Ideas & Notes")
-    kind_label = st.selectbox("Type", ["All", "Idea", "Note"])
-    query = st.text_input("Filter ideas and notes")
-    kinds = {"All": ("idea", "note"), "Idea": ("idea",), "Note": ("note",)}[kind_label]
+    st.title("Ideas & Notes")
+    with st.container(horizontal=True, vertical_alignment="center"):
+        kind_label = st.segmented_control(
+            "Type",
+            ["All", "Ideas", "Notes"],
+            default="All",
+            required=True,
+            key="saved_items_kind",
+            label_visibility="collapsed",
+        )
+        query = st.text_input(
+            "Filter ideas and notes",
+            placeholder="Search ideas and notes",
+            icon=":material/search:",
+            label_visibility="collapsed",
+        )
+    kinds = {"All": ("idea", "note"), "Ideas": ("idea",), "Notes": ("note",)}[kind_label]
     items = store.list_saved_items(kinds=kinds)
     if query.strip():
         items = [item for item in items if query.strip().lower() in item.content.lower()]
     if not items:
-        st.info("No active ideas or notes match this view.")
-    for item in items:
-        with st.container(border=True):
-            st.markdown(f"**{item.kind.title()}**")
-            edited_content = st.text_area(
-                "Content", value=item.content, key=f"item-content-{item.id}", height=100
-            )
-            if st.button("Save item", key=f"save-item-{item.id}"):
-                try:
-                    store.update_saved_item(item.id, content=edited_content)
-                except ValidationError as error:
-                    st.error(error.errors()[0]["msg"])
+        st.caption("No ideas or notes match this view. Use `/idea` or `/note` in chat to add one.")
+
+    columns = st.columns(2, gap="medium")
+    for index, item in enumerate(items):
+        with columns[index % 2], st.container(border=True):
+            with st.container(horizontal=True, vertical_alignment="center"):
+                if item.kind == "idea":
+                    st.badge("Idea", icon=":material/lightbulb:", color="violet")
                 else:
+                    st.badge("Note", icon=":material/sticky_note_2:", color="gray")
+                st.caption(_format_timestamp(item.updated_at), width="content")
+                st.space("stretch")
+                with st.popover("", icon=":material/edit:", help="Edit"):
+                    edited_content = st.text_area(
+                        "Content", value=item.content, key=f"item-content-{item.id}", height=140
+                    )
+                    if st.button("Save item", type="primary", key=f"save-item-{item.id}"):
+                        try:
+                            store.update_saved_item(item.id, content=edited_content)
+                        except ValidationError as error:
+                            st.error(_validation_message(error))
+                        else:
+                            st.rerun()
+                if st.button(
+                    "",
+                    icon=":material/delete:",
+                    type="tertiary",
+                    help="Delete",
+                    key=f"delete-item-{item.id}",
+                ):
+                    store.set_saved_item_status(item.id, "deleted")
                     st.rerun()
-            st.caption(f"Original chat source: {item.source_quote}")
-            st.caption(f"Updated {item.updated_at.isoformat()}")
-            if st.button("Delete item", key=f"delete-item-{item.id}"):
-                store.set_saved_item_status(item.id, "deleted")
-                st.rerun()
+            st.markdown(item.content)
+            if item.source_quote.strip() != item.content.strip():
+                st.caption(f":material/format_quote: {item.source_quote}")
 
     history = store.list_saved_items(kinds=("idea", "note"), statuses=("deleted",))
     if history:
-        with st.expander(f"Ideas & Notes history ({len(history)})"):
+        with st.expander(f"Deleted ideas & notes ({len(history)})", icon=":material/history:"):
             for item in history:
-                with st.container(border=True):
-                    st.write(f"{item.kind.title()}: {item.content}")
-                    st.caption(f"Original chat source: {item.source_quote}")
-                    if st.button("Restore item", key=f"restore-item-{item.id}"):
+                with st.container(horizontal=True, vertical_alignment="center"):
+                    st.markdown(f":gray-badge[{item.kind.title()}] {item.content}")
+                    if st.button(
+                        "Restore",
+                        icon=":material/restore:",
+                        type="tertiary",
+                        key=f"restore-item-{item.id}",
+                    ):
                         store.set_saved_item_status(item.id, "active")
                         st.rerun()

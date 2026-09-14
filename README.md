@@ -4,9 +4,12 @@ CaptureFlow is a local, single-user project continuity assistant. Its interface 
 persisted text chat: it keeps bounded conversation context and maintains
 source-grounded local records in SQLite — Calendar events, Ideas & Notes, and
 per-project tracker records such as tasks, decisions, and blockers. The default
-workspace keeps chat beside a read-only snapshot of the selected project;
-Calendar, Tracker, and Ideas & Notes are also available as full management views.
-The sidebar scopes its conversation list to the selected project. Deleting a
+workspace keeps chat beside a snapshot of the selected project, where open tasks,
+blockers, and questions can be checked off and upcoming items open their day in
+Calendar. Tracker groups records by type with per-record details, Calendar is a
+month grid with a day agenda, and Ideas & Notes is a searchable card view. The
+sidebar holds only navigation, the project filter, and its conversation list;
+project and conversation settings live in the chat header. Deleting a
 project removes its tracker state and audit links but keeps its conversations,
 messages, calendar events, ideas, and notes as unassigned local records.
 

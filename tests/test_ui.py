@@ -81,6 +81,11 @@ def _candidate_id(line: str) -> str:
     return line.split(" | ", 1)[0]
 
 
+def expander_labels(app: AppTest) -> list[str]:
+    # AppTest reports an expander that has an icon as a status element.
+    return [element.label for element in [*app.expander, *app.status]]
+
+
 class UiTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory()
@@ -120,6 +125,21 @@ class UiTests(unittest.TestCase):
         return app
 
     @staticmethod
+    def open_calendar_day(app: AppTest, day: date) -> AppTest:
+        app.session_state["calendar_selected_day"] = day
+        app.session_state["calendar_month"] = day.replace(day=1)
+        app.sidebar.radio[0].set_value("Calendar").run()
+        return app
+
+    @staticmethod
+    def create_conversation(app: AppTest, title: str) -> AppTest:
+        next(field for field in app.text_input if field.key == "new_conversation_title").input(
+            title
+        ).run()
+        next(button for button in app.button if button.label == "Create conversation").click().run()
+        return app
+
+    @staticmethod
     def open_project(app: AppTest, project_id: str) -> AppTest:
         next(
             field for field in app.selectbox if field.key == "sidebar_project_id"
@@ -130,8 +150,8 @@ class UiTests(unittest.TestCase):
         app = AppTest.from_file("app.py").run()
 
         self.assertEqual(app.exception, [])
-        self.assertEqual(app.title[0].value, "CaptureFlow")
-        self.assertIn("project continuity assistant", app.caption[0].value)
+        self.assertEqual(app.title[0].value, "First capture")
+        self.assertTrue(any("Unassigned conversation" in caption.value for caption in app.caption))
         self.assertEqual(len(app.chat_input), 1)
         self.assertEqual(app.sidebar.toggle[0].label, "Diagnostics")
         self.assertFalse(app.sidebar.toggle[0].value)
@@ -140,7 +160,7 @@ class UiTests(unittest.TestCase):
         app = AppTest.from_file("app.py").run()
 
         self.assertEqual(
-            list(app.sidebar.radio[0].options),
+            [option.split("  ")[-1] for option in app.sidebar.radio[0].options],
             ["Chat", "Tracker", "Calendar", "Ideas & Notes"],
         )
         self.assertEqual(
@@ -269,23 +289,44 @@ class UiTests(unittest.TestCase):
         self.assertTrue(any(item.value == "Project snapshot" for item in app.subheader))
         metrics = {metric.label: str(metric.value) for metric in app.metric}
         self.assertEqual(metrics, {"Active": "1", "Done": "0", "Blockers": "0"})
-        rendered_markdown = [item.value for item in app.markdown]
-        self.assertTrue(any("Project progress" in value for value in rendered_markdown))
-        self.assertTrue(any("Today" in value and "Priority" in value for value in rendered_markdown))
-        self.assertTrue(any("Prepare the UI workspace." in value for value in rendered_markdown))
-        self.assertTrue(any("Workspace review" in value for value in rendered_markdown))
+        task_checkbox = next(
+            checkbox for checkbox in app.checkbox if checkbox.key == "snapshot-close-snapshot-task"
+        )
+        self.assertIn("Prepare the UI workspace.", task_checkbox.label)
         self.assertTrue(
-            any("Keep the project snapshot read-only." in value for value in rendered_markdown)
+            any(
+                button.label == "Workspace review" and button.key == "snapshot-open-day-snapshot-event"
+                for button in app.button
+            )
+        )
+        self.assertTrue(
+            any("Keep the project snapshot read-only." in item.value for item in app.markdown)
+        )
+
+        task_checkbox.check().run()
+
+        self.assertEqual(store.get_project_record("snapshot-task").state, "completed")
+        metrics = {metric.label: str(metric.value) for metric in app.metric}
+        self.assertEqual(metrics, {"Active": "0", "Done": "1", "Blockers": "0"})
+
+        next(
+            button for button in app.button if button.key == "snapshot-open-day-snapshot-event"
+        ).click().run()
+
+        self.assertEqual(app.sidebar.radio[0].value, "Calendar")
+        self.assertEqual(app.session_state["calendar_selected_day"], event_date)
+        self.assertTrue(
+            any(field.key == "event-title-snapshot-event" for field in app.text_input)
         )
 
     def test_diagnostics_switch_shows_session_only_turn_timing(self) -> None:
         app = AppTest.from_file("app.py").run()
-        self.assertFalse(any(expander.label.startswith("Diagnostics ·") for expander in app.expander))
+        self.assertFalse(any(label.startswith("Diagnostics ·") for label in expander_labels(app)))
 
         app.sidebar.toggle[0].set_value(True).run()
         app.chat_input[0].set_value("/idea Measure model latency.").run()
 
-        self.assertTrue(any(expander.label.startswith("Diagnostics ·") for expander in app.expander))
+        self.assertTrue(any(label.startswith("Diagnostics ·") for label in expander_labels(app)))
         self.assertTrue(any("Model calls: 0" in caption.value for caption in app.caption))
         self.assertTrue(any("Session-only timing" in caption.value for caption in app.caption))
 
@@ -376,7 +417,7 @@ class UiTests(unittest.TestCase):
             )
         )
 
-        self.open_page(app.run(), "Calendar")
+        self.open_calendar_day(app.run(), date(2026, 9, 16))
 
         self.assertEqual(app.exception, [])
         self.assertTrue(any(record.content in element.value for element in app.markdown))
@@ -421,9 +462,16 @@ class UiTests(unittest.TestCase):
         self.open_page(app, "Tracker")
 
         self.assertEqual(app.exception, [])
-        self.assertTrue(any(project.name in element.value for element in app.markdown))
+        self.assertEqual(app.title[0].value, project.name)
+        self.assertTrue(any(tab.label.startswith(":material/task_alt: Tasks (1)") for tab in app.tabs))
         self.assertTrue(any(field.value == record.content for field in app.text_area))
-        self.assertTrue(
+        next(
+            button for button in app.button if button.key == f"transition-project-record-{record.id}"
+        ).click().run()
+
+        self.assertEqual(store.get_project_record(record.id).state, "completed")
+        self.assertTrue(any(tab.label.startswith(":material/task_alt: Tasks (0)") for tab in app.tabs))
+        self.assertFalse(
             any(button.key == f"transition-project-record-{record.id}" for button in app.button)
         )
 
@@ -541,8 +589,7 @@ class UiTests(unittest.TestCase):
         store = CaptureStore(os.environ["CAPTUREFLOW_DATABASE_PATH"])
         store.initialize()
 
-        app.text_input[0].input("Repeated title").run()
-        next(button for button in app.button if button.label == "Create conversation").click().run()
+        self.create_conversation(app, "Repeated title")
         first = next(
             conversation
             for conversation in store.list_conversations()
@@ -550,8 +597,7 @@ class UiTests(unittest.TestCase):
         )
         app.chat_input[0].set_value("/note Belongs only to the first conversation.").run()
 
-        app.text_input[0].input("Repeated title").run()
-        next(button for button in app.button if button.label == "Create conversation").click().run()
+        self.create_conversation(app, "Repeated title")
         matches = [
             conversation
             for conversation in store.list_conversations()
@@ -576,8 +622,7 @@ class UiTests(unittest.TestCase):
         store.initialize()
         retained_id = store.list_conversations()[0].id
 
-        app.text_input[0].input("Delete this conversation").run()
-        next(button for button in app.button if button.label == "Create conversation").click().run()
+        self.create_conversation(app, "Delete this conversation")
         conversation_selector = next(
             field for field in app.sidebar.radio if field.key == "selected_conversation_id"
         )
@@ -609,7 +654,7 @@ class UiTests(unittest.TestCase):
         self.assertEqual(app.exception, [])
         self.assertEqual(len(store.list_messages(store.list_conversations()[0].id)), 2)
         self.assertEqual(len(store.list_calendar_events()), 1)
-        self.open_page(app, "Calendar")
+        self.open_calendar_day(app, date(2026, 9, 15))
         self.assertTrue(any("Submit report" in element.value for element in app.text_input))
 
     def test_unassigned_chat_reads_local_meeting_context_through_contextual_router(self) -> None:
@@ -711,8 +756,13 @@ class UiTests(unittest.TestCase):
         store.initialize()
         event = store.list_calendar_events()[0]
 
-        self.open_page(app, "Calendar")
-        self.assertTrue(any(element.label == "Sources (1)" for element in app.expander))
+        self.open_calendar_day(app, date(2026, 9, 1))
+        self.assertFalse(any(field.key == f"event-title-{event.id}" for field in app.text_input))
+        self.assertTrue(any("Submit report" in element.value for element in app.markdown))
+        next(button for button in app.button if button.key == "calendar-day-2026-09-15").click().run()
+
+        self.assertEqual(app.session_state["calendar_selected_day"], date(2026, 9, 15))
+        self.assertIn("Sources (1)", expander_labels(app))
         next(field for field in app.text_input if field.key == f"event-title-{event.id}").set_value(
             "Submit final report"
         ).run()
