@@ -7,6 +7,7 @@ returned row is recorded in a server-side provenance ledger.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any, Literal
@@ -21,6 +22,8 @@ from .storage import CaptureStore
 
 MAX_TOOL_ROWS = 20
 MAX_CALENDAR_DAYS = 62
+# The record states search_project_records may return, and so a citation may still be in.
+SEARCHABLE_RECORD_STATES = ("active", "completed", "resolved", "superseded")
 
 ReadAgentRoute = Literal["local_answer", "project_answer"]
 ResourceType = Literal["calendar_event", "project_record", "saved_item"]
@@ -82,6 +85,7 @@ class SearchProjectRecordsArgs(_KeywordArguments):
     kinds: list[
         Literal["task", "milestone", "decision", "constraint", "open_question", "blocker"]
     ] = Field(default_factory=list)
+    # Keep in step with SEARCHABLE_RECORD_STATES.
     states: list[Literal["active", "completed", "resolved", "superseded"]] = Field(
         default_factory=lambda: ["active"]
     )
@@ -121,6 +125,8 @@ class ObservedResource:
     resource_type: ResourceType
     scope_kind: ScopeKind
     scope_id: str
+    # The row exactly as the model saw it, so a citation to a row that changed is refused.
+    snapshot: str
 
 
 @dataclass(frozen=True)
@@ -172,7 +178,7 @@ class BoundReadTools:
                 name="search_saved_items",
                 description=(
                     "Search active notes and ideas in the current project."
-                    if self.route == "project_answer"
+                    if self.project is not None
                     else "Search active notes and ideas in the current workspace."
                 ),
                 arguments_model=SearchSavedItemsArgs,
@@ -202,20 +208,55 @@ class BoundReadTools:
         return [definition.for_model() for definition in self._definitions.values()]
 
     def resolve_observed(self, source_ids: list[str]) -> list[CalendarEvent | ProjectRecord | SavedItem]:
-        """Resolve final citations only after the loop has checked the provenance ledger."""
+        """Read each citation again from SQLite and require it to be the row its tool returned.
+
+        Raises ValueError for a citation outside the ledger, a row that no longer exists, one
+        that has since left the state or scope it was returned under, or one whose fields the
+        model saw have changed.
+        """
 
         resolved: list[CalendarEvent | ProjectRecord | SavedItem] = []
         for source_id in source_ids:
             observed = self.observed_resources.get(source_id)
             if observed is None:
                 raise ValueError("source ID was not returned by a tool in this run")
-            if observed.resource_type == "calendar_event":
-                resolved.append(self.store.get_calendar_event(source_id))
-            elif observed.resource_type == "project_record":
-                resolved.append(self.store.get_project_record(source_id))
-            else:
-                resolved.append(self.store.get_saved_item(source_id))
+            try:
+                row = self._current_row(source_id, observed)
+            except KeyError as error:
+                raise ValueError("a cited source no longer exists") from error
+            if row is None:
+                raise ValueError("a cited source is no longer in the state or scope it was returned under")
+            if _snapshot(_ITEM_FOR_MODEL[observed.resource_type](row)) != observed.snapshot:
+                # The model chose and described this row from what it saw; a moved date or an
+                # edited text could make that choice wrong, so it is not rendered.
+                raise ValueError("a cited source changed after a tool returned it")
+            resolved.append(row)
         return resolved
+
+    def _current_row(
+        self, source_id: str, observed: ObservedResource
+    ) -> CalendarEvent | ProjectRecord | SavedItem | None:
+        if observed.resource_type == "calendar_event":
+            event = self.store.get_calendar_event(source_id)
+            usable = event.status == "active" and self._in_scope(event.conversation_id, event.workspace_id, observed)
+            return event if usable else None
+        if observed.resource_type == "project_record":
+            record = self.store.get_project_record(source_id)
+            usable = (
+                record.state in SEARCHABLE_RECORD_STATES
+                and observed.scope_kind == "project"
+                and record.project_id == observed.scope_id
+            )
+            return record if usable else None
+        item = self.store.get_saved_item(source_id)
+        usable = item.status == "active" and self._in_scope(item.conversation_id, item.workspace_id, observed)
+        return item if usable else None
+
+    def _in_scope(self, conversation_id: str, workspace_id: str, observed: ObservedResource) -> bool:
+        if observed.scope_kind == "workspace":
+            return workspace_id == observed.scope_id
+        project = self.store.get_conversation_project(conversation_id)
+        return project is not None and project.id == observed.scope_id
 
     def invoke(self, name: str, arguments: dict[str, Any]) -> ReadToolResult:
         definition = self._definitions.get(name)
@@ -307,8 +348,9 @@ class BoundReadTools:
         if not isinstance(arguments, SearchSavedItemsArgs):
             raise TypeError("search_saved_items received unexpected arguments")
         kinds = tuple(arguments.kinds)
-        if self.route == "project_answer":
-            assert self.project is not None
+        # Notes follow the router's candidate rule for both routes: the conversation's
+        # project when it has one, otherwise the workspace.
+        if self.project is not None:
             scope_kind: ScopeKind = "project"
             scope_id = self.project.id
             items = self.store.list_saved_items_for_project(
@@ -349,6 +391,7 @@ class BoundReadTools:
                 resource_type=resource_type,
                 scope_kind=scope_kind,
                 scope_id=scope_id,
+                snapshot=_snapshot(_ITEM_FOR_MODEL[resource_type](row)),
             )
 
 
@@ -414,3 +457,15 @@ def _saved_item(item: SavedItem) -> dict[str, Any]:
         "kind": item.kind,
         "content": item.content,
     }
+
+
+# How each resource type appears in a tool result; the ledger's snapshot uses the same form.
+_ITEM_FOR_MODEL = {
+    "calendar_event": _calendar_item,
+    "project_record": _project_record_item,
+    "saved_item": _saved_item,
+}
+
+
+def _snapshot(item: dict[str, Any]) -> str:
+    return json.dumps(item, ensure_ascii=False, sort_keys=True)

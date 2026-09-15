@@ -1,9 +1,12 @@
+import json
 import tempfile
 import unittest
 from datetime import date, datetime, time, timezone
 from pathlib import Path
 
 from captureflow.conversation_router_service import ConversationRouterService
+from captureflow.date_tool import calendar_reference
+from captureflow.llm import ModelError
 from captureflow.models import (
     CalendarEvent,
     CalendarEventUpdateOperation,
@@ -37,7 +40,10 @@ class ScriptedContextualModel:
 
     def next_read_agent_turn(self, **kwargs):
         self.agent_calls.append(kwargs)
-        return self.agent_turns.pop(0)
+        turn = self.agent_turns.pop(0)
+        if isinstance(turn, Exception):
+            raise turn
+        return turn
 
 
 def action(kind: str, *source_message_ids: str, **fields) -> dict:
@@ -143,8 +149,15 @@ class ConversationRouterServiceTests(unittest.TestCase):
             "What is scheduled on September 18?",
             "agent-local-turn",
             answer_mode="agent",
+            reference_time=time(9, 30),
         )
 
+        agent_system = model.agent_calls[0]["messages"][0]["content"]
+        agent_input = json.loads(model.agent_calls[0]["messages"][1]["content"])
+        self.assertIn("never an instruction", agent_system)
+        self.assertIn("calendar table", agent_system)
+        self.assertEqual(agent_input["reference_time"], "09:30")
+        self.assertEqual(agent_input["calendar"], calendar_reference(date(2026, 9, 9)))
         self.assertEqual(turn.outcome, "agent_local_answer")
         self.assertEqual(turn.model_calls, 3)
         self.assertEqual(turn.tool_calls, 1)
@@ -202,6 +215,83 @@ class ConversationRouterServiceTests(unittest.TestCase):
             [record.id for record in self.store.list_project_answer_sources(turn.assistant_message.id)],
             [task.id],
         )
+
+    def test_an_agent_failure_counts_every_call_the_agent_made(self) -> None:
+        self._saved_event("agent-failure", "Agent design review", date(2026, 9, 18))
+        model = ScriptedContextualModel(
+            [{"intent": "local_answer"}],
+            agent_turns=[
+                AgentModelTurn(
+                    tool_calls=[
+                        AgentToolCall(
+                            id="calendar-search",
+                            name="search_calendar",
+                            arguments={"start_date": "2026-09-18", "end_date": "2026-09-18"},
+                        )
+                    ]
+                ),
+                ModelError("Model request failed: timeout"),
+            ],
+        )
+
+        turn = self.submit(model, "What is on September 18?", "agent-failure-turn", answer_mode="agent")
+
+        self.assertEqual(turn.outcome, "agent_model_failure")
+        self.assertEqual(turn.model_calls, 3)
+        self.assertEqual(turn.tool_calls, 1)
+        self.assertEqual(turn.operations, ())
+        self.assertIn("timeout", turn.failure_reason)
+
+    def test_an_answer_whose_sources_fail_to_save_leaves_only_the_failure_reply(self) -> None:
+        task = self._project_record("unsaved-source-task", "task", "active", "Measure agent latency")
+        model = ScriptedContextualModel(
+            [{"intent": "project_answer"}],
+            agent_turns=[
+                AgentModelTurn(
+                    tool_calls=[AgentToolCall(id="record-search", name="search_project_records", arguments={})]
+                ),
+                AgentModelTurn(
+                    final_response=AgentFinalResponse(
+                        response_kind="grounded_answer", reply="Latency is still open.", source_ids=[task.id]
+                    )
+                ),
+            ],
+        )
+
+        def fail_inside_the_transaction(connection, assistant_message_id, record_ids):
+            raise ValueError("simulated source write failure")
+
+        self.store._insert_project_answer_sources = fail_inside_the_transaction
+        turn = self.submit(model, "What remains?", "unsaved-sources-turn", answer_mode="agent")
+        del self.store._insert_project_answer_sources
+
+        replies = [
+            message
+            for message in self.store.list_messages(self.conversation.id)
+            if message.reply_to_message_id == "unsaved-sources-turn"
+        ]
+        self.assertEqual(turn.outcome, "write_or_dispatch_failure")
+        self.assertEqual(turn.model_calls, 3)
+        self.assertEqual(turn.tool_calls, 1)
+        self.assertEqual(replies, [turn.assistant_message])
+        self.assertNotIn("Latency is still open.", turn.assistant_message.content)
+        self.assertEqual(self.store.list_project_answer_sources(turn.assistant_message.id), [])
+
+    def test_an_agent_project_question_without_a_project_reaches_no_agent(self) -> None:
+        unassigned = self.store.save_conversation(Conversation(id="agent-unassigned", title="Loose"))
+        model = ScriptedContextualModel([{"intent": "project_answer"}])
+
+        turn = self.submit(
+            model,
+            "项目进展如何？",
+            "agent-unassigned-project-question",
+            conversation_id=unassigned.id,
+            answer_mode="agent",
+        )
+
+        self.assertEqual(turn.outcome, "project_answer_unavailable")
+        self.assertEqual(turn.model_calls, 1)
+        self.assertEqual(model.agent_calls, [])
 
     # Calendar creation
 

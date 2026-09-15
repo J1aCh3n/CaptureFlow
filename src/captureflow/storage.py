@@ -434,25 +434,9 @@ class CaptureStore:
         if not record_ids or len(record_ids) > 12 or len(set(record_ids)) != len(record_ids):
             raise ValueError("a project answer needs one to twelve unique source records")
         assistant = self.get_message(assistant_message_id)
-        if assistant.role != "assistant" or assistant.reply_to_message_id is None:
-            raise ValueError("project answer sources require an assistant reply")
-        source = self._require_source_message(assistant.reply_to_message_id, assistant.conversation_id)
-        project = self.get_conversation_project(source.conversation_id)
-        if project is None:
-            raise ValueError("project answer sources require an assigned project")
-        records = [self.get_project_record(record_id) for record_id in record_ids]
-        if any(record.project_id != project.id for record in records):
-            raise ValueError("project answer sources must belong to the reply project")
+        self._check_project_answer_sources(assistant, record_ids)
         with self._connect() as connection:
-            for rank, record_id in enumerate(record_ids):
-                connection.execute(
-                    """
-                    INSERT OR IGNORE INTO project_answer_sources
-                    (assistant_message_id, project_record_id, source_rank)
-                    VALUES (?, ?, ?)
-                    """,
-                    (assistant_message_id, record_id, rank),
-                )
+            self._insert_project_answer_sources(connection, assistant_message_id, record_ids)
         saved = self.list_project_answer_sources(assistant_message_id)
         if [record.id for record in saved] != record_ids:
             raise ValueError("project answer sources already exist with different records")
@@ -480,6 +464,81 @@ class CaptureStore:
         if not references or len(references) > 12 or len(set(references)) != len(references):
             raise ValueError("a local-context answer needs one to twelve unique sources")
         assistant = self.get_message(assistant_message_id)
+        self._check_local_context_answer_sources(assistant, references)
+        with self._connect() as connection:
+            self._insert_local_context_answer_sources(connection, assistant_message_id, references)
+        saved = self.list_local_context_answer_sources(assistant_message_id)
+        if [source.reference for source in saved] != references:
+            raise ValueError("local-context sources already exist with different records")
+        return saved
+
+    def save_answer_with_sources(
+        self,
+        message: Message,
+        project_record_ids: list[str],
+        local_references: list[LocalContextSourceRef],
+    ) -> Message:
+        """Save a read answer and its source cards in one transaction, or none of them.
+
+        An answer saved without its sources would show a claim without evidence, and its
+        message ID would then block the failure reply that should replace it.
+        """
+
+        if not project_record_ids and not local_references:
+            raise ValueError("an answer with sources needs at least one source")
+        if message.role != "assistant":
+            raise ValueError("an answer with sources must be an assistant message")
+        self._check_message(message)
+        if len(project_record_ids) > 12 or len(set(project_record_ids)) != len(project_record_ids):
+            raise ValueError("a project answer needs one to twelve unique source records")
+        if len(local_references) > 12 or len(set(local_references)) != len(local_references):
+            raise ValueError("a local-context answer needs one to twelve unique sources")
+        if project_record_ids:
+            self._check_project_answer_sources(message, project_record_ids)
+        if local_references:
+            self._check_local_context_answer_sources(message, local_references)
+        with self._connect() as connection:
+            inserted = self._insert_message(connection, message)
+            if not inserted:
+                existing = connection.execute("SELECT * FROM messages WHERE id = ?", (message.id,)).fetchone()
+                if Message(**dict(existing)) != message:
+                    raise ValueError("message ID already exists with different content")
+            self._insert_project_answer_sources(connection, message.id, project_record_ids)
+            self._insert_local_context_answer_sources(connection, message.id, local_references)
+            saved_records = [
+                row["project_record_id"]
+                for row in connection.execute(
+                    "SELECT project_record_id FROM project_answer_sources "
+                    "WHERE assistant_message_id = ? ORDER BY source_rank ASC",
+                    (message.id,),
+                )
+            ]
+            saved_references = [
+                LocalContextSourceRef(source_type=row["source_type"], source_id=row["source_id"])
+                for row in connection.execute(
+                    "SELECT source_type, source_id FROM local_context_answer_sources "
+                    "WHERE assistant_message_id = ? ORDER BY source_rank ASC",
+                    (message.id,),
+                )
+            ]
+            if saved_records != project_record_ids or saved_references != local_references:
+                raise ValueError("answer sources already exist with different records")
+        return self.get_message(message.id)
+
+    def _check_project_answer_sources(self, assistant: Message, record_ids: list[str]) -> None:
+        if assistant.role != "assistant" or assistant.reply_to_message_id is None:
+            raise ValueError("project answer sources require an assistant reply")
+        source = self._require_source_message(assistant.reply_to_message_id, assistant.conversation_id)
+        project = self.get_conversation_project(source.conversation_id)
+        if project is None:
+            raise ValueError("project answer sources require an assigned project")
+        records = [self.get_project_record(record_id) for record_id in record_ids]
+        if any(record.project_id != project.id for record in records):
+            raise ValueError("project answer sources must belong to the reply project")
+
+    def _check_local_context_answer_sources(
+        self, assistant: Message, references: list[LocalContextSourceRef]
+    ) -> None:
         if assistant.role != "assistant" or assistant.reply_to_message_id is None:
             raise ValueError("local-context sources require an assistant reply")
         conversation = self.get_conversation(assistant.conversation_id)
@@ -490,20 +549,34 @@ class CaptureStore:
                 source = self.get_saved_item(reference.source_id)
             if source.workspace_id != conversation.workspace_id:
                 raise ValueError("local-context sources must belong to the reply workspace")
-        with self._connect() as connection:
-            for rank, reference in enumerate(references):
-                connection.execute(
-                    """
-                    INSERT OR IGNORE INTO local_context_answer_sources
-                    (assistant_message_id, source_type, source_id, source_rank)
-                    VALUES (?, ?, ?, ?)
-                    """,
-                    (assistant_message_id, reference.source_type, reference.source_id, rank),
-                )
-        saved = self.list_local_context_answer_sources(assistant_message_id)
-        if [source.reference for source in saved] != references:
-            raise ValueError("local-context sources already exist with different records")
-        return saved
+
+    @staticmethod
+    def _insert_project_answer_sources(
+        connection: sqlite3.Connection, assistant_message_id: str, record_ids: list[str]
+    ) -> None:
+        for rank, record_id in enumerate(record_ids):
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO project_answer_sources
+                (assistant_message_id, project_record_id, source_rank)
+                VALUES (?, ?, ?)
+                """,
+                (assistant_message_id, record_id, rank),
+            )
+
+    @staticmethod
+    def _insert_local_context_answer_sources(
+        connection: sqlite3.Connection, assistant_message_id: str, references: list[LocalContextSourceRef]
+    ) -> None:
+        for rank, reference in enumerate(references):
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO local_context_answer_sources
+                (assistant_message_id, source_type, source_id, source_rank)
+                VALUES (?, ?, ?, ?)
+                """,
+                (assistant_message_id, reference.source_type, reference.source_id, rank),
+            )
 
     def list_local_context_answer_sources(self, assistant_message_id: str) -> list[LocalContextSource]:
         with self._connect() as connection:
@@ -997,7 +1070,7 @@ class CaptureStore:
             )
         return self.get_project_change_operation(operation_id)
 
-    def save_message(self, message: Message) -> Message:
+    def _check_message(self, message: Message) -> None:
         if message.role == "user" and message.reply_to_message_id is not None:
             raise ValueError("a user message cannot reply to another message")
         if message.role == "assistant":
@@ -1006,23 +1079,32 @@ class CaptureStore:
             parent = self.get_message(message.reply_to_message_id)
             if parent.role != "user" or parent.conversation_id != message.conversation_id:
                 raise ValueError("an assistant message must reply to a user in its conversation")
+
+    @staticmethod
+    def _insert_message(connection: sqlite3.Connection, message: Message) -> bool:
+        """Insert a message unless its ID exists; True when this call inserted it."""
+
+        cursor = connection.execute(
+            """
+            INSERT OR IGNORE INTO messages
+            (id, conversation_id, role, content, reply_to_message_id, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                message.id,
+                message.conversation_id,
+                message.role,
+                message.content,
+                message.reply_to_message_id,
+                message.created_at.isoformat(),
+            ),
+        )
+        return cursor.rowcount == 1
+
+    def save_message(self, message: Message) -> Message:
+        self._check_message(message)
         with self._connect() as connection:
-            cursor = connection.execute(
-                """
-                INSERT OR IGNORE INTO messages
-                (id, conversation_id, role, content, reply_to_message_id, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    message.id,
-                    message.conversation_id,
-                    message.role,
-                    message.content,
-                    message.reply_to_message_id,
-                    message.created_at.isoformat(),
-                ),
-            )
-            inserted = cursor.rowcount == 1
+            inserted = self._insert_message(connection, message)
         if not inserted:
             existing = self.get_message(message.id)
             if existing != message:

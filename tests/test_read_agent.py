@@ -9,6 +9,7 @@ from captureflow.read_agent import (
     AgentModelTurn,
     AgentToolCall,
     ReadAgentLoop,
+    ReadAgentUsage,
 )
 from captureflow.read_agent_tools import BoundReadTools
 from captureflow.storage import CaptureStore
@@ -214,6 +215,28 @@ class ReadAgentLoopTests(unittest.TestCase):
 
         self.assertEqual(run.stop_reason, "model_budget_exhausted")
         self.assertEqual(run.tool_calls, 1)
+
+    def test_a_run_that_raises_still_reports_what_it_spent(self) -> None:
+        class FailingSecondCall(ScriptedReadAgentModel):
+            def next_read_agent_turn(self, messages, tools) -> AgentModelTurn:
+                if self.requests:
+                    self.requests.append((messages, tools))
+                    raise RuntimeError("provider failed")
+                return super().next_read_agent_turn(messages, tools)
+
+        usage = ReadAgentUsage()
+
+        with self.assertRaisesRegex(RuntimeError, "provider failed"):
+            ReadAgentLoop(FailingSecondCall([self._calendar_call()])).run(
+                system_prompt="Answer only from tool results.",
+                user_input={"question": "Friday?"},
+                tools=self.tools,
+                usage=usage,
+            )
+
+        self.assertEqual(usage.model_calls, 2)
+        self.assertEqual(usage.tool_calls, 1)
+        self.assertGreater(usage.model_seconds, 0)
 
     def _calendar_call(self) -> AgentModelTurn:
         return AgentModelTurn(

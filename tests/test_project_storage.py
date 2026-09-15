@@ -52,6 +52,42 @@ class ProjectStorageTests(unittest.TestCase):
         self.assertEqual(events[0].action, "created")
         self.assertEqual(events[0].source_message_id, self.message.id)
 
+    def test_an_answer_and_its_sources_are_saved_together_or_not_at_all(self) -> None:
+        record = self.store.save_project_record(
+            ProjectRecord(
+                id="record-answer-source",
+                project_id=self.project.id,
+                conversation_id=self.conversation.id,
+                kind="task",
+                content="Implement the tracker foundation.",
+                state="active",
+                source_message_id=self.message.id,
+                source_quote="Phase 3 is complete",
+            )
+        )
+        answer = Message(
+            id="answer-with-sources",
+            conversation_id=self.conversation.id,
+            role="assistant",
+            content="The tracker foundation is open.",
+            reply_to_message_id=self.message.id,
+        )
+
+        def fail_inside_the_transaction(connection, assistant_message_id, references):
+            raise ValueError("simulated source write failure")
+
+        self.store._insert_local_context_answer_sources = fail_inside_the_transaction
+        with self.assertRaisesRegex(ValueError, "simulated"):
+            self.store.save_answer_with_sources(answer, [record.id], [])
+        with self.assertRaises(KeyError):
+            self.store.get_message(answer.id)
+        self.assertEqual(self.store.list_project_answer_sources(answer.id), [])
+
+        del self.store._insert_local_context_answer_sources
+        saved = self.store.save_answer_with_sources(answer, [record.id], [])
+        self.assertEqual(saved, answer)
+        self.assertEqual([source.id for source in self.store.list_project_answer_sources(answer.id)], [record.id])
+
     def test_assignment_locks_after_the_first_project_record(self) -> None:
         self.store.save_project_record(
             ProjectRecord(

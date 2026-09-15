@@ -16,7 +16,6 @@ from .models import CalendarEvent, LocalContextSourceRef, Message, ProjectRecord
 from .storage import CaptureStore
 
 MAX_LOCAL_CONTEXT_SOURCES = 6
-MAX_AGENT_CONTEXT_SOURCES = 12
 
 
 @dataclass(frozen=True)
@@ -40,10 +39,7 @@ class LocalContextService:
         content: str,
         message_id: str | None = None,
         selected: list[CalendarEvent | SavedItem | ProjectRecord] | None = None,
-        max_selected_sources: int = MAX_LOCAL_CONTEXT_SOURCES,
     ) -> LocalContextTurn:
-        if not 1 <= max_selected_sources <= MAX_AGENT_CONTEXT_SOURCES:
-            raise ValueError("selected source limit must be between one and twelve")
         user_message = self._user_message(conversation_id, content, message_id)
         existing_reply = self.store.get_assistant_reply(user_message.id)
         if existing_reply is not None:
@@ -52,7 +48,7 @@ class LocalContextService:
         sources = (
             self._select_sources(conversation_id, content)
             if looked_up
-            else list(selected)[:max_selected_sources]
+            else list(selected)[:MAX_LOCAL_CONTEXT_SOURCES]
         )
         if not sources:
             return LocalContextTurn(
@@ -72,17 +68,9 @@ class LocalContextService:
     def _save_sources(
         self, assistant: Message, sources: list[CalendarEvent | SavedItem | ProjectRecord]
     ) -> None:
-        local_references = [
-            LocalContextSourceRef(
-                source_type="calendar_event" if isinstance(source, CalendarEvent) else "saved_item",
-                source_id=source.id,
-            )
-            for source in sources
-            if isinstance(source, (CalendarEvent, SavedItem))
-        ]
+        project_record_ids, local_references = answer_source_references(sources)
         if local_references:
             self.store.save_local_context_answer_sources(assistant.id, local_references)
-        project_record_ids = [source.id for source in sources if isinstance(source, ProjectRecord)]
         if project_record_ids:
             self.store.save_project_answer_sources(assistant.id, project_record_ids)
 
@@ -147,6 +135,29 @@ class LocalContextService:
                 created_at=utc_now(),
             )
         )
+
+
+def format_selected_reply(query: str, sources: list[CalendarEvent | SavedItem | ProjectRecord]) -> str:
+    """The reply for items a caller already selected, as a local answer with named items shows it."""
+
+    return _format_reply(query, sources, looked_up=False)
+
+
+def answer_source_references(
+    sources: list[CalendarEvent | SavedItem | ProjectRecord],
+) -> tuple[list[str], list[LocalContextSourceRef]]:
+    """Split an answer's sources into project record IDs and Calendar/Note/Idea references."""
+
+    project_record_ids = [source.id for source in sources if isinstance(source, ProjectRecord)]
+    local_references = [
+        LocalContextSourceRef(
+            source_type="calendar_event" if isinstance(source, CalendarEvent) else "saved_item",
+            source_id=source.id,
+        )
+        for source in sources
+        if isinstance(source, (CalendarEvent, SavedItem))
+    ]
+    return project_record_ids, local_references
 
 
 def _rank(query: str, candidates: list, text_for_candidate) -> list:

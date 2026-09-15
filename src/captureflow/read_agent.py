@@ -111,6 +111,16 @@ class ReadAgentModel(Protocol):
     ) -> AgentModelTurn: ...
 
 
+@dataclass
+class ReadAgentUsage:
+    """What a run has spent so far. The caller owns it, so a run that raises still reports it."""
+
+    model_calls: int = 0
+    tool_calls: int = 0
+    model_seconds: float = 0.0
+    tool_seconds: float = 0.0
+
+
 @dataclass(frozen=True)
 class ReadAgentRun:
     final_response: AgentFinalResponse | None
@@ -127,10 +137,7 @@ class ReadAgentState(TypedDict, total=False):
     tools: BoundReadTools
     model_turn: AgentModelTurn
     final_response: AgentFinalResponse | None
-    model_calls: int
-    tool_calls: int
-    model_seconds: float
-    tool_seconds: float
+    usage: ReadAgentUsage
     repair_attempted: bool
     stop_reason: AgentStopReason | None
 
@@ -158,7 +165,9 @@ class ReadAgentLoop:
         system_prompt: str,
         user_input: dict[str, Any],
         tools: BoundReadTools,
+        usage: ReadAgentUsage | None = None,
     ) -> ReadAgentRun:
+        usage = ReadAgentUsage() if usage is None else usage
         final_schema = json.dumps(AgentFinalResponse.model_json_schema(), ensure_ascii=False)
         initial: ReadAgentState = {
             "messages": [
@@ -173,10 +182,7 @@ class ReadAgentLoop:
             ],
             "tools": tools,
             "final_response": None,
-            "model_calls": 0,
-            "tool_calls": 0,
-            "model_seconds": 0.0,
-            "tool_seconds": 0.0,
+            "usage": usage,
             "repair_attempted": False,
             "stop_reason": None,
         }
@@ -187,10 +193,10 @@ class ReadAgentLoop:
         return ReadAgentRun(
             final_response=state.get("final_response"),
             observed_resources=dict(tools.observed_resources),
-            model_calls=state["model_calls"],
-            tool_calls=state["tool_calls"],
-            model_seconds=state["model_seconds"],
-            tool_seconds=state["tool_seconds"],
+            model_calls=usage.model_calls,
+            tool_calls=usage.tool_calls,
+            model_seconds=usage.model_seconds,
+            tool_seconds=usage.tool_seconds,
             stop_reason=stop_reason,
         )
 
@@ -208,20 +214,22 @@ class ReadAgentLoop:
         return graph.compile()
 
     def _call_model(self, state: ReadAgentState) -> ReadAgentState:
-        if state["model_calls"] >= self.max_model_calls:
+        usage = state["usage"]
+        if usage.model_calls >= self.max_model_calls:
             return {"stop_reason": "model_budget_exhausted"}
+        # A call counts once it is made, including one that fails.
+        usage.model_calls += 1
         started = perf_counter()
-        turn = AgentModelTurn.model_validate(
-            self.model.next_read_agent_turn(
-                messages=state["messages"],
-                tools=state["tools"].definitions_for_model(),
+        try:
+            turn = AgentModelTurn.model_validate(
+                self.model.next_read_agent_turn(
+                    messages=state["messages"],
+                    tools=state["tools"].definitions_for_model(),
+                )
             )
-        )
-        update: ReadAgentState = {
-            "model_turn": turn,
-            "model_calls": state["model_calls"] + 1,
-            "model_seconds": state["model_seconds"] + perf_counter() - started,
-        }
+        finally:
+            usage.model_seconds += perf_counter() - started
+        update: ReadAgentState = {"model_turn": turn}
         # The single repair is only for correcting citations, not for making an
         # invented citation valid after the fact with another lookup.
         if state["repair_attempted"] and turn.tool_calls:
@@ -229,33 +237,31 @@ class ReadAgentLoop:
         return update
 
     def _run_tools(self, state: ReadAgentState) -> ReadAgentState:
+        usage = state["usage"]
         calls = state["model_turn"].tool_calls
-        if state["tool_calls"] + len(calls) > self.max_tool_calls:
+        if usage.tool_calls + len(calls) > self.max_tool_calls:
             return {"stop_reason": "tool_budget_exhausted"}
 
         messages = [*state["messages"], state["model_turn"].assistant_message()]
         stop_reason: AgentStopReason | None = None
-        executed = 0
         started = perf_counter()
-        for call in calls:
-            result = state["tools"].invoke(call.name, call.arguments)
-            executed += 1
-            messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": call.id,
-                    "content": json.dumps(result.model_dump(mode="json"), ensure_ascii=False),
-                }
-            )
-            if result.error is not None and result.error.category == "policy_denied":
-                stop_reason = "policy_denied"
-                break
-        return {
-            "messages": messages,
-            "tool_calls": state["tool_calls"] + executed,
-            "tool_seconds": state["tool_seconds"] + perf_counter() - started,
-            "stop_reason": stop_reason,
-        }
+        try:
+            for call in calls:
+                usage.tool_calls += 1
+                result = state["tools"].invoke(call.name, call.arguments)
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call.id,
+                        "content": json.dumps(result.model_dump(mode="json"), ensure_ascii=False),
+                    }
+                )
+                if result.error is not None and result.error.category == "policy_denied":
+                    stop_reason = "policy_denied"
+                    break
+        finally:
+            usage.tool_seconds += perf_counter() - started
+        return {"messages": messages, "stop_reason": stop_reason}
 
     def _validate_final(self, state: ReadAgentState) -> ReadAgentState:
         response = state["model_turn"].final_response
@@ -267,7 +273,7 @@ class ReadAgentLoop:
         ]
         if not unobserved:
             return {"final_response": response, "stop_reason": "completed"}
-        if state["repair_attempted"] or state["model_calls"] >= self.max_model_calls:
+        if state["repair_attempted"] or state["usage"].model_calls >= self.max_model_calls:
             return {"stop_reason": "validation_failed"}
         messages = [
             *state["messages"],
