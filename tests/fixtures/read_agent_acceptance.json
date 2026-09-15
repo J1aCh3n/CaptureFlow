@@ -3,8 +3,8 @@
     "reference_date": "2026-09-09",
     "timezone": "America/Vancouver",
     "database_seed": "read-agent acceptance seed in scripts/run_read_agent_acceptance.py",
-    "model": "qwen3.8-flash",
-    "version": 1,
+    "model": "qwen3.7-flash-2026-07-15",
+    "version": 2,
     "next_week": ["2026-09-14", "2026-09-20"]
   },
   "cases": [

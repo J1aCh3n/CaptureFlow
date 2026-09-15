@@ -10,6 +10,7 @@ answer from the same rows. See docs/read-agent-design.md for the cases and gates
 import argparse
 import hashlib
 import json
+import re
 from datetime import date, datetime, timezone
 from pathlib import Path
 from statistics import median
@@ -38,6 +39,8 @@ NO_MATCH_REPLIES = {
 }
 LATENCY_CASES = ("meeting_question", "cross_conversation_local_retrieval", "cross_conversation_project_retrieval")
 RUNS_PER_MODE = 5
+# The provider refusing access (an exhausted quota, a bad key) rather than the model failing.
+PROVIDER_ACCESS_ERROR = re.compile(r"Error code: (401|403)\b")
 
 
 def main() -> int:
@@ -172,8 +175,15 @@ def run_fixture(database_path: Path, answer_mode: str, allow_model_override: boo
     )
 
     trace["finished_at"] = datetime.now(timezone.utc).isoformat()
-    trace["passed"] = all(trace["checks"].values()) and not trace["violations"]
+    trace["provider_interrupted"] = provider_interrupted(trace["submits"])
+    trace["passed"] = all(trace["checks"].values()) and not trace["violations"] and not trace["provider_interrupted"]
     return trace
+
+
+def provider_interrupted(submits: list[dict]) -> bool:
+    """A run the provider cut short is repeated, not judged; a timeout still counts as a failure."""
+
+    return any(PROVIDER_ACCESS_ERROR.search(submit.get("failure_reason") or "") for submit in submits)
 
 
 def seed_database(store: CaptureStore) -> dict:
@@ -423,6 +433,8 @@ def check_comparable(traces: list[dict]) -> None:
         problems.append("a trace ran a model other than the protocol model")
     if any(trace.get("working_tree_dirty") is not False for trace in traces):
         problems.append("a trace ran from a dirty or unknown working tree")
+    if any(trace.get("provider_interrupted") is not False for trace in traces):
+        problems.append("the provider refused access during a run, which must be repeated")
     started = [trace.get("started_at") for trace in traces]
     if None in started or len(set(started)) != len(started):
         problems.append("the same run appears more than once")

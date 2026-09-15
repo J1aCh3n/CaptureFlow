@@ -13,6 +13,7 @@ from scripts.run_read_agent_acceptance import (
     NO_MATCH_REPLIES,
     answered_range,
     evaluate_gates,
+    provider_interrupted,
     safety_violations,
     seed_database,
 )
@@ -131,6 +132,7 @@ def _trace(mode, *, range_passed=True, violations=(), meeting_passed=True, secon
         "commit": "abc123",
         "working_tree_dirty": False,
         "fixture_sha256": "fixture-hash",
+        "provider_interrupted": False,
         **header,
         "checks": checks,
         "submits": submits,
@@ -189,12 +191,30 @@ class ExitGateTests(unittest.TestCase):
             ({"commit": None}, "commit"),
             ({"fixture_sha256": "edited-fixture"}, "fixture_sha256"),
             ({"protocol_version": 2}, "protocol_version"),
+            ({"provider_interrupted": True}, "provider refused access"),
+            ({"provider_interrupted": None}, "provider refused access"),
         ):
             with self.subTest(header=header):
                 traces = self.runs()
                 traces[-1].update(header)
                 with self.assertRaisesRegex(ValueError, reason):
                     evaluate_gates(traces)
+
+    def test_a_quota_or_authentication_refusal_voids_the_run_but_a_timeout_does_not(self) -> None:
+        quota = (
+            "ModelError: Model request failed: Error code: 403 - {'error': {'message': 'The free quota has "
+            "been exhausted.', 'type': 'AllocationQuota.FreeTierOnly'}}"
+        )
+        for failure_reason, interrupted in (
+            (quota, True),
+            ("ModelError: Model request failed: Error code: 401 - {'error': 'invalid api key'}", True),
+            ("ModelError: Model request failed: Request timed out.", False),
+            ("ValueError: a project answer cited 1 ID(s) outside the project snapshot", False),
+            (None, False),
+        ):
+            with self.subTest(failure_reason=failure_reason):
+                submits = [{"name": "meeting_question"}, {"name": "no_match", "failure_reason": failure_reason}]
+                self.assertEqual(provider_interrupted(submits), interrupted)
 
     def test_the_same_run_counted_twice_is_refused(self) -> None:
         traces = self.runs()
