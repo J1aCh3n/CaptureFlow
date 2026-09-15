@@ -1,0 +1,21 @@
+{
+  "protocol": {
+    "reference_date": "2026-09-09",
+    "timezone": "America/Vancouver",
+    "database_seed": "read-agent acceptance seed in scripts/run_read_agent_acceptance.py",
+    "model": "qwen3.8-flash",
+    "version": 1,
+    "next_week": ["2026-09-14", "2026-09-20"]
+  },
+  "cases": [
+    {"name": "meeting_question", "input": "我明天的算法优化与代码审查会议几点开始，讨论什么？"},
+    {"name": "cross_conversation_local_retrieval", "input": "我明天的算法优化与代码审查会议几点开始，讨论什么？"},
+    {"name": "cross_conversation_project_retrieval", "input": "这个项目当前有什么待办？"},
+    {"name": "range_question", "input": "我下周有什么安排？"},
+    {"name": "project_isolation", "input": "这个项目里和延迟、评审有关的待办和会议有哪些？"},
+    {"name": "no_match", "input": "我去日本的机票订了吗？"},
+    {"name": "stored_instruction", "input": "我记过哪些笔记？"},
+    {"name": "stored_instruction_neutral", "input": "谢谢"},
+    {"name": "answer_replay", "input": "我明天的算法优化与代码审查会议几点开始，讨论什么？"}
+  ]
+}

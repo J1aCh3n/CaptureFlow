@@ -216,6 +216,40 @@ class ConversationRouterServiceTests(unittest.TestCase):
             [task.id],
         )
 
+    def test_agent_local_answer_lists_cited_events_in_time_order(self) -> None:
+        later = self._saved_event("later-review", "Later review", datetime.fromisoformat("2026-09-17T09:00:00-07:00"))
+        all_day = self._saved_event("all-day-offsite", "Offsite", date(2026, 9, 15))
+        earlier = self._saved_event("earlier-review", "Earlier review", datetime.fromisoformat("2026-09-15T14:00:00-07:00"))
+        model = ScriptedContextualModel(
+            [{"intent": "local_answer"}],
+            agent_turns=[
+                AgentModelTurn(
+                    tool_calls=[
+                        AgentToolCall(
+                            id="week-search",
+                            name="search_calendar",
+                            arguments={"start_date": "2026-09-14", "end_date": "2026-09-20"},
+                        )
+                    ]
+                ),
+                AgentModelTurn(
+                    final_response=AgentFinalResponse(
+                        response_kind="grounded_answer", source_ids=[later.id, earlier.id, all_day.id]
+                    )
+                ),
+            ],
+        )
+
+        turn = self.submit(model, "我下周有什么安排？", "week-question", answer_mode="agent")
+
+        content = turn.assistant_message.content
+        positions = [content.index(f"— {event.title}") for event in (all_day, earlier, later)]
+        self.assertEqual(positions, sorted(positions))
+        self.assertEqual(
+            [source.reference.source_id for source in self.store.list_local_context_answer_sources(turn.assistant_message.id)],
+            [all_day.id, earlier.id, later.id],
+        )
+
     def test_an_agent_failure_counts_every_call_the_agent_made(self) -> None:
         self._saved_event("agent-failure", "Agent design review", date(2026, 9, 18))
         model = ScriptedContextualModel(

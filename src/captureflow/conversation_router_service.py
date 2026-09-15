@@ -405,6 +405,9 @@ class ConversationRouterService:
                     failure_reason=f"ReadAgentStop: validation_failed: {error}",
                 )
             if route == "local_answer":
+                # Events read in time order, whatever order the model cited them in.
+                events = sorted((source for source in sources if isinstance(source, CalendarEvent)), key=_event_start)
+                sources = [*events, *(source for source in sources if not isinstance(source, CalendarEvent))]
                 assistant = self._answer_with_sources(
                     state["user_message"], format_selected_reply(state["content"], sources), sources
                 )
@@ -1251,6 +1254,12 @@ def _parse_start_at(value: str) -> date | datetime:
         return datetime.fromisoformat(value)
     except ValueError:
         return date.fromisoformat(value)
+
+
+def _event_start(event: CalendarEvent) -> datetime:
+    if isinstance(event.start_at, datetime):
+        return event.start_at
+    return datetime.combine(event.start_at, time.min, tzinfo=ZoneInfo(event.timezone))
 
 
 def _event_schedule(event: CalendarEvent) -> str:
