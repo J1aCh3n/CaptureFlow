@@ -9,7 +9,7 @@ from openai import OpenAI
 from pydantic import BaseModel, ValidationError
 
 from .models import ConversationDecision, ProjectAnswer
-from .read_agent import AgentFinalResponse, AgentModelTurn, AgentToolCall
+from .read_agent import RESPOND_TOOL, AgentFinalResponse, AgentModelTurn, AgentToolCall
 
 
 class ModelError(RuntimeError):
@@ -250,7 +250,6 @@ class OpenAICompatibleModel:
             request: dict[str, Any] = {
                 "model": self.settings.model,
                 "timeout": self.settings.timeout_seconds,
-                "response_format": {"type": "json_object"},
                 "messages": messages,
                 "tools": tools,
             }
@@ -266,6 +265,13 @@ class OpenAICompatibleModel:
             response = self.client.chat.completions.create(**request)
             message = response.choices[0].message
             raw_calls = getattr(message, "tool_calls", None) or []
+            responses = [raw_call for raw_call in raw_calls if raw_call.function.name == RESPOND_TOOL]
+            if responses:
+                if len(raw_calls) != 1:
+                    raise InvalidStructuredOutput(f"The model called {RESPOND_TOOL} together with other tools.")
+                return AgentModelTurn(
+                    final_response=AgentFinalResponse.model_validate_json(responses[0].function.arguments)
+                )
             if raw_calls:
                 calls: list[AgentToolCall] = []
                 for raw_call in raw_calls:
@@ -280,11 +286,7 @@ class OpenAICompatibleModel:
                         )
                     )
                 return AgentModelTurn(tool_calls=calls)
-            if not message.content:
-                raise ModelError("The model returned neither tool calls nor a final response.")
-            return AgentModelTurn(
-                final_response=AgentFinalResponse.model_validate_json(message.content)
-            )
+            raise InvalidStructuredOutput(f"The model answered without calling {RESPOND_TOOL}.")
         except ValidationError as error:
             raise InvalidStructuredOutput(
                 f"The model returned invalid agent output: {describe_validation_error(error)}"

@@ -62,6 +62,19 @@ class AgentFinalResponse(BaseModel):
         return self
 
 
+RESPOND_TOOL = "respond"
+# The final answer arrives as this tool's arguments. Asked to write JSON content against a
+# schema in the prompt, qwen3.7-flash-2026-07-15 echoed the schema instead of an answer.
+_RESPOND_DEFINITION = {
+    "type": "function",
+    "function": {
+        "name": RESPOND_TOOL,
+        "description": "Give your final response. Call it once, alone, when you have finished searching.",
+        "parameters": AgentFinalResponse.model_json_schema(),
+    },
+}
+
+
 class AgentToolCall(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -168,14 +181,13 @@ class ReadAgentLoop:
         usage: ReadAgentUsage | None = None,
     ) -> ReadAgentRun:
         usage = ReadAgentUsage() if usage is None else usage
-        final_schema = json.dumps(AgentFinalResponse.model_json_schema(), ensure_ascii=False)
         initial: ReadAgentState = {
             "messages": [
                 {
                     "role": "system",
                     "content": (
-                        f"{system_prompt}\nWhen you have enough evidence, stop calling tools and return "
-                        f"one JSON object matching this schema: {final_schema}"
+                        f"{system_prompt}\nWhen you have enough evidence, stop searching and call the "
+                        f"{RESPOND_TOOL} tool once, alone, with your final response."
                     ),
                 },
                 {"role": "user", "content": json.dumps(user_input, ensure_ascii=False)},
@@ -224,7 +236,7 @@ class ReadAgentLoop:
             turn = AgentModelTurn.model_validate(
                 self.model.next_read_agent_turn(
                     messages=state["messages"],
-                    tools=state["tools"].definitions_for_model(),
+                    tools=[*state["tools"].definitions_for_model(), _RESPOND_DEFINITION],
                 )
             )
         finally:
@@ -281,7 +293,7 @@ class ReadAgentLoop:
                 "role": "user",
                 "content": (
                     "Your final source_ids included IDs that no tool returned in this run. "
-                    "Return one corrected final JSON response using only IDs from tool results; "
+                    f"Call {RESPOND_TOOL} again with a corrected response using only IDs from tool results; "
                     "do not make another tool call merely to justify an invented ID."
                 ),
             },

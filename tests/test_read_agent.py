@@ -5,6 +5,7 @@ from pathlib import Path
 
 from captureflow.models import CalendarEvent, Conversation, Message
 from captureflow.read_agent import (
+    RESPOND_TOOL,
     AgentFinalResponse,
     AgentModelTurn,
     AgentToolCall,
@@ -80,6 +81,26 @@ class ReadAgentLoopTests(unittest.TestCase):
         second_messages = model.requests[1][0]
         self.assertEqual(second_messages[-1]["role"], "tool")
         self.assertIn(self.event.id, second_messages[-1]["content"])
+
+    def test_the_model_is_offered_respond_for_its_final_answer_instead_of_a_json_schema(self) -> None:
+        model = ScriptedReadAgentModel([AgentModelTurn(final_response=AgentFinalResponse(response_kind="no_match"))])
+
+        ReadAgentLoop(model).run(
+            system_prompt="Answer only from tool results.",
+            user_input={"question": "Anything?"},
+            tools=self.tools,
+        )
+
+        messages, tools = model.requests[0]
+        respond = [tool for tool in tools if tool["function"]["name"] == RESPOND_TOOL]
+        self.assertEqual(len(respond), 1)
+        self.assertEqual(respond[0]["function"]["parameters"], AgentFinalResponse.model_json_schema())
+        self.assertEqual(
+            {tool["function"]["name"] for tool in tools} - {RESPOND_TOOL},
+            {tool["function"]["name"] for tool in self.tools.definitions_for_model()},
+        )
+        self.assertIn(RESPOND_TOOL, messages[0]["content"])
+        self.assertNotIn('"properties"', messages[0]["content"])
 
     def test_unobserved_source_gets_one_repair_then_succeeds(self) -> None:
         model = ScriptedReadAgentModel(
