@@ -186,8 +186,9 @@ class ReadAgentLoop:
                 {
                     "role": "system",
                     "content": (
-                        f"{system_prompt}\nWhen you have enough evidence, stop searching and call the "
-                        f"{RESPOND_TOOL} tool once, alone, with your final response."
+                        f"{system_prompt}\nCall independent search tools together when useful. When you "
+                        f"have enough evidence or no matching results, call {RESPOND_TOOL} once, alone, "
+                        "with the final response; never write the final answer as message text."
                     ),
                 },
                 {"role": "user", "content": json.dumps(user_input, ensure_ascii=False)},

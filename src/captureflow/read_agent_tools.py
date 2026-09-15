@@ -52,33 +52,33 @@ class _KeywordArguments(_ToolArguments):
         return normalized
 
 
-class SearchCalendarArgs(_KeywordArguments):
-    start_date: date
-    end_date: date
+class _CalendarArguments(_KeywordArguments):
+    start_date: date | None = None
+    end_date: date | None = None
+
+    @model_validator(mode="after")
+    def validate_range(self) -> "_CalendarArguments":
+        if (self.start_date is None) != (self.end_date is None):
+            raise ValueError("start_date and end_date must be provided together")
+        if self.start_date is None:
+            if not self.keywords:
+                raise ValueError("keywords are required when no date range is provided")
+            return self
+        assert self.end_date is not None
+        if self.end_date < self.start_date:
+            raise ValueError("end_date must not be before start_date")
+        inclusive_days = (self.end_date - self.start_date).days + 1
+        if inclusive_days > MAX_CALENDAR_DAYS:
+            raise ValueError(f"calendar range cannot exceed {MAX_CALENDAR_DAYS} days")
+        return self
+
+
+class SearchCalendarArgs(_CalendarArguments):
     this_project_only: bool = False
 
-    @model_validator(mode="after")
-    def validate_range(self) -> "SearchCalendarArgs":
-        if self.end_date < self.start_date:
-            raise ValueError("end_date must not be before start_date")
-        inclusive_days = (self.end_date - self.start_date).days + 1
-        if inclusive_days > MAX_CALENDAR_DAYS:
-            raise ValueError(f"calendar range cannot exceed {MAX_CALENDAR_DAYS} days")
-        return self
 
-
-class SearchProjectCalendarArgs(_KeywordArguments):
-    start_date: date
-    end_date: date
-
-    @model_validator(mode="after")
-    def validate_range(self) -> "SearchProjectCalendarArgs":
-        if self.end_date < self.start_date:
-            raise ValueError("end_date must not be before start_date")
-        inclusive_days = (self.end_date - self.start_date).days + 1
-        if inclusive_days > MAX_CALENDAR_DAYS:
-            raise ValueError(f"calendar range cannot exceed {MAX_CALENDAR_DAYS} days")
-        return self
+class SearchProjectCalendarArgs(_CalendarArguments):
+    pass
 
 
 class SearchProjectRecordsArgs(_KeywordArguments):
@@ -171,7 +171,8 @@ class BoundReadTools:
                     "Search active calendar events in the current project."
                     if self.route == "project_answer"
                     else "Search active calendar events in the current workspace; optionally narrow to the current project."
-                ),
+                )
+                + " Provide start_date and end_date together for a bounded date search, or omit both and provide keywords for an all-date text search.",
                 arguments_model=calendar_arguments,
             ),
             "search_saved_items": ReadToolDefinition(
@@ -269,8 +270,12 @@ class BoundReadTools:
             )
         try:
             parsed = definition.arguments_model.model_validate(arguments)
-        except ValidationError:
-            return _error("retryable", "The tool arguments are invalid; correct them and try again.")
+        except ValidationError as error:
+            detail = "; ".join(
+                f"{'.'.join(str(part) for part in item['loc']) or '<root>'}: {item['msg']}"
+                for item in error.errors(include_input=False, include_url=False)
+            )
+            return _error("retryable", f"The tool arguments are invalid: {detail}")
 
         if name == "search_calendar":
             return self._search_calendar(parsed)
@@ -292,11 +297,14 @@ class BoundReadTools:
                 "The current conversation is not assigned to a project, so project-only calendar search is unavailable.",
             )
 
-        events = [
-            event
-            for event in self.store.list_calendar_events(self.conversation.workspace_id)
-            if arguments.start_date <= event.start_date <= arguments.end_date
-        ]
+        events = self.store.list_calendar_events(self.conversation.workspace_id)
+        if arguments.start_date is not None:
+            assert arguments.end_date is not None
+            events = [
+                event
+                for event in events
+                if arguments.start_date <= event.start_date <= arguments.end_date
+            ]
         if project_only:
             events = [
                 event

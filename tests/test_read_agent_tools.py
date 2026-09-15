@@ -130,6 +130,19 @@ class BoundReadToolsTests(unittest.TestCase):
         self.assertEqual(result.scope, "project")
         self.assertEqual([item["id"] for item in result.items], [event.id])
 
+    def test_calendar_can_search_by_keyword_without_inventing_a_date_range(self) -> None:
+        matching = self._event("japan-flight", "Japan flight booking", date(2027, 4, 10))
+        self._event("design-review", "Design review", date(2026, 9, 22))
+        tools = BoundReadTools.for_conversation(
+            self.store, self.conversation.id, "local_answer"
+        )
+
+        result = tools.invoke("search_calendar", {"keywords": ["Japan", "flight"]})
+
+        self.assertTrue(result.ok)
+        self.assertEqual([item["id"] for item in result.items], [matching.id])
+        self.assertEqual(result.scope, "workspace")
+
     def test_record_and_saved_item_filters_are_scoped_and_deterministic(self) -> None:
         record = self.store.save_project_record(
             ProjectRecord(
@@ -186,6 +199,26 @@ class BoundReadToolsTests(unittest.TestCase):
         self.assertFalse(credential.ok)
         self.assertEqual(credential.error.category, "policy_denied")
         self.assertEqual(tools.observed_resources, {})
+
+    def test_calendar_validation_explains_the_rule_without_echoing_values(self) -> None:
+        tools = BoundReadTools.for_conversation(
+            self.store, self.conversation.id, "local_answer"
+        )
+
+        unpaired = tools.invoke("search_calendar", {"start_date": "2026-09-01"})
+        unbounded = tools.invoke("search_calendar", {})
+        malformed = tools.invoke(
+            "search_calendar",
+            {
+                "start_date": "private-date-sentinel",
+                "end_date": "2026-09-02",
+            },
+        )
+
+        self.assertIn("start_date and end_date", unpaired.error.message)
+        self.assertIn("keywords", unbounded.error.message)
+        self.assertIn("start_date", malformed.error.message)
+        self.assertNotIn("private-date-sentinel", malformed.error.message)
 
     def test_notes_stay_in_the_project_for_a_local_answer_too(self) -> None:
         own = self._note("own-note", "Latency budget for this project", self.conversation.id, self.source.id)
