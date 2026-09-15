@@ -16,6 +16,7 @@ from .models import CalendarEvent, LocalContextSourceRef, Message, ProjectRecord
 from .storage import CaptureStore
 
 MAX_LOCAL_CONTEXT_SOURCES = 6
+MAX_AGENT_CONTEXT_SOURCES = 12
 
 
 @dataclass(frozen=True)
@@ -39,7 +40,10 @@ class LocalContextService:
         content: str,
         message_id: str | None = None,
         selected: list[CalendarEvent | SavedItem | ProjectRecord] | None = None,
+        max_selected_sources: int = MAX_LOCAL_CONTEXT_SOURCES,
     ) -> LocalContextTurn:
+        if not 1 <= max_selected_sources <= MAX_AGENT_CONTEXT_SOURCES:
+            raise ValueError("selected source limit must be between one and twelve")
         user_message = self._user_message(conversation_id, content, message_id)
         existing_reply = self.store.get_assistant_reply(user_message.id)
         if existing_reply is not None:
@@ -48,7 +52,7 @@ class LocalContextService:
         sources = (
             self._select_sources(conversation_id, content)
             if looked_up
-            else list(selected)[:MAX_LOCAL_CONTEXT_SOURCES]
+            else list(selected)[:max_selected_sources]
         )
         if not sources:
             return LocalContextTurn(

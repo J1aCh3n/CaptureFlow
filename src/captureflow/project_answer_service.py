@@ -125,10 +125,10 @@ def answer_project_question(
         raise ValueError(f"a project answer cited {len(unknown)} ID(s) outside the project snapshot")
     records = tuple(records_by_id[i] for i in answer.source_ids if i in records_by_id)[:MAX_SOURCE_CARDS]
     events = tuple(events_by_id[i] for i in answer.source_ids if i in events_by_id)[:MAX_SOURCE_CARDS]
-    return ProjectAnswerResult(_with_stored_dates(answer.reply, records, events), records, events)
+    return ProjectAnswerResult(with_stored_dates(answer.reply, records, events), records, events)
 
 
-def _with_stored_dates(
+def with_stored_dates(
     reply: str, records: tuple[ProjectRecord, ...], events: tuple[CalendarEvent, ...]
 ) -> str:
     dated = [

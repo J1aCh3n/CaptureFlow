@@ -15,14 +15,17 @@ from captureflow.models import (
     ToolOperation,
 )
 from captureflow.storage import CaptureStore
+from captureflow.read_agent import AgentFinalResponse, AgentModelTurn, AgentToolCall
 
 
 class ScriptedContextualModel:
-    def __init__(self, decisions, project_answers=()):
+    def __init__(self, decisions, project_answers=(), agent_turns=()):
         self.decisions = list(decisions)
         self.project_answers = list(project_answers)
+        self.agent_turns = list(agent_turns)
         self.calls = []
         self.project_answer_calls = []
+        self.agent_calls = []
 
     def propose_conversation_decision(self, **kwargs):
         self.calls.append(kwargs)
@@ -31,6 +34,10 @@ class ScriptedContextualModel:
     def answer_project_question(self, **kwargs):
         self.project_answer_calls.append(kwargs)
         return self.project_answers.pop(0)
+
+    def next_read_agent_turn(self, **kwargs):
+        self.agent_calls.append(kwargs)
+        return self.agent_turns.pop(0)
 
 
 def action(kind: str, *source_message_ids: str, **fields) -> dict:
@@ -100,6 +107,100 @@ class ConversationRouterServiceTests(unittest.TestCase):
                 source_quote=content,
                 **fields,
             )
+        )
+
+    # Optional Phase A read agent
+
+    def test_agent_local_answer_uses_tools_but_python_renders_the_cited_rows(self) -> None:
+        event = self._saved_event("agent-review", "Agent design review", date(2026, 9, 18))
+        model = ScriptedContextualModel(
+            [{"intent": "local_answer"}],
+            agent_turns=[
+                AgentModelTurn(
+                    tool_calls=[
+                        AgentToolCall(
+                            id="calendar-search",
+                            name="search_calendar",
+                            arguments={
+                                "start_date": "2026-09-18",
+                                "end_date": "2026-09-18",
+                            },
+                        )
+                    ]
+                ),
+                AgentModelTurn(
+                    final_response=AgentFinalResponse(
+                        response_kind="grounded_answer",
+                        reply="MODEL PROSE MUST NOT BE SHOWN",
+                        source_ids=[event.id],
+                    )
+                ),
+            ],
+        )
+
+        turn = self.submit(
+            model,
+            "What is scheduled on September 18?",
+            "agent-local-turn",
+            answer_mode="agent",
+        )
+
+        self.assertEqual(turn.outcome, "agent_local_answer")
+        self.assertEqual(turn.model_calls, 3)
+        self.assertEqual(turn.tool_calls, 1)
+        self.assertEqual(turn.agent_stop_reason, "completed")
+        self.assertIn(event.title, turn.assistant_message.content)
+        self.assertIn(event.start_at.isoformat(), turn.assistant_message.content)
+        self.assertNotIn("MODEL PROSE", turn.assistant_message.content)
+        self.assertEqual(
+            [source.reference.source_id for source in self.store.list_local_context_answer_sources(turn.assistant_message.id)],
+            [event.id],
+        )
+        self.assertNotIn("candidate_events", model.agent_calls[0]["messages"][1]["content"])
+
+    def test_agent_project_answer_shows_model_prose_and_sqlite_dates(self) -> None:
+        task = self._project_record(
+            "latency-task",
+            "task",
+            "active",
+            "Measure agent latency",
+            due_at=date(2026, 9, 25),
+        )
+        model = ScriptedContextualModel(
+            [{"intent": "project_answer"}],
+            agent_turns=[
+                AgentModelTurn(
+                    tool_calls=[
+                        AgentToolCall(
+                            id="record-search",
+                            name="search_project_records",
+                            arguments={"kinds": ["task"], "keywords": ["latency"]},
+                        )
+                    ]
+                ),
+                AgentModelTurn(
+                    final_response=AgentFinalResponse(
+                        response_kind="grounded_answer",
+                        reply="Latency measurement is still open.",
+                        source_ids=[task.id],
+                    )
+                ),
+            ],
+        )
+
+        turn = self.submit(
+            model,
+            "What remains for this project?",
+            "agent-project-turn",
+            answer_mode="agent",
+        )
+
+        self.assertEqual(turn.outcome, "agent_project_answer")
+        self.assertIn("Latency measurement is still open.", turn.assistant_message.content)
+        self.assertIn(task.due_at.isoformat(), turn.assistant_message.content)
+        self.assertEqual(
+            [record.id for record in self.store.list_project_answer_sources(turn.assistant_message.id)],
+            [task.id],
         )
 
     # Calendar creation

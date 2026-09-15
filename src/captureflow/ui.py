@@ -164,6 +164,13 @@ def database_path() -> Path:
     return Path(os.getenv("CAPTUREFLOW_DATABASE_PATH", "data/captureflow.sqlite3"))
 
 
+def configured_answer_mode() -> str:
+    mode = os.getenv("CAPTUREFLOW_ANSWER_MODE", "workflow").strip().casefold()
+    if mode not in {"workflow", "agent"}:
+        raise ValueError("CAPTUREFLOW_ANSWER_MODE must be workflow or agent.")
+    return mode
+
+
 @st.cache_resource
 def get_store(path: str) -> CaptureStore:
     store = CaptureStore(path)
@@ -776,17 +783,19 @@ def render_chat_input(
             try:
                 settings = ModelSettings.from_environment()
                 now = configured_reference_now(timezone)
+                answer_mode = configured_answer_mode()
                 turn = ConversationRouterService(
                     store,
                     OpenAICompatibleModel(settings),
                     now.date(),
                     timezone,
                     reference_time=now.time(),
+                    answer_mode=answer_mode,
                 ).submit(conversation_id, prompt)
                 if diagnostics_enabled:
                     _remember_turn_diagnostics(
                         turn.user_message.id,
-                        mode="contextual_router",
+                        mode=f"contextual_router_{answer_mode}",
                         intent=None if turn.decision is None else turn.decision.intent,
                         bounded_context_messages=len(turn.context_window.messages),
                         context_truncated=turn.context_window.truncated,
@@ -798,6 +807,8 @@ def render_chat_input(
                         model_calls=turn.model_calls,
                         model_seconds=turn.model_seconds,
                         local_seconds=turn.local_seconds,
+                        tool_calls=turn.tool_calls,
+                        agent_stop_reason=turn.agent_stop_reason,
                         total_seconds=perf_counter() - started,
                     )
             except (ModelError, ValueError) as error:
@@ -849,6 +860,11 @@ def _render_turn_diagnostics(message_id: str) -> None:
         )
         if diagnostics.get("failure_reason"):
             st.caption(f"Failure: {diagnostics['failure_reason']}")
+        if diagnostics.get("tool_calls") or diagnostics.get("agent_stop_reason"):
+            st.caption(
+                f"Agent tools: {diagnostics.get('tool_calls', 0)} · "
+                f"Stop: {diagnostics.get('agent_stop_reason') or 'not available'}"
+            )
         if "intent" in diagnostics:
             intent = diagnostics["intent"] or "not available"
             st.caption(

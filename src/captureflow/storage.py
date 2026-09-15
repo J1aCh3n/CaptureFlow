@@ -431,8 +431,8 @@ class CaptureStore:
     ) -> list[ProjectRecord]:
         """Persist the bounded record IDs that support one project answer."""
 
-        if not record_ids or len(record_ids) > 6 or len(set(record_ids)) != len(record_ids):
-            raise ValueError("a project answer needs one to six unique source records")
+        if not record_ids or len(record_ids) > 12 or len(set(record_ids)) != len(record_ids):
+            raise ValueError("a project answer needs one to twelve unique source records")
         assistant = self.get_message(assistant_message_id)
         if assistant.role != "assistant" or assistant.reply_to_message_id is None:
             raise ValueError("project answer sources require an assistant reply")
@@ -477,8 +477,8 @@ class CaptureStore:
     ) -> list[LocalContextSource]:
         """Persist the bounded Calendar/Note/Idea references supporting one read-only answer."""
 
-        if not references or len(references) > 6 or len(set(references)) != len(references):
-            raise ValueError("a local-context answer needs one to six unique sources")
+        if not references or len(references) > 12 or len(set(references)) != len(references):
+            raise ValueError("a local-context answer needs one to twelve unique sources")
         assistant = self.get_message(assistant_message_id)
         if assistant.role != "assistant" or assistant.reply_to_message_id is None:
             raise ValueError("local-context sources require an assistant reply")

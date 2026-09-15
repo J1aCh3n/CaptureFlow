@@ -9,6 +9,7 @@ from openai import OpenAI
 from pydantic import BaseModel, ValidationError
 
 from .models import ConversationDecision, ProjectAnswer
+from .read_agent import AgentFinalResponse, AgentModelTurn, AgentToolCall
 
 
 class ModelError(RuntimeError):
@@ -42,6 +43,10 @@ class ContextualConversationModel(Protocol):
         project_snapshot: dict,
         reference_date: str,
     ) -> ProjectAnswer: ...
+
+    def next_read_agent_turn(
+        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
+    ) -> AgentModelTurn: ...
 
 
 @dataclass(frozen=True)
@@ -235,6 +240,61 @@ class OpenAICompatibleModel:
                 "reference_date": reference_date,
             },
         )
+
+    def next_read_agent_turn(
+        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
+    ) -> AgentModelTurn:
+        """Normalize one OpenAI-compatible tool-calling response for the agent loop."""
+
+        try:
+            request: dict[str, Any] = {
+                "model": self.settings.model,
+                "timeout": self.settings.timeout_seconds,
+                "response_format": {"type": "json_object"},
+                "messages": messages,
+                "tools": tools,
+            }
+            if (
+                self.settings.model.casefold().startswith("qwen")
+                and self.settings.base_url is not None
+                and "aliyuncs.com" in self.settings.base_url.casefold()
+            ):
+                # DashScope Qwen 3.x defaults to thinking mode. Its function-calling
+                # guide recommends disabling thinking, which also avoids having to
+                # replay provider-specific reasoning_content on every tool round.
+                request["extra_body"] = {"enable_thinking": False}
+            response = self.client.chat.completions.create(**request)
+            message = response.choices[0].message
+            raw_calls = getattr(message, "tool_calls", None) or []
+            if raw_calls:
+                calls: list[AgentToolCall] = []
+                for raw_call in raw_calls:
+                    arguments = json.loads(raw_call.function.arguments)
+                    if not isinstance(arguments, dict):
+                        raise ValueError("tool arguments must be a JSON object")
+                    calls.append(
+                        AgentToolCall(
+                            id=raw_call.id,
+                            name=raw_call.function.name,
+                            arguments=arguments,
+                        )
+                    )
+                return AgentModelTurn(tool_calls=calls)
+            if not message.content:
+                raise ModelError("The model returned neither tool calls nor a final response.")
+            return AgentModelTurn(
+                final_response=AgentFinalResponse.model_validate_json(message.content)
+            )
+        except ValidationError as error:
+            raise InvalidStructuredOutput(
+                f"The model returned invalid agent output: {describe_validation_error(error)}"
+            ) from error
+        except (IndexError, ValueError, json.JSONDecodeError) as error:
+            raise InvalidStructuredOutput("The model returned invalid agent tool arguments.") from error
+        except Exception as error:
+            if isinstance(error, ModelError):
+                raise
+            raise ModelError(f"Model request failed: {error}") from error
 
     def _complete(self, schema: type[Schema], system: str, payload: dict[str, Any]) -> Schema:
         prompt = json.dumps(

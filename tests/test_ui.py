@@ -18,6 +18,7 @@ from captureflow.models import (
 )
 from captureflow.storage import CaptureStore
 from captureflow.time_config import configured_reference_date
+from captureflow.read_agent import AgentFinalResponse, AgentModelTurn, AgentToolCall
 
 
 class _CalendarRoutingUiModel:
@@ -69,6 +70,39 @@ class _LocalAnswerUiModel:
         }
 
 
+class _AgentLocalAnswerUiModel:
+    def __init__(self, event_id: str, event_date: date) -> None:
+        self.event_id = event_id
+        self.event_date = event_date
+        self.agent_calls = 0
+
+    def propose_conversation_decision(self, **_: object) -> dict:
+        return {"intent": "local_answer"}
+
+    def next_read_agent_turn(self, **_: object) -> AgentModelTurn:
+        self.agent_calls += 1
+        if self.agent_calls == 1:
+            return AgentModelTurn(
+                tool_calls=[
+                    AgentToolCall(
+                        id="ui-calendar-search",
+                        name="search_calendar",
+                        arguments={
+                            "start_date": self.event_date.isoformat(),
+                            "end_date": self.event_date.isoformat(),
+                        },
+                    )
+                ]
+            )
+        return AgentModelTurn(
+            final_response=AgentFinalResponse(
+                response_kind="grounded_answer",
+                reply="This prose is intentionally ignored for a local answer.",
+                source_ids=[self.event_id],
+            )
+        )
+
+
 class _CalendarDeleteUiModel:
     def propose_conversation_decision(self, *, candidate_events: list[str], **_: object) -> dict:
         return {
@@ -97,6 +131,7 @@ class UiTests(unittest.TestCase):
                 "CAPTUREFLOW_MODEL",
                 "CAPTUREFLOW_BASE_URL",
                 "CAPTUREFLOW_TIMEZONE",
+                "CAPTUREFLOW_ANSWER_MODE",
             )
         }
         os.environ["CAPTUREFLOW_DATABASE_PATH"] = str(
@@ -329,6 +364,50 @@ class UiTests(unittest.TestCase):
         self.assertTrue(any(label.startswith("Diagnostics ·") for label in expander_labels(app)))
         self.assertTrue(any("Model calls: 0" in caption.value for caption in app.caption))
         self.assertTrue(any("Session-only timing" in caption.value for caption in app.caption))
+
+    def test_agent_answer_mode_runs_the_read_loop_and_reports_its_budget(self) -> None:
+        os.environ["CAPTUREFLOW_API_KEY"] = "ui-test-key"
+        os.environ["CAPTUREFLOW_MODEL"] = "ui-test-model"
+        os.environ["CAPTUREFLOW_ANSWER_MODE"] = "agent"
+        app = AppTest.from_file("app.py").run()
+        store = CaptureStore(os.environ["CAPTUREFLOW_DATABASE_PATH"])
+        store.initialize()
+        conversation = store.list_conversations()[0]
+        event_date = configured_reference_date("America/Vancouver") + timedelta(days=2)
+        source = store.save_message(
+            Message(
+                id="ui-agent-source",
+                conversation_id=conversation.id,
+                role="user",
+                content="The agent review is in two days.",
+            )
+        )
+        event = store.save_calendar_event(
+            CalendarEvent(
+                id="ui-agent-event",
+                conversation_id=conversation.id,
+                title="Agent review",
+                source_message_id=source.id,
+                source_quote=source.content,
+                start_at=event_date,
+                all_day=True,
+                timezone="America/Vancouver",
+            )
+        )
+
+        with patch(
+            "captureflow.ui.OpenAICompatibleModel",
+            return_value=_AgentLocalAnswerUiModel(event.id, event_date),
+        ):
+            app.run()
+            app.sidebar.toggle[0].set_value(True).run()
+            app.chat_input[0].set_value("What is scheduled in two days?").run()
+
+        self.assertEqual(app.exception, [])
+        self.assertTrue(any("Agent review" in markdown.value for markdown in app.markdown))
+        self.assertTrue(any("Mode: contextual_router_agent" in caption.value for caption in app.caption))
+        self.assertTrue(any("Model calls: 3" in caption.value for caption in app.caption))
+        self.assertTrue(any("Agent tools: 1 · Stop: completed" in caption.value for caption in app.caption))
 
     def test_unconfigured_router_persists_a_visible_no_write_reply(self) -> None:
         app = AppTest.from_file("app.py").run()

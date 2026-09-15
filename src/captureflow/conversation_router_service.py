@@ -4,7 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from time import perf_counter
-from typing import TypedDict
+from typing import Literal, TypedDict
 from uuid import NAMESPACE_URL, uuid4, uuid5
 from zoneinfo import ZoneInfo
 
@@ -32,8 +32,10 @@ from .models import (
     ToolOperation,
     utc_now,
 )
-from .project_answer_service import answer_project_question, build_project_snapshot
+from .project_answer_service import answer_project_question, build_project_snapshot, with_stored_dates
 from .project_service import apply_validated_changes
+from .read_agent import ReadAgentLoop, ReadAgentRun
+from .read_agent_tools import BoundReadTools
 from .storage import CaptureStore
 
 
@@ -57,6 +59,8 @@ class ConversationRouterTurn:
     model_calls: int = 0
     model_seconds: float = 0
     local_seconds: float = 0
+    tool_calls: int = 0
+    agent_stop_reason: str | None = None
     # Why a turn failed, as error type and rule; never the model's raw output.
     failure_reason: str | None = None
 
@@ -88,12 +92,16 @@ class ConversationRouterService:
         reference_date: date,
         timezone: str = "America/Vancouver",
         reference_time: time | None = None,
+        answer_mode: Literal["workflow", "agent"] = "workflow",
     ) -> None:
+        if answer_mode not in {"workflow", "agent"}:
+            raise ValueError("answer_mode must be workflow or agent")
         self.store = store
         self.model = model
         self.reference_date = reference_date
         self.timezone = timezone
         self.reference_time = reference_time
+        self.answer_mode = answer_mode
         self.graph = self._build_graph()
 
     def submit(
@@ -264,6 +272,8 @@ class ConversationRouterService:
         return self._turn_without_writes(state, assistant, "clarification_created")
 
     def _local_answer(self, state: RouterState) -> ConversationRouterTurn:
+        if self.answer_mode == "agent":
+            return self._agent_answer(state, "local_answer")
         local_turn = LocalContextService(self.store, self.reference_date).submit(
             state["conversation_id"],
             state["content"],
@@ -273,12 +283,173 @@ class ConversationRouterService:
         return self._turn_without_writes(state, local_turn.assistant_message, local_turn.outcome)
 
     def _project_answer(self, state: RouterState) -> ConversationRouterTurn:
+        if self.answer_mode == "agent":
+            return self._agent_answer(state, "project_answer")
         return self._answer_project(
             state["user_message"],
             state["decision"],
             state["context_window"],
             state["candidates"],
             state["model_seconds"],
+        )
+
+    def _agent_answer(
+        self, state: RouterState, route: Literal["local_answer", "project_answer"]
+    ) -> ConversationRouterTurn:
+        """Run the optional read agent while leaving every write intent on the workflow."""
+
+        tools = BoundReadTools.for_conversation(self.store, state["conversation_id"], route)
+        prompt = (
+            "You are CaptureFlow's read-only local information agent. Use the available search tools "
+            "to answer only from stored data. Do not assume an item exists merely because recent chat "
+            "mentions it. Ask one concise clarification when the requested scope or date cannot be "
+            "determined. Return no_match when the tools establish that no matching row is stored. "
+            "Never request a write or invent an ID."
+        )
+        if route == "project_answer":
+            prompt += (
+                " The answer is about the current project. Put the factual answer in reply, but do not "
+                "write dates or clock times there; CaptureFlow appends those directly from SQLite."
+            )
+        else:
+            prompt += (
+                " The answer may use the current workspace. Use this_project_only only when the user "
+                "explicitly narrows the calendar question to this project. For a grounded answer, "
+                "CaptureFlow renders the cited SQLite rows instead of displaying your prose."
+            )
+
+        try:
+            run = ReadAgentLoop(self.model).run(
+                system_prompt=prompt,
+                user_input={
+                    "question": self._message_for_router(state["user_message"]),
+                    "recent_messages": state["context_window"].for_router(),
+                    "reference_date": self.reference_date.isoformat(),
+                    "timezone": self.timezone,
+                },
+                tools=tools,
+            )
+        except (InvalidStructuredOutput, ModelError, ValidationError, ValueError) as error:
+            return self._reply(
+                state["user_message"],
+                "I could not safely complete the read-agent turn, so nothing was changed.",
+                state["decision"],
+                state["context_window"],
+                state["candidates"],
+                (),
+                model_calls=2,
+                model_seconds=state["model_seconds"],
+                local_seconds=perf_counter() - state["local_started"],
+                outcome="agent_model_failure",
+                failure_reason=_failure_reason(error),
+            )
+
+        total_model_calls = 1 + run.model_calls
+        total_model_seconds = state["model_seconds"] + run.model_seconds
+        if run.final_response is None:
+            content = {
+                "policy_denied": "I could not run that local search because it violated a read policy.",
+                "model_budget_exhausted": "I could not finish the local search within the model-call budget.",
+                "tool_budget_exhausted": "I could not finish the local search within the tool-call budget.",
+                "validation_failed": "I could not verify the answer's cited local sources.",
+            }[run.stop_reason]
+            return self._reply(
+                state["user_message"],
+                content,
+                state["decision"],
+                state["context_window"],
+                state["candidates"],
+                (),
+                model_calls=total_model_calls,
+                model_seconds=total_model_seconds,
+                local_seconds=run.tool_seconds,
+                tool_calls=run.tool_calls,
+                agent_stop_reason=run.stop_reason,
+                outcome=f"agent_{run.stop_reason}",
+                failure_reason=f"ReadAgentStop: {run.stop_reason}",
+            )
+
+        response = run.final_response
+        if response.response_kind == "clarification":
+            assistant = self._assistant_message(state["user_message"], response.reply or "")
+            return self._agent_turn(state, assistant, run, "agent_clarification")
+        if response.response_kind == "no_match":
+            content = (
+                "I did not find matching stored data in the current project."
+                if route == "project_answer"
+                else "I did not find matching local Calendar, Note/Idea, or tracker data."
+            )
+            assistant = self._assistant_message(state["user_message"], content)
+            return self._agent_turn(state, assistant, run, "agent_no_match")
+
+        sources = tools.resolve_observed(response.source_ids)
+        if route == "local_answer":
+            local_turn = LocalContextService(self.store, self.reference_date).submit(
+                state["conversation_id"],
+                state["content"],
+                state["user_message"].id,
+                selected=sources,
+                max_selected_sources=12,
+            )
+            return self._agent_turn(state, local_turn.assistant_message, run, "agent_local_answer")
+
+        if response.reply is None:
+            return self._reply(
+                state["user_message"],
+                "I could not verify a complete project answer from the cited local sources.",
+                state["decision"],
+                state["context_window"],
+                state["candidates"],
+                (),
+                model_calls=total_model_calls,
+                model_seconds=total_model_seconds,
+                local_seconds=run.tool_seconds,
+                tool_calls=run.tool_calls,
+                agent_stop_reason="validation_failed",
+                outcome="agent_validation_failed",
+                failure_reason="ReadAgentStop: project answer omitted reply",
+            )
+        records = tuple(source for source in sources if isinstance(source, ProjectRecord))
+        events = tuple(source for source in sources if isinstance(source, CalendarEvent))
+        saved_items = [source for source in sources if isinstance(source, SavedItem)]
+        reply = with_stored_dates(response.reply, records, events)
+        if saved_items:
+            reply = "\n".join(
+                [reply, "", "Stored notes and ideas:", *[f"- {item.kind.title()}: {item.content}" for item in saved_items]]
+            )
+        assistant = self._assistant_message(state["user_message"], reply)
+        if records:
+            self.store.save_project_answer_sources(assistant.id, [record.id for record in records])
+        local_sources = [source for source in sources if isinstance(source, (CalendarEvent, SavedItem))]
+        if local_sources:
+            self.store.save_local_context_answer_sources(
+                assistant.id,
+                [
+                    LocalContextSourceRef(
+                        source_type="calendar_event" if isinstance(source, CalendarEvent) else "saved_item",
+                        source_id=source.id,
+                    )
+                    for source in local_sources
+                ],
+            )
+        return self._agent_turn(state, assistant, run, "agent_project_answer")
+
+    def _agent_turn(
+        self, state: RouterState, assistant: Message, run: ReadAgentRun, outcome: str
+    ) -> ConversationRouterTurn:
+        return ConversationRouterTurn(
+            state["user_message"],
+            assistant,
+            state["decision"],
+            state["context_window"],
+            state["candidates"],
+            (),
+            outcome=outcome,
+            model_calls=1 + run.model_calls,
+            model_seconds=state["model_seconds"] + run.model_seconds,
+            local_seconds=run.tool_seconds,
+            tool_calls=run.tool_calls,
+            agent_stop_reason=run.stop_reason,
         )
 
     def _execute_decision(self, state: RouterState) -> RouterState:
@@ -921,6 +1092,8 @@ class ConversationRouterService:
         local_seconds: float = 0,
         outcome: str,
         failure_reason: str | None = None,
+        tool_calls: int = 0,
+        agent_stop_reason: str | None = None,
     ) -> ConversationRouterTurn:
         assistant = self._assistant_message(user_message, content)
         return ConversationRouterTurn(
@@ -934,6 +1107,8 @@ class ConversationRouterService:
             model_calls=model_calls,
             model_seconds=model_seconds,
             local_seconds=local_seconds,
+            tool_calls=tool_calls,
+            agent_stop_reason=agent_stop_reason,
             failure_reason=failure_reason,
         )
 

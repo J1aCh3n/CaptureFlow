@@ -29,6 +29,78 @@ class RecordingCompletions:
 
 
 class OpenAICompatibleModelTests(unittest.TestCase):
+    def test_read_agent_normalizes_tool_calls(self) -> None:
+        completions = RecordingCompletions()
+        completions.create = lambda **kwargs: SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content=None,
+                        tool_calls=[
+                            SimpleNamespace(
+                                id="call-1",
+                                function=SimpleNamespace(
+                                    name="search_calendar",
+                                    arguments='{"start_date":"2026-09-18","end_date":"2026-09-18"}',
+                                ),
+                            )
+                        ],
+                    )
+                )
+            ]
+        )
+        model = OpenAICompatibleModel.__new__(OpenAICompatibleModel)
+        model.settings = ModelSettings(api_key="test-key", model="qwen-flash")
+        model.client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+
+        turn = model.next_read_agent_turn(
+            messages=[{"role": "user", "content": "Friday?"}],
+            tools=[{"type": "function", "function": {"name": "search_calendar"}}],
+        )
+
+        self.assertEqual(turn.tool_calls[0].name, "search_calendar")
+        self.assertEqual(turn.tool_calls[0].arguments["start_date"], "2026-09-18")
+
+    def test_read_agent_normalizes_a_structured_final_response(self) -> None:
+        completions = RecordingCompletions()
+        completions.create = lambda **kwargs: SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content=(
+                            '{"response_kind":"grounded_answer","reply":"Friday.",'
+                            '"source_ids":["event-1"]}'
+                        ),
+                        tool_calls=None,
+                    )
+                )
+            ]
+        )
+        model = OpenAICompatibleModel.__new__(OpenAICompatibleModel)
+        model.settings = ModelSettings(api_key="test-key", model="qwen-flash")
+        model.client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+
+        turn = model.next_read_agent_turn(messages=[], tools=[])
+
+        self.assertEqual(turn.final_response.source_ids, ["event-1"])
+
+    def test_dashscope_read_agent_disables_thinking_without_forcing_more_tools(self) -> None:
+        completions = RecordingCompletions(
+            '{"response_kind":"no_match","reply":null,"source_ids":[]}'
+        )
+        model = OpenAICompatibleModel.__new__(OpenAICompatibleModel)
+        model.settings = ModelSettings(
+            api_key="test-key",
+            model="qwen3.8-flash",
+            base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+        )
+        model.client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+
+        model.next_read_agent_turn(messages=[], tools=[])
+
+        self.assertEqual(completions.kwargs["extra_body"], {"enable_thinking": False})
+        self.assertNotIn("tool_choice", completions.kwargs)
+
     def test_request_omits_temperature_for_reasoning_model_compatibility(self) -> None:
         completions = RecordingCompletions()
         model = OpenAICompatibleModel.__new__(OpenAICompatibleModel)
