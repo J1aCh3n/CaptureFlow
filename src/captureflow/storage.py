@@ -429,10 +429,10 @@ class CaptureStore:
     def save_project_answer_sources(
         self, assistant_message_id: str, record_ids: list[str]
     ) -> list[ProjectRecord]:
-        """Persist the bounded record IDs that support one project answer."""
+        """Persist the unique record IDs that support one project answer."""
 
-        if not record_ids or len(record_ids) > 12 or len(set(record_ids)) != len(record_ids):
-            raise ValueError("a project answer needs one to twelve unique source records")
+        if not record_ids or len(set(record_ids)) != len(record_ids):
+            raise ValueError("a project answer needs unique source records")
         assistant = self.get_message(assistant_message_id)
         self._check_project_answer_sources(assistant, record_ids)
         with self._connect() as connection:
@@ -459,10 +459,10 @@ class CaptureStore:
     def save_local_context_answer_sources(
         self, assistant_message_id: str, references: list[LocalContextSourceRef]
     ) -> list[LocalContextSource]:
-        """Persist the bounded Calendar/Note/Idea references supporting one read-only answer."""
+        """Persist the unique Calendar/Note/Idea references supporting one read-only answer."""
 
-        if not references or len(references) > 12 or len(set(references)) != len(references):
-            raise ValueError("a local-context answer needs one to twelve unique sources")
+        if not references or len(set(references)) != len(references):
+            raise ValueError("a local-context answer needs unique sources")
         assistant = self.get_message(assistant_message_id)
         self._check_local_context_answer_sources(assistant, references)
         with self._connect() as connection:
@@ -489,10 +489,10 @@ class CaptureStore:
         if message.role != "assistant":
             raise ValueError("an answer with sources must be an assistant message")
         self._check_message(message)
-        if len(project_record_ids) > 12 or len(set(project_record_ids)) != len(project_record_ids):
-            raise ValueError("a project answer needs one to twelve unique source records")
-        if len(local_references) > 12 or len(set(local_references)) != len(local_references):
-            raise ValueError("a local-context answer needs one to twelve unique sources")
+        if len(set(project_record_ids)) != len(project_record_ids):
+            raise ValueError("a project answer needs unique source records")
+        if len(set(local_references)) != len(local_references):
+            raise ValueError("a local-context answer needs unique sources")
         if project_record_ids:
             self._check_project_answer_sources(message, project_record_ids)
         if local_references:

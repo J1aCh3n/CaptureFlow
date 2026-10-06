@@ -12,6 +12,7 @@ from captureflow.migrations import (
     apply_migrations,
 )
 from captureflow.storage import CaptureStore
+from captureflow.models import Conversation, Message, Project, ProjectRecord
 
 
 class MigrationTests(unittest.TestCase):
@@ -65,6 +66,35 @@ class MigrationTests(unittest.TestCase):
             }.issubset(tables)
         )
         self.assertIn("description", calendar_columns)
+
+    def test_existing_answer_sources_keep_their_order_when_count_limits_are_removed(self) -> None:
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            apply_migrations(connection, target_version=17)
+        store = CaptureStore(self.database_path)
+        store.save_conversation(Conversation(id="chat", title="Sources"))
+        store.save_project(Project(id="project", name="Sources"))
+        store.assign_conversation_project("chat", "project")
+        store.save_message(Message(id="question", conversation_id="chat", role="user", content="Prepare review"))
+        store.save_message(Message(id="answer", conversation_id="chat", role="assistant", content="Review", reply_to_message_id="question"))
+        store.save_project_record(ProjectRecord(
+            id="task", project_id="project", conversation_id="chat", kind="task", state="active", content="Prepare review",
+            source_message_id="question", source_quote="Prepare review",
+        ))
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute("INSERT INTO project_answer_sources VALUES ('answer', 'task', 5)")
+            connection.execute("INSERT INTO local_context_answer_sources VALUES ('answer', 'saved_item', 'note', 5)")
+            connection.commit()
+            apply_migrations(connection)
+            apply_migrations(connection)
+            self.assertEqual(connection.execute("SELECT * FROM project_answer_sources").fetchall(), [("answer", "task", 5)])
+            self.assertEqual(connection.execute("SELECT * FROM local_context_answer_sources").fetchall(), [("answer", "saved_item", "note", 5)])
+            connection.execute("UPDATE project_answer_sources SET source_rank = 25")
+            connection.execute("INSERT INTO local_context_answer_sources VALUES ('answer', 'saved_item', 'another-note', 25)")
+            self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
+            connection.execute("DELETE FROM messages WHERE id = 'answer'")
+            for table in ("project_answer_sources", "local_context_answer_sources"):
+                self.assertEqual(connection.execute(f"SELECT * FROM {table}").fetchall(), [])
 
     def test_existing_v1_database_upgrades_without_losing_capture(self) -> None:
         with closing(sqlite3.connect(self.database_path)) as connection:

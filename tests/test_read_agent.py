@@ -3,6 +3,8 @@ import unittest
 from datetime import date
 from pathlib import Path
 
+from pydantic import ValidationError
+
 from captureflow.models import CalendarEvent, Conversation, Message
 from captureflow.read_agent import (
     RESPOND_TOOL,
@@ -24,6 +26,25 @@ class ScriptedReadAgentModel:
     def next_read_agent_turn(self, messages, tools) -> AgentModelTurn:
         self.requests.append((messages, tools))
         return self.turns.pop(0)
+
+
+class AgentFinalResponseTests(unittest.TestCase):
+    def test_a_reply_needs_no_answer_kind_or_sources(self) -> None:
+        response = AgentFinalResponse(reply="  Which meeting do you mean?  ")
+
+        self.assertEqual(response.reply, "Which meeting do you mean?")
+        self.assertEqual(response.source_ids, [])
+
+    def test_sources_are_deduplicated_without_truncating_the_answer(self) -> None:
+        ids = [f"event-{index}" for index in range(25)]
+        response = AgentFinalResponse(reply="These are the stored events.", source_ids=[*ids, ids[0]])
+
+        self.assertEqual(response.source_ids, ids)
+
+    def test_an_empty_reply_is_not_a_completed_answer(self) -> None:
+        for reply in ("", "   "):
+            with self.subTest(reply=reply), self.assertRaises(ValidationError):
+                AgentFinalResponse(reply=reply)
 
 
 class ReadAgentLoopTests(unittest.TestCase):
@@ -60,7 +81,6 @@ class ReadAgentLoopTests(unittest.TestCase):
                 self._calendar_call(),
                 AgentModelTurn(
                     final_response=AgentFinalResponse(
-                        response_kind="grounded_answer",
                         reply="The design review is Friday.",
                         source_ids=[self.event.id],
                     )
@@ -83,7 +103,7 @@ class ReadAgentLoopTests(unittest.TestCase):
         self.assertIn(self.event.id, second_messages[-1]["content"])
 
     def test_the_model_is_offered_respond_for_its_final_answer_instead_of_a_json_schema(self) -> None:
-        model = ScriptedReadAgentModel([AgentModelTurn(final_response=AgentFinalResponse(response_kind="no_match"))])
+        model = ScriptedReadAgentModel([AgentModelTurn(final_response=AgentFinalResponse(reply="No matching data was found."))])
 
         ReadAgentLoop(model).run(
             system_prompt="Answer only from tool results.",
@@ -108,12 +128,12 @@ class ReadAgentLoopTests(unittest.TestCase):
                 self._calendar_call(),
                 AgentModelTurn(
                     final_response=AgentFinalResponse(
-                        response_kind="grounded_answer", source_ids=["invented-id"]
+                        reply="The stored records answer the question.", source_ids=["invented-id"]
                     )
                 ),
                 AgentModelTurn(
                     final_response=AgentFinalResponse(
-                        response_kind="grounded_answer", source_ids=[self.event.id]
+                        reply="The stored records answer the question.", source_ids=[self.event.id]
                     )
                 ),
             ]
@@ -132,7 +152,7 @@ class ReadAgentLoopTests(unittest.TestCase):
     def test_repeated_unobserved_source_fails_the_whole_turn(self) -> None:
         invented = AgentModelTurn(
             final_response=AgentFinalResponse(
-                response_kind="grounded_answer", source_ids=["invented-id"]
+                reply="The stored records answer the question.", source_ids=["invented-id"]
             )
         )
         model = ScriptedReadAgentModel([invented, invented])
@@ -152,7 +172,7 @@ class ReadAgentLoopTests(unittest.TestCase):
             [
                 AgentModelTurn(
                     final_response=AgentFinalResponse(
-                        response_kind="grounded_answer", source_ids=["invented-id"]
+                        reply="The stored records answer the question.", source_ids=["invented-id"]
                     )
                 ),
                 self._calendar_call(),

@@ -651,6 +651,39 @@ MIGRATIONS = (
         ),
         rebuilds_referenced_table=True,
     ),
+    Migration(
+        version=18,
+        name="answer_sources_without_count_limits",
+        statements=(
+            """
+            CREATE TABLE project_answer_sources_rebuilt (
+                assistant_message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+                project_record_id TEXT NOT NULL REFERENCES project_records(id) ON DELETE CASCADE,
+                source_rank INTEGER NOT NULL CHECK (source_rank >= 0),
+                PRIMARY KEY (assistant_message_id, project_record_id),
+                UNIQUE (assistant_message_id, source_rank)
+            )
+            """,
+            "INSERT INTO project_answer_sources_rebuilt SELECT * FROM project_answer_sources",
+            "DROP TABLE project_answer_sources",
+            "ALTER TABLE project_answer_sources_rebuilt RENAME TO project_answer_sources",
+            "CREATE INDEX project_answer_sources_record ON project_answer_sources(project_record_id, assistant_message_id)",
+            """
+            CREATE TABLE local_context_answer_sources_rebuilt (
+                assistant_message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+                source_type TEXT NOT NULL CHECK (source_type IN ('calendar_event', 'saved_item')),
+                source_id TEXT NOT NULL,
+                source_rank INTEGER NOT NULL CHECK (source_rank >= 0),
+                PRIMARY KEY (assistant_message_id, source_type, source_id),
+                UNIQUE (assistant_message_id, source_rank)
+            )
+            """,
+            "INSERT INTO local_context_answer_sources_rebuilt SELECT * FROM local_context_answer_sources",
+            "DROP TABLE local_context_answer_sources",
+            "ALTER TABLE local_context_answer_sources_rebuilt RENAME TO local_context_answer_sources",
+            "CREATE INDEX local_context_answer_sources_lookup ON local_context_answer_sources(source_type, source_id, assistant_message_id)",
+        ),
+    ),
 )
 
 LATEST_SCHEMA_VERSION = MIGRATIONS[-1].version

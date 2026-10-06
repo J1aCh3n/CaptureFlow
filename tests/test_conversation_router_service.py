@@ -117,7 +117,7 @@ class ConversationRouterServiceTests(unittest.TestCase):
 
     # Optional Phase A read agent
 
-    def test_agent_local_answer_uses_tools_but_python_renders_the_cited_rows(self) -> None:
+    def test_agent_local_answer_shows_model_reply_with_stored_dates_and_sources(self) -> None:
         event = self._saved_event("agent-review", "Agent design review", date(2026, 9, 18))
         model = ScriptedContextualModel(
             [{"intent": "local_answer"}],
@@ -136,8 +136,7 @@ class ConversationRouterServiceTests(unittest.TestCase):
                 ),
                 AgentModelTurn(
                     final_response=AgentFinalResponse(
-                        response_kind="grounded_answer",
-                        reply="MODEL PROSE MUST NOT BE SHOWN",
+                        reply="The design review is scheduled; no preparation task is recorded.",
                         source_ids=[event.id],
                     )
                 ),
@@ -164,7 +163,7 @@ class ConversationRouterServiceTests(unittest.TestCase):
         self.assertEqual(turn.agent_stop_reason, "completed")
         self.assertIn(event.title, turn.assistant_message.content)
         self.assertIn(event.start_at.isoformat(), turn.assistant_message.content)
-        self.assertNotIn("MODEL PROSE", turn.assistant_message.content)
+        self.assertIn("The design review is scheduled; no preparation task is recorded.", turn.assistant_message.content)
         self.assertEqual(
             [source.reference.source_id for source in self.store.list_local_context_answer_sources(turn.assistant_message.id)],
             [event.id],
@@ -181,7 +180,7 @@ class ConversationRouterServiceTests(unittest.TestCase):
                 AgentModelTurn(tool_calls=[AgentToolCall(id="page-one", name="search_calendar", arguments=query)]),
                 AgentModelTurn(tool_calls=[AgentToolCall(id="page-two", name="search_calendar",
                                                        arguments={**query, "offset": 20})]),
-                AgentModelTurn(final_response=AgentFinalResponse(response_kind="grounded_answer",
+                AgentModelTurn(final_response=AgentFinalResponse(reply="The matching review is stored.",
                                                                 source_ids=[events[-1].id])),
             ],
         )
@@ -217,7 +216,6 @@ class ConversationRouterServiceTests(unittest.TestCase):
                 ),
                 AgentModelTurn(
                     final_response=AgentFinalResponse(
-                        response_kind="grounded_answer",
                         reply="Latency measurement is still open.",
                         source_ids=[task.id],
                     )
@@ -240,6 +238,49 @@ class ConversationRouterServiceTests(unittest.TestCase):
             [task.id],
         )
 
+    def test_agent_can_save_more_than_twelve_sources_of_each_type(self) -> None:
+        events = [self._saved_event(f"review-{index:02}", f"Review {index}", date(2026, 9, 18))
+                  for index in range(13)]
+        tasks = [self._project_record(f"task-{index}", "task", "active", f"Prepare review {index}")
+                 for index in range(13)]
+        ids = [row.id for row in [*events, *tasks]]
+        model = ScriptedContextualModel(
+            [{"intent": "project_answer"}],
+            agent_turns=[
+                AgentModelTurn(tool_calls=[
+                    AgentToolCall(id="events", name="search_calendar", arguments={"limit": 20}),
+                    AgentToolCall(id="tasks", name="search_project_records", arguments={"kinds": ["task"], "limit": 20}),
+                ]),
+                AgentModelTurn(final_response=AgentFinalResponse(
+                    reply="Preparation tasks remain open alongside the scheduled reviews.", source_ids=[*ids, ids[0]]
+                )),
+            ],
+        )
+
+        turn = self.submit(model, "What remains for the reviews?", "many-sources", answer_mode="agent")
+
+        self.assertIsNone(turn.failure_reason)
+        self.assertEqual({row.id for row in self.store.list_project_answer_sources(turn.assistant_message.id)},
+                         {task.id for task in tasks})
+        self.assertEqual([row.reference.source_id for row in self.store.list_local_context_answer_sources(turn.assistant_message.id)],
+                         [event.id for event in events])
+        self.assertEqual(turn.operations, ())
+
+    def test_agent_can_ask_a_question_or_explain_uncertainty_without_sources(self) -> None:
+        for index, reply in enumerate(("Which meeting do you mean?", "I have not searched the records yet, so I cannot confirm that.")):
+            with self.subTest(reply=reply):
+                model = ScriptedContextualModel(
+                    [{"intent": "local_answer"}],
+                    agent_turns=[AgentModelTurn(final_response=AgentFinalResponse(reply=reply))],
+                )
+
+                turn = self.submit(model, "What about that meeting?", f"unsourced-{index}", answer_mode="agent")
+
+                self.assertIsNone(turn.failure_reason)
+                self.assertEqual(turn.assistant_message.content, reply)
+                self.assertEqual(self.store.list_local_context_answer_sources(turn.assistant_message.id), [])
+                self.assertEqual(turn.operations, ())
+
     def test_agent_local_answer_lists_cited_events_in_time_order(self) -> None:
         later = self._saved_event("later-review", "Later review", datetime.fromisoformat("2026-09-17T09:00:00-07:00"))
         all_day = self._saved_event("all-day-offsite", "Offsite", date(2026, 9, 15))
@@ -258,7 +299,7 @@ class ConversationRouterServiceTests(unittest.TestCase):
                 ),
                 AgentModelTurn(
                     final_response=AgentFinalResponse(
-                        response_kind="grounded_answer", source_ids=[later.id, earlier.id, all_day.id]
+                        reply="The stored records answer the question.", source_ids=[later.id, earlier.id, all_day.id]
                     )
                 ),
             ],
@@ -267,7 +308,7 @@ class ConversationRouterServiceTests(unittest.TestCase):
         turn = self.submit(model, "我下周有什么安排？", "week-question", answer_mode="agent")
 
         content = turn.assistant_message.content
-        positions = [content.index(f"— {event.title}") for event in (all_day, earlier, later)]
+        positions = [content.index(event.start_at.isoformat()) for event in (all_day, earlier, later)]
         self.assertEqual(positions, sorted(positions))
         self.assertEqual(
             [source.reference.source_id for source in self.store.list_local_context_answer_sources(turn.assistant_message.id)],
@@ -310,7 +351,7 @@ class ConversationRouterServiceTests(unittest.TestCase):
                 ),
                 AgentModelTurn(
                     final_response=AgentFinalResponse(
-                        response_kind="grounded_answer", reply="Latency is still open.", source_ids=[task.id]
+                        reply="Latency is still open.", source_ids=[task.id]
                     )
                 ),
             ],

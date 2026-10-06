@@ -88,7 +88,7 @@ class OpenAICompatibleModelTests(unittest.TestCase):
 
     def test_read_agent_takes_its_final_response_from_the_respond_call(self) -> None:
         completions = _AgentCompletions(
-            [("respond", '{"response_kind":"grounded_answer","reply":"Friday.","source_ids":["event-1"]}')]
+            [("respond", '{"reply":"Friday.","source_ids":["event-1"]}')]
         )
 
         turn = _agent_model(completions).next_read_agent_turn(messages=[], tools=[])
@@ -102,7 +102,7 @@ class OpenAICompatibleModelTests(unittest.TestCase):
         completions = _AgentCompletions(
             [
                 ("search_calendar", '{"start_date":"2026-09-18","end_date":"2026-09-18"}'),
-                ("respond", '{"response_kind":"no_match","reply":null,"source_ids":[]}'),
+                ("respond", '{"reply":"No matching records were found.","source_ids":[]}'),
             ]
         )
 
@@ -111,22 +111,22 @@ class OpenAICompatibleModelTests(unittest.TestCase):
 
     def test_read_agent_refuses_invalid_respond_arguments(self) -> None:
         for arguments in (
-            '{"response_kind":"grounded_answer","reply":"Friday.","source_ids":[]}',
+            '{"reply":null,"source_ids":[]}',
             # The failure seen on qwen3.7-flash-2026-07-15: the schema echoed instead of an answer.
             '{"type":"object","title":"AgentFinalResponse","properties":{},"required":["response_kind"]}',
-            '{"response_kind":"no_match"',
+            '{"reply":"Incomplete"',
         ):
             with self.subTest(arguments=arguments), self.assertRaises(InvalidStructuredOutput):
                 _agent_model(_AgentCompletions([("respond", arguments)])).next_read_agent_turn(messages=[], tools=[])
 
     def test_read_agent_refuses_an_answer_written_as_content_instead_of_respond(self) -> None:
-        completions = RecordingCompletions('{"response_kind":"no_match","reply":null,"source_ids":[]}')
+        completions = RecordingCompletions('{"reply":"No matching records were found.","source_ids":[]}')
 
         with self.assertRaisesRegex(InvalidStructuredOutput, "respond"):
             _agent_model(completions).next_read_agent_turn(messages=[], tools=[])
 
     def test_dashscope_read_agent_disables_thinking_without_forcing_more_tools(self) -> None:
-        completions = _AgentCompletions([("respond", '{"response_kind":"no_match","reply":null,"source_ids":[]}')])
+        completions = _AgentCompletions([("respond", '{"reply":"No matching records were found.","source_ids":[]}')])
         model = _agent_model(completions)
         model.settings = ModelSettings(
             api_key="test-key",

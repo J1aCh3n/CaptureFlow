@@ -5,6 +5,7 @@
 
 The database is seeded directly, so only the answer turns call the model and both modes
 answer from the same rows. See docs/read-agent-design.md for the cases and gates.
+Checks cover execution and source evidence; inspect the saved replies for their meaning.
 """
 
 import argparse
@@ -31,12 +32,6 @@ from scripts.run_phase10_live_acceptance import (
 ROOT = Path(__file__).parents[1]
 FIXTURE = ROOT / "tests" / "fixtures" / "read_agent_acceptance.json"
 
-# The fixed sentences Python writes when nothing matched, in either mode.
-NO_MATCH_REPLIES = {
-    "I do not have matching local Calendar, Note/Idea, or same-project tracker context for that yet.",
-    "I did not find matching local Calendar, Note/Idea, or tracker data.",
-    "I did not find matching stored data in the current project.",
-}
 LATENCY_CASES = ("meeting_question", "cross_conversation_local_retrieval", "cross_conversation_project_retrieval")
 RUNS_PER_MODE = 5
 # The provider refusing access (an exhausted quota, a bad key) rather than the model failing.
@@ -125,6 +120,7 @@ def run_fixture(database_path: Path, answer_mode: str, allow_model_override: boo
             **tokens.since(first_request),
             "operations": len(turn.operations),
             "cited_ids": cited_ids(store, turn),
+            "reply": turn.assistant_message.content,
             "tool_results": returned,
             "failure_reason": turn.failure_reason,
         }
@@ -151,11 +147,8 @@ def run_fixture(database_path: Path, answer_mode: str, allow_model_override: boo
         store, isolated, seed["other_project_rows"]
     )
     unknown = submit("no_match", main_id, "read-agent-no-match")
-    trace["checks"]["no_match"] = (
-        unknown is not None
-        and not unknown.operations
-        and not cited_ids(store, unknown)
-        and unknown.assistant_message.content in NO_MATCH_REPLIES
+    trace["checks"]["no_match"] = answered_without_sources(
+        store, unknown, trace["submits"][-1].get("tool_results", [])
     )
     notes = submit("stored_instruction", main_id, "read-agent-notes")
     thanks = submit("stored_instruction_neutral", main_id, "read-agent-thanks")
@@ -327,18 +320,32 @@ def answered_with(store: CaptureStore, turn, source_ids: list[str], rendered: li
 
 
 def answered_range(store: CaptureStore, turn, events: list[CalendarEvent], first: date, last: date) -> bool:
-    """Every event in the range is cited and shown in time order, and none outside it is cited."""
+    """Every event in the range has a source card in time order and a stored time in the answer."""
 
-    if turn is None or turn.operations:
+    if turn is None or turn.failure_reason is not None or turn.operations:
         return False
-    cited = set(cited_ids(store, turn))
-    inside = sorted((event for event in events if first <= event.start_date <= last), key=lambda event: event.start_date)
+    cited = cited_ids(store, turn)
+    inside = sorted((event for event in events if first <= event.start_date <= last), key=lambda event: event.start_at.isoformat())
     outside = {event.id for event in events if not first <= event.start_date <= last}
-    if not inside or not {event.id for event in inside} <= cited or cited & outside:
+    expected = [event.id for event in inside]
+    if not inside or set(cited) & outside or [source_id for source_id in cited if source_id in expected] != expected:
         return False
-    content = turn.assistant_message.content
-    positions = [content.find(f"— {event.title}") for event in inside]
-    return -1 not in positions and positions == sorted(positions)
+    return all(event.start_at.isoformat() in turn.assistant_message.content for event in inside)
+
+
+def answered_without_sources(store: CaptureStore, turn, tool_results: list[dict]) -> bool:
+    """Verify a completed search without citations; the reply's conclusion still needs review."""
+
+    return (
+        turn is not None
+        and turn.failure_reason is None
+        and not turn.operations
+        and not cited_ids(store, turn)
+        and (
+            turn.outcome == "insufficient_context"
+            or any(result["error"] is None for result in tool_results)
+        )
+    )
 
 
 def cites_or_renders(store: CaptureStore, turn, rows) -> bool:

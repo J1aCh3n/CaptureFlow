@@ -6,13 +6,14 @@ from itertools import count
 from pathlib import Path
 from types import SimpleNamespace
 
-from captureflow.local_context_service import LocalContextService, answer_source_references, format_selected_reply
-from captureflow.models import Message
+from captureflow.local_context_service import answer_source_references
+from captureflow.models import CalendarEvent, Message, ProjectRecord
+from captureflow.project_answer_service import with_stored_dates
 from captureflow.storage import CaptureStore
 from scripts.run_read_agent_acceptance import (
-    NO_MATCH_REPLIES,
     answered_range,
     answered_with,
+    answered_without_sources,
     evaluate_gates,
     provider_interrupted,
     safety_violations,
@@ -31,7 +32,7 @@ class ReadAgentFixtureChecksTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary_directory.cleanup()
 
-    def answer(self, sources, *, content=None, intent="local_answer", operations=(), tool_calls=0, failure_reason=None):
+    def answer(self, sources, *, content=None, intent="local_answer", operations=(), tool_calls=0, failure_reason=None, outcome="agent_local_answer"):
         """A saved answer citing `sources`, shaped like a router turn."""
 
         self.turns += 1
@@ -44,7 +45,11 @@ class ReadAgentFixtureChecksTests(unittest.TestCase):
             id=f"reply-{self.turns}",
             conversation_id=conversation_id,
             role="assistant",
-            content=content or (format_selected_reply("?", list(sources)) if sources else "No sources."),
+            content=content or with_stored_dates(
+                "The stored records support this reply.",
+                tuple(source for source in sources if isinstance(source, ProjectRecord)),
+                tuple(source for source in sources if isinstance(source, CalendarEvent)),
+            ),
             reply_to_message_id=question.id,
         )
         if sources:
@@ -57,6 +62,7 @@ class ReadAgentFixtureChecksTests(unittest.TestCase):
             decision=SimpleNamespace(intent=intent),
             tool_calls=tool_calls,
             failure_reason=failure_reason,
+            outcome=outcome,
         )
 
     def test_a_note_answer_must_cite_the_note_and_complete_without_failure(self) -> None:
@@ -80,7 +86,7 @@ class ReadAgentFixtureChecksTests(unittest.TestCase):
         for sources, content in (
             ([review], None),
             ([review, evidence, freeze], None),
-            ([evidence, review], format_selected_reply("?", [evidence, review])),
+            ([evidence, review], None),
         ):
             with self.subTest(sources=[event.id for event in sources]):
                 turn = self.answer(sources, content=content)
@@ -103,18 +109,14 @@ class ReadAgentFixtureChecksTests(unittest.TestCase):
             with self.subTest(results=results):
                 self.assertTrue(safety_violations(self.store, self.seed, turn, results))
 
-    def test_the_fixed_no_match_replies_are_the_ones_the_code_writes(self) -> None:
-        conversation = self.seed["later_conversation"]
-        empty = LocalContextService(self.store, date(2026, 9, 9)).submit(conversation.id, "zzz", "no-match", selected=None)
-        # An empty lookup finds nothing only when no term matches; "zzz" matches no seeded row.
-        self.assertEqual(empty.outcome, "insufficient_context")
-        self.assertIn(empty.assistant_message.content, NO_MATCH_REPLIES)
-        router_source = (Path(__file__).parents[1] / "src" / "captureflow" / "conversation_router_service.py").read_text(
-            encoding="utf-8"
-        )
-        for reply in NO_MATCH_REPLIES - {empty.assistant_message.content}:
-            with self.subTest(reply=reply):
-                self.assertIn(f'"{reply}"', router_source)
+    def test_a_search_without_sources_does_not_depend_on_a_fixed_reply(self) -> None:
+        results = [{"tool": "search_calendar", "error": None, "ids": []}]
+        for reply in ("No ticket information came back from the search.", "The search did not find a Japan booking."):
+            turn = self.answer([], content=reply)
+            self.assertTrue(answered_without_sources(self.store, turn, results))
+            self.assertFalse(answered_without_sources(self.store, turn, []))
+        self.assertFalse(answered_without_sources(self.store, self.answer([], failure_reason="ModelError"), results))
+        self.assertFalse(answered_without_sources(self.store, self.answer([self.seed["meeting"]]), results))
 
 
 _RUN_NUMBERS = count()

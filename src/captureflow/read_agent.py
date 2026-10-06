@@ -16,7 +16,6 @@ from .read_agent_tools import BoundReadTools, ObservedResource
 
 MAX_AGENT_MODEL_CALLS = 3
 MAX_AGENT_TOOL_CALLS = 6
-MAX_AGENT_SOURCE_IDS = 12
 
 AgentStopReason = Literal[
     "completed",
@@ -32,34 +31,21 @@ class AgentFinalResponse(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    response_kind: Literal["grounded_answer", "clarification", "no_match"]
-    reply: str | None = Field(default=None, max_length=8_000)
-    source_ids: list[str] = Field(default_factory=list, max_length=MAX_AGENT_SOURCE_IDS)
+    reply: str = Field(min_length=1, max_length=8_000)
+    source_ids: list[str] = Field(default_factory=list)
 
     @field_validator("reply")
     @classmethod
-    def normalize_reply(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
+    def normalize_reply(cls, value: str) -> str:
         value = value.strip()
-        return value or None
+        if not value:
+            raise ValueError("reply must contain text")
+        return value
 
     @field_validator("source_ids")
     @classmethod
-    def source_ids_are_unique(cls, values: list[str]) -> list[str]:
-        if len(values) != len(set(values)):
-            raise ValueError("source_ids must be unique")
-        return values
-
-    @model_validator(mode="after")
-    def response_shape_matches_kind(self) -> "AgentFinalResponse":
-        if self.response_kind == "grounded_answer" and not self.source_ids:
-            raise ValueError("grounded_answer requires at least one source ID")
-        if self.response_kind != "grounded_answer" and self.source_ids:
-            raise ValueError("only grounded_answer may cite source IDs")
-        if self.response_kind == "clarification" and self.reply is None:
-            raise ValueError("clarification requires a question in reply")
-        return self
+    def deduplicate_source_ids(cls, values: list[str]) -> list[str]:
+        return list(dict.fromkeys(values))
 
 
 RESPOND_TOOL = "respond"

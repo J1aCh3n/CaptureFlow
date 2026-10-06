@@ -96,8 +96,7 @@ class _AgentLocalAnswerUiModel:
             )
         return AgentModelTurn(
             final_response=AgentFinalResponse(
-                response_kind="grounded_answer",
-                reply="This prose is intentionally ignored for a local answer.",
+                reply="The agent review is scheduled.",
                 source_ids=[self.event_id],
             )
         )
@@ -405,6 +404,7 @@ class UiTests(unittest.TestCase):
 
         self.assertEqual(app.exception, [])
         self.assertTrue(any("Agent review" in markdown.value for markdown in app.markdown))
+        self.assertTrue(any("The agent review is scheduled." in markdown.value for markdown in app.markdown))
         self.assertTrue(any("Mode: contextual_router_agent" in caption.value for caption in app.caption))
         self.assertTrue(any("Model calls: 3" in caption.value for caption in app.caption))
         self.assertTrue(any("Agent tools: 1 · Stop: completed" in caption.value for caption in app.caption))
