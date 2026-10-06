@@ -253,6 +253,8 @@ class OpenAICompatibleModel:
                 "messages": messages,
                 "tools": tools,
             }
+            if len(tools) == 1 and tools[0]["function"]["name"] == RESPOND_TOOL:
+                request["tool_choice"] = {"type": "function", "function": {"name": RESPOND_TOOL}}
             if (
                 self.settings.model.casefold().startswith("qwen")
                 and self.settings.base_url is not None

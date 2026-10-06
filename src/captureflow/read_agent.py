@@ -9,9 +9,9 @@ from typing import Any, Literal, Protocol, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
-from .read_agent_tools import BoundReadTools, ObservedResource
+from .read_agent_tools import BoundReadTools, ObservedResource, ReadToolError, ReadToolResult
 
 
 MAX_AGENT_MODEL_CALLS = 3
@@ -20,7 +20,6 @@ MAX_AGENT_TOOL_CALLS = 6
 AgentStopReason = Literal[
     "completed",
     "validation_failed",
-    "policy_denied",
     "model_budget_exhausted",
     "tool_budget_exhausted",
 ]
@@ -134,10 +133,9 @@ class ReadAgentRun:
 class ReadAgentState(TypedDict, total=False):
     messages: list[dict[str, Any]]
     tools: BoundReadTools
-    model_turn: AgentModelTurn
+    model_turn: AgentModelTurn | None
     final_response: AgentFinalResponse | None
     usage: ReadAgentUsage
-    repair_attempted: bool
     stop_reason: AgentStopReason | None
 
 
@@ -182,7 +180,6 @@ class ReadAgentLoop:
             "tools": tools,
             "final_response": None,
             "usage": usage,
-            "repair_attempted": False,
             "stop_reason": None,
         }
         state = self.graph.invoke(initial)
@@ -206,48 +203,80 @@ class ReadAgentLoop:
         graph.add_node("validate_final", self._validate_final)
         graph.add_edge(START, "call_model")
         graph.add_conditional_edges(
-            "call_model", _after_model, [END, "run_tools", "validate_final"]
+            "call_model", _after_model, [END, "call_model", "run_tools", "validate_final"]
         )
         graph.add_conditional_edges("run_tools", _continue_or_end, [END, "call_model"])
         graph.add_conditional_edges("validate_final", _continue_or_end, [END, "call_model"])
         return graph.compile()
 
     def _call_model(self, state: ReadAgentState) -> ReadAgentState:
+        from .llm import InvalidStructuredOutput
+
         usage = state["usage"]
         if usage.model_calls >= self.max_model_calls:
             return {"stop_reason": "model_budget_exhausted"}
+        # Reserve the last call for an answer, even when searches have budget left.
+        finishing = (
+            usage.model_calls == self.max_model_calls - 1
+            or usage.tool_calls >= self.max_tool_calls
+        )
+        messages = state["messages"]
+        definitions = [*state["tools"].definitions_for_model(), _RESPOND_DEFINITION]
+        if finishing:
+            definitions = [_RESPOND_DEFINITION]
+            messages = [*messages, {
+                "role": "user",
+                "content": (
+                    "The search budget for this turn is finished. Call respond now using the "
+                    "evidence already returned. Say what remains unconfirmed if searches were "
+                    "incomplete; do not infer that missing evidence means no data exists."
+                ),
+            }]
         # A call counts once it is made, including one that fails.
         usage.model_calls += 1
         started = perf_counter()
         try:
             turn = AgentModelTurn.model_validate(
                 self.model.next_read_agent_turn(
-                    messages=state["messages"],
-                    tools=[*state["tools"].definitions_for_model(), _RESPOND_DEFINITION],
+                    messages=messages,
+                    tools=definitions,
                 )
             )
+        except (InvalidStructuredOutput, ValidationError) as error:
+            if usage.model_calls >= self.max_model_calls:
+                return {"model_turn": None, "stop_reason": "validation_failed"}
+            return {
+                "model_turn": None,
+                "messages": [*messages, {
+                    "role": "user",
+                    "content": f"Your response could not be read: {error}. Use the offered tools or call respond alone with a valid reply.",
+                }],
+            }
         finally:
             usage.model_seconds += perf_counter() - started
-        update: ReadAgentState = {"model_turn": turn}
-        # The single repair is only for correcting citations, not for making an
-        # invented citation valid after the fact with another lookup.
-        if state["repair_attempted"] and turn.tool_calls:
-            update["stop_reason"] = "validation_failed"
+        update: ReadAgentState = {"model_turn": turn, "messages": messages}
+        if finishing and turn.tool_calls:
+            update["stop_reason"] = (
+                "tool_budget_exhausted" if usage.tool_calls >= self.max_tool_calls
+                else "model_budget_exhausted"
+            )
         return update
 
     def _run_tools(self, state: ReadAgentState) -> ReadAgentState:
         usage = state["usage"]
-        calls = state["model_turn"].tool_calls
-        if usage.tool_calls + len(calls) > self.max_tool_calls:
-            return {"stop_reason": "tool_budget_exhausted"}
-
-        messages = [*state["messages"], state["model_turn"].assistant_message()]
-        stop_reason: AgentStopReason | None = None
+        turn = state["model_turn"]
+        assert turn is not None
+        messages = [*state["messages"], turn.assistant_message()]
         started = perf_counter()
         try:
-            for call in calls:
-                usage.tool_calls += 1
-                result = state["tools"].invoke(call.name, call.arguments)
+            for call in turn.tool_calls:
+                if usage.tool_calls >= self.max_tool_calls:
+                    result = ReadToolResult(ok=False, error=ReadToolError(
+                        category="retryable", message="Tool-call budget exhausted; this search was not run."
+                    ))
+                else:
+                    usage.tool_calls += 1
+                    result = state["tools"].invoke(call.name, call.arguments)
                 messages.append(
                     {
                         "role": "tool",
@@ -255,15 +284,14 @@ class ReadAgentLoop:
                         "content": json.dumps(result.model_dump(mode="json"), ensure_ascii=False),
                     }
                 )
-                if result.error is not None and result.error.category == "policy_denied":
-                    stop_reason = "policy_denied"
-                    break
         finally:
             usage.tool_seconds += perf_counter() - started
-        return {"messages": messages, "stop_reason": stop_reason}
+        return {"messages": messages}
 
     def _validate_final(self, state: ReadAgentState) -> ReadAgentState:
-        response = state["model_turn"].final_response
+        turn = state["model_turn"]
+        assert turn is not None
+        response = turn.final_response
         assert response is not None
         unobserved = [
             source_id
@@ -272,26 +300,30 @@ class ReadAgentLoop:
         ]
         if not unobserved:
             return {"final_response": response, "stop_reason": "completed"}
-        if state["repair_attempted"] or state["usage"].model_calls >= self.max_model_calls:
+        if state["usage"].model_calls >= self.max_model_calls:
             return {"stop_reason": "validation_failed"}
         messages = [
             *state["messages"],
+            {"role": "assistant", "content": response.model_dump_json()},
             {
                 "role": "user",
                 "content": (
                     "Your final source_ids included IDs that no tool returned in this run. "
-                    f"Call {RESPOND_TOOL} again with a corrected response using only IDs from tool results; "
-                    "do not make another tool call merely to justify an invented ID."
+                    f"Unobserved IDs: {json.dumps(unobserved, ensure_ascii=False)}. "
+                    "Correct the reply and citations, or search for the needed evidence with the offered tools."
                 ),
             },
         ]
-        return {"messages": messages, "repair_attempted": True}
+        return {"messages": messages}
 
 
 def _after_model(state: ReadAgentState) -> str:
     if state.get("stop_reason") is not None:
         return END
-    return "run_tools" if state["model_turn"].tool_calls else "validate_final"
+    turn = state["model_turn"]
+    if turn is None:
+        return "call_model"
+    return "run_tools" if turn.tool_calls else "validate_final"
 
 
 def _continue_or_end(state: ReadAgentState) -> str:

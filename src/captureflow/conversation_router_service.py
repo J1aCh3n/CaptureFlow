@@ -365,7 +365,6 @@ class ConversationRouterService:
 
         if run.final_response is None:
             content = {
-                "policy_denied": "I could not run that local search because it violated a read policy.",
                 "model_budget_exhausted": "I could not finish the local search within the model-call budget.",
                 "tool_budget_exhausted": "I could not finish the local search within the tool-call budget.",
                 "validation_failed": "I could not verify the answer's cited local sources.",

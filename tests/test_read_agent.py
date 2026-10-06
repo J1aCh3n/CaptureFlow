@@ -5,6 +5,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from captureflow.llm import InvalidStructuredOutput
 from captureflow.models import CalendarEvent, Conversation, Message
 from captureflow.read_agent import (
     RESPOND_TOOL,
@@ -19,13 +20,16 @@ from captureflow.storage import CaptureStore
 
 
 class ScriptedReadAgentModel:
-    def __init__(self, turns: list[AgentModelTurn]) -> None:
+    def __init__(self, turns) -> None:
         self.turns = list(turns)
         self.requests = []
 
     def next_read_agent_turn(self, messages, tools) -> AgentModelTurn:
         self.requests.append((messages, tools))
-        return self.turns.pop(0)
+        turn = self.turns.pop(0)
+        if isinstance(turn, Exception):
+            raise turn
+        return turn
 
 
 class AgentFinalResponseTests(unittest.TestCase):
@@ -122,7 +126,7 @@ class ReadAgentLoopTests(unittest.TestCase):
         self.assertIn(RESPOND_TOOL, messages[0]["content"])
         self.assertNotIn('"properties"', messages[0]["content"])
 
-    def test_unobserved_source_gets_one_repair_then_succeeds(self) -> None:
+    def test_unobserved_source_can_be_corrected_in_the_remaining_budget(self) -> None:
         model = ScriptedReadAgentModel(
             [
                 self._calendar_call(),
@@ -147,7 +151,7 @@ class ReadAgentLoopTests(unittest.TestCase):
 
         self.assertEqual(run.stop_reason, "completed")
         self.assertEqual(run.model_calls, 3)
-        self.assertIn("no tool returned", model.requests[2][0][-1]["content"])
+        self.assertTrue(any("no tool returned" in (message.get("content") or "") for message in model.requests[2][0]))
 
     def test_repeated_unobserved_source_fails_the_whole_turn(self) -> None:
         invented = AgentModelTurn(
@@ -155,7 +159,7 @@ class ReadAgentLoopTests(unittest.TestCase):
                 reply="The stored records answer the question.", source_ids=["invented-id"]
             )
         )
-        model = ScriptedReadAgentModel([invented, invented])
+        model = ScriptedReadAgentModel([invented, invented, invented])
 
         run = ReadAgentLoop(model).run(
             system_prompt="Answer only from tool results.",
@@ -165,17 +169,20 @@ class ReadAgentLoopTests(unittest.TestCase):
 
         self.assertEqual(run.stop_reason, "validation_failed")
         self.assertIsNone(run.final_response)
-        self.assertEqual(run.model_calls, 2)
+        self.assertEqual(run.model_calls, 3)
 
-    def test_citation_repair_cannot_observe_an_invented_id_after_the_fact(self) -> None:
+    def test_an_unobserved_citation_can_be_followed_by_searching_for_real_evidence(self) -> None:
         model = ScriptedReadAgentModel(
             [
                 AgentModelTurn(
                     final_response=AgentFinalResponse(
-                        reply="The stored records answer the question.", source_ids=["invented-id"]
+                        reply="The design review is stored.", source_ids=[self.event.id]
                     )
                 ),
                 self._calendar_call(),
+                AgentModelTurn(final_response=AgentFinalResponse(
+                    reply="The design review is stored.", source_ids=[self.event.id]
+                )),
             ]
         )
 
@@ -185,11 +192,12 @@ class ReadAgentLoopTests(unittest.TestCase):
             tools=self.tools,
         )
 
-        self.assertEqual(run.stop_reason, "validation_failed")
-        self.assertEqual(run.tool_calls, 0)
-        self.assertEqual(run.observed_resources, {})
+        self.assertEqual(run.stop_reason, "completed")
+        self.assertEqual(run.tool_calls, 1)
+        self.assertEqual(run.final_response.source_ids, [self.event.id])
+        self.assertIn(self.event.id, model.requests[1][0][-1]["content"])
 
-    def test_policy_denial_stops_without_returning_control_to_model(self) -> None:
+    def test_a_denied_search_returns_feedback_without_executing_the_search(self) -> None:
         model = ScriptedReadAgentModel(
             [
                 AgentModelTurn(
@@ -200,7 +208,8 @@ class ReadAgentLoopTests(unittest.TestCase):
                             arguments={"keywords": ["api key is sk-abcdefghijklmnop"]},
                         )
                     ]
-                )
+                ),
+                AgentModelTurn(final_response=AgentFinalResponse(reply="That search was refused; I cannot confirm the result.")),
             ]
         )
 
@@ -210,19 +219,24 @@ class ReadAgentLoopTests(unittest.TestCase):
             tools=self.tools,
         )
 
-        self.assertEqual(run.stop_reason, "policy_denied")
-        self.assertEqual(run.model_calls, 1)
+        self.assertEqual(run.stop_reason, "completed")
+        self.assertEqual(run.model_calls, 2)
         self.assertEqual(run.tool_calls, 1)
+        self.assertEqual(run.observed_resources, {})
+        self.assertIn("policy_denied", model.requests[1][0][-1]["content"])
 
-    def test_tool_budget_is_enforced_before_a_batch_executes(self) -> None:
+    def test_an_oversized_batch_keeps_available_results_and_reports_skipped_searches(self) -> None:
         model = ScriptedReadAgentModel(
             [
                 AgentModelTurn(
                     tool_calls=[
-                        AgentToolCall(id=f"call-{index}", name="search_saved_items", arguments={})
+                        AgentToolCall(id=f"call-{index}", name="search_calendar", arguments={})
                         for index in range(3)
                     ]
-                )
+                ),
+                AgentModelTurn(final_response=AgentFinalResponse(
+                    reply="The review was found, but the last search was not run.", source_ids=[self.event.id]
+                )),
             ]
         )
 
@@ -232,11 +246,17 @@ class ReadAgentLoopTests(unittest.TestCase):
             tools=self.tools,
         )
 
-        self.assertEqual(run.stop_reason, "tool_budget_exhausted")
-        self.assertEqual(run.tool_calls, 0)
-        self.assertEqual(run.observed_resources, {})
+        self.assertEqual(run.stop_reason, "completed")
+        self.assertEqual(run.tool_calls, 2)
+        self.assertEqual(run.model_calls, 2)
+        self.assertEqual(run.final_response.source_ids, [self.event.id])
+        feedback = [message for message in model.requests[1][0] if message["role"] == "tool"]
+        self.assertEqual(len(feedback), 3)
+        self.assertIn(self.event.id, feedback[0]["content"])
+        self.assertIn("was not run", feedback[2]["content"])
+        self.assertEqual([tool["function"]["name"] for tool in model.requests[1][1]], [RESPOND_TOOL])
 
-    def test_model_budget_stops_a_retryable_tool_loop(self) -> None:
+    def test_a_search_returned_during_the_reserved_answer_call_is_not_executed(self) -> None:
         malformed_call = AgentModelTurn(
             tool_calls=[
                 AgentToolCall(
@@ -255,7 +275,64 @@ class ReadAgentLoopTests(unittest.TestCase):
         )
 
         self.assertEqual(run.stop_reason, "model_budget_exhausted")
-        self.assertEqual(run.tool_calls, 1)
+        self.assertEqual(run.tool_calls, 0)
+        self.assertEqual([tool["function"]["name"] for tool in model.requests[0][1]], [RESPOND_TOOL])
+
+    def test_the_last_model_call_answers_using_the_results_of_two_search_rounds(self) -> None:
+        model = ScriptedReadAgentModel([
+            self._calendar_call(),
+            AgentModelTurn(tool_calls=[AgentToolCall(id="notes", name="search_saved_items", arguments={})]),
+            AgentModelTurn(final_response=AgentFinalResponse(
+                reply="The review is scheduled; the notes search returned no preparation details.", source_ids=[self.event.id]
+            )),
+        ])
+
+        run = ReadAgentLoop(model).run(system_prompt="Answer from tool results.", user_input={"question": "Review?"}, tools=self.tools)
+
+        self.assertEqual(run.stop_reason, "completed")
+        self.assertEqual((run.model_calls, run.tool_calls), (3, 2))
+        self.assertEqual(run.final_response.source_ids, [self.event.id])
+        self.assertEqual([tool["function"]["name"] for tool in model.requests[2][1]], [RESPOND_TOOL])
+        self.assertIn("unconfirmed", model.requests[2][0][-1]["content"])
+
+    def test_invalid_tool_arguments_can_be_corrected_before_the_final_answer(self) -> None:
+        model = ScriptedReadAgentModel([
+            AgentModelTurn(tool_calls=[AgentToolCall(
+                id="bad-range", name="search_calendar", arguments={"start_date": "2026-10-01", "end_date": "2026-09-01"}
+            )]),
+            self._calendar_call(),
+            AgentModelTurn(final_response=AgentFinalResponse(reply="The review is scheduled.", source_ids=[self.event.id])),
+        ])
+
+        run = ReadAgentLoop(model).run(system_prompt="Answer from tool results.", user_input={"question": "Review?"}, tools=self.tools)
+
+        self.assertEqual(run.stop_reason, "completed")
+        self.assertEqual((run.model_calls, run.tool_calls), (3, 2))
+        self.assertIn("retryable", model.requests[1][0][-1]["content"])
+
+    def test_malformed_model_output_can_be_corrected_without_a_separate_repair_state(self) -> None:
+        model = ScriptedReadAgentModel([
+            InvalidStructuredOutput("The model answered without calling respond."),
+            self._calendar_call(),
+            AgentModelTurn(final_response=AgentFinalResponse(reply="The review is scheduled.", source_ids=[self.event.id])),
+        ])
+
+        run = ReadAgentLoop(model).run(system_prompt="Answer from tool results.", user_input={"question": "Review?"}, tools=self.tools)
+
+        self.assertEqual(run.stop_reason, "completed")
+        self.assertEqual((run.model_calls, run.tool_calls), (3, 1))
+        self.assertIn("could not be read", model.requests[1][0][-1]["content"])
+
+    def test_a_malformed_final_answer_still_respects_the_model_budget(self) -> None:
+        model = ScriptedReadAgentModel([{"final_response": {"reply": ""}}])
+
+        run = ReadAgentLoop(model, max_model_calls=1).run(
+            system_prompt="Answer from tool results.", user_input={"question": "Review?"}, tools=self.tools
+        )
+
+        self.assertEqual(run.stop_reason, "validation_failed")
+        self.assertIsNone(run.final_response)
+        self.assertEqual((run.model_calls, run.tool_calls), (1, 0))
 
     def test_a_run_that_raises_still_reports_what_it_spent(self) -> None:
         class FailingSecondCall(ScriptedReadAgentModel):

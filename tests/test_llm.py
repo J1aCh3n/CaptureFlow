@@ -125,7 +125,7 @@ class OpenAICompatibleModelTests(unittest.TestCase):
         with self.assertRaisesRegex(InvalidStructuredOutput, "respond"):
             _agent_model(completions).next_read_agent_turn(messages=[], tools=[])
 
-    def test_dashscope_read_agent_disables_thinking_without_forcing_more_tools(self) -> None:
+    def test_dashscope_read_agent_keeps_search_tool_selection_optional(self) -> None:
         completions = _AgentCompletions([("respond", '{"reply":"No matching records were found.","source_ids":[]}')])
         model = _agent_model(completions)
         model.settings = ModelSettings(
@@ -134,10 +134,26 @@ class OpenAICompatibleModelTests(unittest.TestCase):
             base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
         )
 
-        model.next_read_agent_turn(messages=[], tools=[])
+        model.next_read_agent_turn(messages=[], tools=[
+            {"type": "function", "function": {"name": "search_calendar"}},
+            {"type": "function", "function": {"name": "respond"}},
+        ])
 
         self.assertEqual(completions.kwargs["extra_body"], {"enable_thinking": False})
         self.assertNotIn("tool_choice", completions.kwargs)
+
+    def test_read_agent_requests_a_respond_call_when_only_finishing_is_available(self) -> None:
+        completions = _AgentCompletions([("respond", '{"reply":"The review is scheduled.","source_ids":["event-1"]}')])
+        model = _agent_model(completions)
+        model.settings = ModelSettings(
+            api_key="test-key", model="qwen3.8-flash", base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+        )
+
+        turn = model.next_read_agent_turn(messages=[], tools=[{"type": "function", "function": {"name": "respond"}}])
+
+        self.assertEqual(completions.kwargs["tool_choice"], {"type": "function", "function": {"name": "respond"}})
+        self.assertEqual(completions.kwargs["extra_body"], {"enable_thinking": False})
+        self.assertEqual(turn.final_response.source_ids, ["event-1"])
 
     def test_workflow_requests_are_unchanged_by_the_read_agent(self) -> None:
         # SHA-256 of both system prompts at 43d5701, before the read agent existed. Agent mode
