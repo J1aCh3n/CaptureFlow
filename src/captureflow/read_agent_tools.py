@@ -455,6 +455,8 @@ def _project_record_item(record: ProjectRecord) -> dict[str, Any]:
         "rationale": record.rationale,
         "due_at": record.due_at.isoformat() if record.due_at is not None else None,
         "state": record.state,
+        "supersedes_record_id": record.supersedes_record_id,
+        "updated_at": record.updated_at.isoformat(),
     }
 
 

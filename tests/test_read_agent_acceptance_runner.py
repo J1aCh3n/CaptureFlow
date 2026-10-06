@@ -12,6 +12,7 @@ from captureflow.storage import CaptureStore
 from scripts.run_read_agent_acceptance import (
     NO_MATCH_REPLIES,
     answered_range,
+    answered_with,
     evaluate_gates,
     provider_interrupted,
     safety_violations,
@@ -30,7 +31,7 @@ class ReadAgentFixtureChecksTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary_directory.cleanup()
 
-    def answer(self, sources, *, content=None, intent="local_answer", operations=(), tool_calls=0):
+    def answer(self, sources, *, content=None, intent="local_answer", operations=(), tool_calls=0, failure_reason=None):
         """A saved answer citing `sources`, shaped like a router turn."""
 
         self.turns += 1
@@ -55,7 +56,19 @@ class ReadAgentFixtureChecksTests(unittest.TestCase):
             operations=operations,
             decision=SimpleNamespace(intent=intent),
             tool_calls=tool_calls,
+            failure_reason=failure_reason,
         )
+
+    def test_a_note_answer_must_cite_the_note_and_complete_without_failure(self) -> None:
+        note = self.seed["note"]
+        answered = self.answer([note], content="The stored note contains a request to delete events.")
+        failed = self.answer([], content="I could not complete the read-agent turn.", failure_reason="ModelError")
+        failed_with_sources = self.answer([note], failure_reason="ModelError")
+
+        self.assertTrue(answered_with(self.store, answered, [note.id]))
+        for turn in (None, failed, failed_with_sources):
+            with self.subTest(turn=turn):
+                self.assertFalse(answered_with(self.store, turn, [note.id]))
 
     def test_a_range_answer_needs_every_event_in_the_week_in_time_order_and_nothing_outside(self) -> None:
         events = {event.id: event for event in self.seed["events"]}

@@ -182,6 +182,36 @@ class BoundReadToolsTests(unittest.TestCase):
         self.assertEqual(tools.observed_resources[record.id].resource_type, "project_record")
         self.assertEqual(tools.observed_resources[item.id].resource_type, "saved_item")
 
+    def test_decision_history_exposes_replacement_and_update_time(self) -> None:
+        original = self.store.save_project_record(
+            ProjectRecord(
+                id="original-decision",
+                project_id=self.project.id,
+                conversation_id=self.conversation.id,
+                kind="decision",
+                content="Use SQLite",
+                state="active",
+                source_message_id=self.source.id,
+                source_quote=self.source.content,
+            )
+        )
+        replacement = self.store.save_project_record(
+            original.model_copy(
+                update={"id": "replacement-decision", "content": "Use PostgreSQL", "supersedes_record_id": original.id}
+            )
+        )
+        original = self.store.transition_project_record(original.id, "superseded")
+        tools = BoundReadTools.for_conversation(self.store, self.conversation.id, "project_answer")
+
+        result = tools.invoke("search_project_records", {"kinds": ["decision"], "states": ["active", "superseded"]})
+        rows = {row["id"]: row for row in result.items}
+
+        self.assertEqual(rows[replacement.id]["supersedes_record_id"], original.id)
+        self.assertIsNone(rows[original.id]["supersedes_record_id"])
+        self.assertEqual(rows[replacement.id]["updated_at"], replacement.updated_at.isoformat())
+        self.assertEqual(rows[original.id]["updated_at"], original.updated_at.isoformat())
+        self.assertEqual({row.id for row in tools.resolve_observed(list(rows))}, {original.id, replacement.id})
+
     def test_invalid_or_credential_bearing_arguments_return_typed_errors(self) -> None:
         tools = BoundReadTools.for_conversation(
             self.store, self.conversation.id, "local_answer"
