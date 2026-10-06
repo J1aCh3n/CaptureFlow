@@ -171,6 +171,30 @@ class ConversationRouterServiceTests(unittest.TestCase):
         )
         self.assertNotIn("candidate_events", model.agent_calls[0]["messages"][1]["content"])
 
+    def test_agent_can_answer_from_a_calendar_event_beyond_the_first_page(self) -> None:
+        events = [self._saved_event(f"page-{index:02}", f"Review {index}", date(2026, 9, 18))
+                  for index in range(25)]
+        query = {"start_date": "2026-09-18", "end_date": "2026-09-18", "limit": 20}
+        model = ScriptedContextualModel(
+            [{"intent": "local_answer"}],
+            agent_turns=[
+                AgentModelTurn(tool_calls=[AgentToolCall(id="page-one", name="search_calendar", arguments=query)]),
+                AgentModelTurn(tool_calls=[AgentToolCall(id="page-two", name="search_calendar",
+                                                       arguments={**query, "offset": 20})]),
+                AgentModelTurn(final_response=AgentFinalResponse(response_kind="grounded_answer",
+                                                                source_ids=[events[-1].id])),
+            ],
+        )
+
+        turn = self.submit(model, "What is stored for Review 24?", "paged-answer", answer_mode="agent")
+
+        self.assertIsNone(turn.failure_reason)
+        self.assertIn(events[-1].title, turn.assistant_message.content)
+        self.assertEqual(
+            [source.reference.source_id for source in self.store.list_local_context_answer_sources(turn.assistant_message.id)],
+            [events[-1].id],
+        )
+
     def test_agent_project_answer_shows_model_prose_and_sqlite_dates(self) -> None:
         task = self._project_record(
             "latency-task",

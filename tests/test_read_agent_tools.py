@@ -143,6 +143,22 @@ class BoundReadToolsTests(unittest.TestCase):
         self.assertEqual([item["id"] for item in result.items], [matching.id])
         self.assertEqual(result.scope, "workspace")
 
+    def test_calendar_can_list_all_dates_or_use_open_ended_ranges(self) -> None:
+        past = self._event("past", "Past review", date(2026, 9, 1))
+        future = self._event("future", "Future review", date(2027, 4, 10))
+        tools = BoundReadTools.for_conversation(self.store, self.conversation.id, "local_answer")
+
+        for query, expected in (
+            ({}, [past.id, future.id]),
+            ({"start_date": "2026-09-09"}, [future.id]),
+            ({"end_date": "2026-09-09"}, [past.id]),
+            ({"start_date": "2026-09-01", "end_date": "2027-04-10"}, [past.id, future.id]),
+        ):
+            with self.subTest(query=query):
+                result = tools.invoke("search_calendar", query)
+                self.assertTrue(result.ok)
+                self.assertEqual([row["id"] for row in result.items], expected)
+
     def test_record_and_saved_item_filters_are_scoped_and_deterministic(self) -> None:
         record = self.store.save_project_record(
             ProjectRecord(
@@ -182,6 +198,113 @@ class BoundReadToolsTests(unittest.TestCase):
         self.assertEqual(tools.observed_resources[record.id].resource_type, "project_record")
         self.assertEqual(tools.observed_resources[item.id].resource_type, "saved_item")
 
+    def test_listing_tasks_uses_kind_and_state_without_content_keywords(self) -> None:
+        task = self.store.save_project_record(
+            ProjectRecord(
+                id="latency-task", project_id=self.project.id, conversation_id=self.conversation.id,
+                kind="task", content="排查 ROS 2 节点延迟", state="active",
+                source_message_id=self.source.id, source_quote=self.source.content,
+            )
+        )
+        self.store.save_project_record(task.model_copy(update={"id": "closed-task", "state": "completed"}))
+        self.store.save_project_record(task.model_copy(update={"id": "decision", "kind": "decision"}))
+        tools = BoundReadTools.for_conversation(self.store, self.conversation.id, "project_answer")
+
+        listed = tools.invoke("search_project_records", {"kinds": ["task"]})
+        narrowed = tools.invoke("search_project_records", {"kinds": ["task"], "keywords": ["数据库"]})
+
+        self.assertEqual([row["id"] for row in listed.items], [task.id])
+        self.assertEqual(narrowed.items, [])
+
+    def test_chinese_keywords_match_phrases_instead_of_shared_characters(self) -> None:
+        flight = self._event("flight", "日本机票预订", date(2026, 9, 20))
+        self._event("robot", "机械臂延迟评审会议", date(2026, 9, 21))
+        tools = BoundReadTools.for_conversation(self.store, self.conversation.id, "local_answer")
+
+        result = tools.invoke("search_calendar", {"keywords": ["日本", "机票"]})
+
+        self.assertTrue(result.ok)
+        self.assertEqual([row["id"] for row in result.items], [flight.id])
+
+    def test_keywords_match_visible_record_fields_not_other_items_in_the_source(self) -> None:
+        source = self.store.save_message(
+            Message(id="mixed-source", conversation_id=self.conversation.id, role="user",
+                    content="Book a Japan flight and schedule a design review.")
+        )
+        self._event("review", "Design review", date(2026, 9, 20),
+                    source_message_id=source.id, source_quote=source.content)
+        self._note("review-note", "Design review notes", self.conversation.id, source.id)
+        self.store.save_project_record(
+            ProjectRecord(
+                id="review-task", project_id=self.project.id, conversation_id=self.conversation.id,
+                kind="task", content="Prepare design review", state="active",
+                source_message_id=source.id, source_quote=source.content,
+            )
+        )
+        tools = BoundReadTools.for_conversation(self.store, self.conversation.id, "project_answer")
+
+        for name in ("search_calendar", "search_project_records", "search_saved_items"):
+            with self.subTest(tool=name):
+                result = tools.invoke(name, {"keywords": ["Japan"]})
+                self.assertTrue(result.ok)
+                self.assertEqual(result.items, [])
+
+    def test_latin_keyword_phrases_are_case_insensitive_and_do_not_match_partial_words(self) -> None:
+        exact = self._event("exact", "ROS 2 CAT review", date(2026, 9, 20))
+        self._event("unrelated", "ROS 1 category review", date(2026, 9, 21))
+        tools = BoundReadTools.for_conversation(self.store, self.conversation.id, "local_answer")
+
+        for keywords in (["ros 2"], ["cat"]):
+            with self.subTest(keywords=keywords):
+                result = tools.invoke("search_calendar", {"keywords": keywords})
+                self.assertEqual([row["id"] for row in result.items], [exact.id])
+
+    def test_calendar_pages_reach_all_matches_in_order(self) -> None:
+        events = [self._event(f"event-{index:02}", "Review", date(2026, 9, 20)) for index in range(25)]
+        tools = BoundReadTools.for_conversation(self.store, self.conversation.id, "local_answer")
+        query = {"start_date": "2026-09-20", "end_date": "2026-09-20", "limit": 20}
+
+        first = tools.invoke("search_calendar", query)
+        second = tools.invoke("search_calendar", {**query, "offset": 20})
+        end = tools.invoke("search_calendar", {**query, "offset": 25})
+
+        self.assertTrue(first.truncated)
+        self.assertTrue(second.ok)
+        self.assertFalse(second.truncated)
+        self.assertEqual([row["id"] for row in [*first.items, *second.items]], [event.id for event in events])
+        self.assertTrue(end.ok)
+        self.assertEqual(end.items, [])
+        self.assertFalse(end.truncated)
+        self.assertEqual({row.id for row in tools.resolve_observed([event.id for event in events])},
+                         {event.id for event in events})
+
+    def test_record_and_note_pages_apply_filters_before_offset(self) -> None:
+        record = ProjectRecord(
+            project_id=self.project.id, conversation_id=self.conversation.id, kind="task",
+            content="Latency measurement", state="active",
+            source_message_id=self.source.id, source_quote=self.source.content,
+        )
+        for index in range(5):
+            self.store.save_project_record(record.model_copy(update={"id": f"task-{index}"}))
+            self._note(f"note-{index}", "Latency measurement", self.conversation.id, self.source.id)
+        self.store.save_project_record(record.model_copy(update={"id": "other", "content": "Design review"}))
+        self._note("other-note", "Design review", self.conversation.id, self.source.id)
+        tools = BoundReadTools.for_conversation(self.store, self.conversation.id, "project_answer")
+
+        for name in ("search_project_records", "search_saved_items"):
+            with self.subTest(tool=name):
+                query = {"keywords": ["latency"], "limit": 3}
+                first = tools.invoke(name, query)
+                second = tools.invoke(name, {**query, "offset": 3})
+                ids = [row["id"] for row in [*first.items, *second.items]]
+                self.assertTrue(second.ok)
+                self.assertTrue(first.truncated)
+                self.assertFalse(second.truncated)
+                self.assertEqual(len(ids), 5)
+                self.assertEqual(len(set(ids)), 5)
+                self.assertNotIn("other", ids)
+                self.assertNotIn("other-note", ids)
+
     def test_decision_history_exposes_replacement_and_update_time(self) -> None:
         original = self.store.save_project_record(
             ProjectRecord(
@@ -218,7 +341,7 @@ class BoundReadToolsTests(unittest.TestCase):
         )
 
         invalid_range = tools.invoke(
-            "search_calendar", {"start_date": "2026-09-01", "end_date": "2026-12-01"}
+            "search_calendar", {"start_date": "2026-12-01", "end_date": "2026-09-01"}
         )
         credential = tools.invoke(
             "search_saved_items", {"keywords": ["api key is sk-abcdefghijklmnop"]}
@@ -235,8 +358,7 @@ class BoundReadToolsTests(unittest.TestCase):
             self.store, self.conversation.id, "local_answer"
         )
 
-        unpaired = tools.invoke("search_calendar", {"start_date": "2026-09-01"})
-        unbounded = tools.invoke("search_calendar", {})
+        reversed_range = tools.invoke("search_calendar", {"start_date": "2026-09-02", "end_date": "2026-09-01"})
         malformed = tools.invoke(
             "search_calendar",
             {
@@ -245,8 +367,7 @@ class BoundReadToolsTests(unittest.TestCase):
             },
         )
 
-        self.assertIn("start_date and end_date", unpaired.error.message)
-        self.assertIn("keywords", unbounded.error.message)
+        self.assertIn("end_date must not be before start_date", reversed_range.error.message)
         self.assertIn("start_date", malformed.error.message)
         self.assertNotIn("private-date-sentinel", malformed.error.message)
 

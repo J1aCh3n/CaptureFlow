@@ -8,6 +8,7 @@ returned row is recorded in a server-side provenance ledger.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any, Literal
@@ -15,13 +16,11 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from .credentials import contains_credential_disclosure
-from .local_context_service import match_terms
 from .models import CalendarEvent, Conversation, Project, ProjectRecord, SavedItem
 from .storage import CaptureStore
 
 
 MAX_TOOL_ROWS = 20
-MAX_CALENDAR_DAYS = 62
 # The record states search_project_records may return, and so a citation may still be in.
 SEARCHABLE_RECORD_STATES = ("active", "completed", "resolved", "superseded")
 
@@ -38,8 +37,17 @@ class _ToolArguments(BaseModel):
 
 
 class _KeywordArguments(_ToolArguments):
-    keywords: list[str] = Field(default_factory=list, max_length=12)
+    keywords: list[str] = Field(
+        default_factory=list,
+        max_length=12,
+        description="Literal words or phrases in the item's text, matched case-insensitively. Keywords are alternatives (OR). Leave empty to list items using the other filters.",
+    )
     limit: int = Field(default=10, ge=1, le=MAX_TOOL_ROWS)
+    offset: int = Field(
+        default=0,
+        ge=0,
+        description="Skip this many matching items. When truncated is true, repeat the same filters and increase offset by the number of returned items.",
+    )
 
     @field_validator("keywords")
     @classmethod
@@ -58,18 +66,8 @@ class _CalendarArguments(_KeywordArguments):
 
     @model_validator(mode="after")
     def validate_range(self) -> "_CalendarArguments":
-        if (self.start_date is None) != (self.end_date is None):
-            raise ValueError("start_date and end_date must be provided together")
-        if self.start_date is None:
-            if not self.keywords:
-                raise ValueError("keywords are required when no date range is provided")
-            return self
-        assert self.end_date is not None
-        if self.end_date < self.start_date:
+        if self.start_date is not None and self.end_date is not None and self.end_date < self.start_date:
             raise ValueError("end_date must not be before start_date")
-        inclusive_days = (self.end_date - self.start_date).days + 1
-        if inclusive_days > MAX_CALENDAR_DAYS:
-            raise ValueError(f"calendar range cannot exceed {MAX_CALENDAR_DAYS} days")
         return self
 
 
@@ -84,7 +82,7 @@ class SearchProjectCalendarArgs(_CalendarArguments):
 class SearchProjectRecordsArgs(_KeywordArguments):
     kinds: list[
         Literal["task", "milestone", "decision", "constraint", "open_question", "blocker"]
-    ] = Field(default_factory=list)
+    ] = Field(default_factory=list, description="Record types to include; empty includes all types.")
     # Keep in step with SEARCHABLE_RECORD_STATES.
     states: list[Literal["active", "completed", "resolved", "superseded"]] = Field(
         default_factory=lambda: ["active"]
@@ -92,7 +90,9 @@ class SearchProjectRecordsArgs(_KeywordArguments):
 
 
 class SearchSavedItemsArgs(_KeywordArguments):
-    kinds: list[Literal["idea", "note"]] = Field(default_factory=lambda: ["idea", "note"])
+    kinds: list[Literal["idea", "note"]] = Field(
+        default_factory=lambda: ["idea", "note"], description="Item types to include."
+    )
 
 
 class ReadToolError(BaseModel):
@@ -172,7 +172,7 @@ class BoundReadTools:
                     if self.route == "project_answer"
                     else "Search active calendar events in the current workspace; optionally narrow to the current project."
                 )
-                + " Provide start_date and end_date together for a bounded date search, or omit both and provide keywords for an all-date text search.",
+                + " Filter by start_date and/or end_date, or omit both to search all dates. Keywords filter titles and descriptions.",
                 arguments_model=calendar_arguments,
             ),
             "search_saved_items": ReadToolDefinition(
@@ -188,7 +188,7 @@ class BoundReadTools:
         if self.project is not None:
             definitions["search_project_records"] = ReadToolDefinition(
                 name="search_project_records",
-                description="Search tracker records in the current project.",
+                description="Search tracker records in the current project. Use kinds and states to list categories such as active tasks; keywords filter content and rationale.",
                 arguments_model=SearchProjectRecordsArgs,
             )
         self._definitions = definitions
@@ -298,13 +298,12 @@ class BoundReadTools:
             )
 
         events = self.store.list_calendar_events(self.conversation.workspace_id)
-        if arguments.start_date is not None:
-            assert arguments.end_date is not None
-            events = [
-                event
-                for event in events
-                if arguments.start_date <= event.start_date <= arguments.end_date
-            ]
+        events = [
+            event
+            for event in events
+            if (arguments.start_date is None or event.start_date >= arguments.start_date)
+            and (arguments.end_date is None or event.start_date <= arguments.end_date)
+        ]
         if project_only:
             events = [
                 event
@@ -312,12 +311,12 @@ class BoundReadTools:
                 if (project := self.store.get_conversation_project(event.conversation_id)) is not None
                 and project.id == self.project.id
             ]
-        events = _rank_if_requested(
+        events = _search_by_keywords(
             events,
             arguments.keywords,
-            lambda event: f"{event.title} {event.description or ''} {event.source_quote}",
+            lambda event: f"{event.title} {event.description or ''}",
         )
-        selected, truncated = _bounded(events, arguments.limit)
+        selected, truncated = _bounded(events, arguments.limit, arguments.offset)
         scope_kind: ScopeKind = "project" if project_only else "workspace"
         scope_id = self.project.id if project_only else self.conversation.workspace_id
         self._observe(selected, "calendar_event", scope_kind, scope_id)
@@ -338,12 +337,12 @@ class BoundReadTools:
         if arguments.kinds:
             requested_kinds = set(arguments.kinds)
             records = [record for record in records if record.kind in requested_kinds]
-        records = _rank_if_requested(
+        records = _search_by_keywords(
             records,
             arguments.keywords,
-            lambda record: f"{record.content} {record.rationale or ''} {record.source_quote}",
+            lambda record: f"{record.content} {record.rationale or ''}",
         )
-        selected, truncated = _bounded(records, arguments.limit)
+        selected, truncated = _bounded(records, arguments.limit, arguments.offset)
         self._observe(selected, "project_record", "project", self.project.id)
         return ReadToolResult(
             ok=True,
@@ -373,12 +372,12 @@ class BoundReadTools:
                 workspace_id=self.conversation.workspace_id,
                 kinds=kinds,
             )
-        items = _rank_if_requested(
+        items = _search_by_keywords(
             items,
             arguments.keywords,
-            lambda item: f"{item.content} {item.source_quote}",
+            lambda item: item.content,
         )
-        selected, truncated = _bounded(items, arguments.limit)
+        selected, truncated = _bounded(items, arguments.limit, arguments.offset)
         self._observe(selected, "saved_item", scope_kind, scope_id)
         return ReadToolResult(
             ok=True,
@@ -417,20 +416,30 @@ def _contains_credential(value: Any) -> bool:
     return False
 
 
-def _rank_if_requested(rows: list, keywords: list[str], text_for_row) -> list:
+def _search_by_keywords(rows: list, keywords: list[str], text_for_row) -> list:
+    """Match literal phrases; rank by matched keywords, keeping storage order for ties."""
+
     if not keywords:
         return rows
-    wanted = match_terms(" ".join(keywords))
+    patterns = [
+        re.compile(
+            rf"(?<![a-z0-9_]){re.escape(keyword)}(?![a-z0-9_])" if keyword.isascii() else re.escape(keyword),
+            re.IGNORECASE,
+        )
+        for keyword in keywords
+    ]
     ranked = []
     for position, row in enumerate(rows):
-        score = len(wanted & match_terms(text_for_row(row)))
+        text = text_for_row(row)
+        score = sum(pattern.search(text) is not None for pattern in patterns)
         if score:
             ranked.append((-score, position, row))
     return [row for _, _, row in sorted(ranked, key=lambda entry: (entry[0], entry[1]))]
 
 
-def _bounded(rows: list, limit: int) -> tuple[list, bool]:
-    return rows[:limit], len(rows) > limit
+def _bounded(rows: list, limit: int, offset: int) -> tuple[list, bool]:
+    end = offset + limit
+    return rows[offset:end], len(rows) > end
 
 
 def _calendar_item(event: CalendarEvent) -> dict[str, Any]:
