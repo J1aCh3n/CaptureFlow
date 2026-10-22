@@ -214,7 +214,9 @@ class BoundReadToolsTests(unittest.TestCase):
         narrowed = tools.invoke("search_project_records", {"kinds": ["task"], "keywords": ["数据库"]})
 
         self.assertEqual([row["id"] for row in listed.items], [task.id])
-        self.assertEqual(narrowed.items, [])
+        # The kind filter still holds; the unmatched keyword only stops ordering the rows.
+        self.assertEqual([row["id"] for row in narrowed.items], [task.id])
+        self.assertEqual(narrowed.keyword_matches, 0)
 
     def test_chinese_keywords_match_phrases_instead_of_shared_characters(self) -> None:
         flight = self._event("flight", "日本机票预订", date(2026, 9, 20))
@@ -247,7 +249,10 @@ class BoundReadToolsTests(unittest.TestCase):
             with self.subTest(tool=name):
                 result = tools.invoke(name, {"keywords": ["Japan"]})
                 self.assertTrue(result.ok)
-                self.assertEqual(result.items, [])
+                # "Japan" is only in the source message, not in any item's own text, so
+                # nothing matches and the scope is reported instead of claimed empty.
+                self.assertEqual(result.keyword_matches, 0)
+                self.assertEqual(result.total, 1)
 
     def test_latin_keyword_phrases_are_case_insensitive_and_do_not_match_partial_words(self) -> None:
         exact = self._event("exact", "ROS 2 CAT review", date(2026, 9, 20))
@@ -304,6 +309,103 @@ class BoundReadToolsTests(unittest.TestCase):
                 self.assertEqual(len(set(ids)), 5)
                 self.assertNotIn("other", ids)
                 self.assertNotIn("other-note", ids)
+
+    def test_keywords_that_match_nothing_return_the_scope_they_searched(self) -> None:
+        # An empty result claims the scope holds nothing, which is a different fact from
+        # "your words do not appear in it". Judging whether a row answers the question is
+        # the model's work, so the tool reports and does not decide.
+        task = self.store.save_project_record(
+            ProjectRecord(
+                id="ros-task", project_id=self.project.id, conversation_id=self.conversation.id,
+                kind="task", content="排查 ROS 2 时间同步", state="active",
+                source_message_id=self.source.id, source_quote=self.source.content,
+            )
+        )
+        tools = BoundReadTools.for_conversation(self.store, self.conversation.id, "project_answer")
+
+        result = tools.invoke("search_project_records", {"keywords": ["待办"]})
+
+        self.assertTrue(result.ok)
+        self.assertEqual([row["id"] for row in result.items], [task.id])
+        self.assertEqual(result.keyword_matches, 0)
+        self.assertEqual(result.total, 1)
+
+    def test_rows_matching_more_keywords_rank_first_and_are_counted(self) -> None:
+        both = self._event("both", "Japan flight booking", date(2026, 9, 20))
+        one = self._event("one", "Flight log review", date(2026, 9, 21))
+        tools = BoundReadTools.for_conversation(self.store, self.conversation.id, "local_answer")
+
+        result = tools.invoke("search_calendar", {"keywords": ["Japan", "flight"]})
+
+        self.assertEqual([row["id"] for row in result.items], [both.id, one.id])
+        self.assertEqual(result.keyword_matches, 2)
+        self.assertEqual(result.total, 2)
+
+    def test_a_search_without_keywords_reports_no_keyword_count(self) -> None:
+        first = self._event("first", "Design review", date(2026, 9, 20))
+        second = self._event("second", "Budget review", date(2026, 9, 21))
+        tools = BoundReadTools.for_conversation(self.store, self.conversation.id, "local_answer")
+
+        result = tools.invoke("search_calendar", {})
+
+        self.assertEqual([row["id"] for row in result.items], [first.id, second.id])
+        self.assertIsNone(result.keyword_matches)
+        self.assertEqual(result.total, 2)
+
+    def test_total_counts_the_selected_set_and_not_the_returned_page(self) -> None:
+        for index in range(5):
+            self._event(f"match-{index}", "Latency review", date(2026, 9, 20))
+        self._event("other", "Design review", date(2026, 9, 20))
+        tools = BoundReadTools.for_conversation(self.store, self.conversation.id, "local_answer")
+        query = {"keywords": ["latency"], "limit": 3}
+
+        first = tools.invoke("search_calendar", query)
+        second = tools.invoke("search_calendar", {**query, "offset": 3})
+        past_end = tools.invoke("search_calendar", {**query, "offset": 5})
+
+        for page in (first, second, past_end):
+            with self.subTest(offset=page.items):
+                self.assertEqual(page.total, 5)
+                self.assertEqual(page.keyword_matches, 5)
+        self.assertTrue(first.truncated)
+        self.assertFalse(second.truncated)
+        # Paging past the end stays empty: the fallback answers an unmatched keyword, not an
+        # exhausted page.
+        self.assertEqual(past_end.items, [])
+
+    def test_unmatched_keywords_never_widen_the_structural_filters(self) -> None:
+        self._event("past", "Past review", date(2026, 9, 1))
+        future = self._event("future", "Future review", date(2027, 4, 10))
+        closed = ProjectRecord(
+            id="closed-task", project_id=self.project.id, conversation_id=self.conversation.id,
+            kind="task", content="Measure latency", state="completed",
+            source_message_id=self.source.id, source_quote=self.source.content,
+        )
+        self.store.save_project_record(closed)
+        self.store.save_project_record(closed.model_copy(update={"id": "open-decision", "kind": "decision", "state": "active"}))
+        open_task = self.store.save_project_record(closed.model_copy(update={"id": "open-task", "state": "active"}))
+        tools = BoundReadTools.for_conversation(self.store, self.conversation.id, "project_answer")
+
+        dated = tools.invoke("search_calendar", {"keywords": ["待办"], "start_date": "2026-09-09"})
+        typed = tools.invoke("search_project_records", {"keywords": ["待办"], "kinds": ["task"]})
+
+        self.assertEqual([row["id"] for row in dated.items], [future.id])
+        self.assertEqual(dated.total, 1)
+        self.assertEqual(dated.keyword_matches, 0)
+        # The fallback returns what kind and state allowed, and nothing they excluded.
+        self.assertEqual([row["id"] for row in typed.items], [open_task.id])
+        self.assertEqual(typed.total, 1)
+        self.assertEqual(typed.keyword_matches, 0)
+
+    def test_a_failed_result_reports_no_counts(self) -> None:
+        conversation = self.store.save_conversation(Conversation(id="unassigned", title="Unassigned"))
+        tools = BoundReadTools.for_conversation(self.store, conversation.id, "local_answer")
+
+        refused = tools.invoke("search_calendar", {"this_project_only": True})
+
+        self.assertFalse(refused.ok)
+        self.assertIsNone(refused.total)
+        self.assertIsNone(refused.keyword_matches)
 
     def test_decision_history_exposes_replacement_and_update_time(self) -> None:
         original = self.store.save_project_record(

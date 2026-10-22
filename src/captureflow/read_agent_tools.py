@@ -40,7 +40,7 @@ class _KeywordArguments(_ToolArguments):
     keywords: list[str] = Field(
         default_factory=list,
         max_length=12,
-        description="Literal words or phrases in the item's text, matched case-insensitively. Keywords are alternatives (OR). Leave empty to list items using the other filters.",
+        description="Literal words or phrases in the item's text, matched case-insensitively. Keywords are alternatives (OR) and rank the items that contain more of them first. When no item contains any of them, the other filters' items are returned with keyword_matches 0, so judge relevance from the items themselves. Leave empty to list items using the other filters.",
     )
     limit: int = Field(default=10, ge=1, le=MAX_TOOL_ROWS)
     offset: int = Field(
@@ -109,13 +109,19 @@ class ReadToolResult(BaseModel):
     scope: ScopeKind | None = None
     items: list[dict[str, Any]] = Field(default_factory=list)
     truncated: bool = False
+    # How many rows the filters selected, which is what offset pages through, and how many of
+    # them matched a keyword. Without them an empty page cannot be told apart from an empty scope.
+    total: int | None = None
+    keyword_matches: int | None = None
     error: ReadToolError | None = None
 
     @model_validator(mode="after")
     def result_shape_matches_status(self) -> "ReadToolResult":
         if self.ok == (self.error is not None):
             raise ValueError("a successful result cannot have an error and a failed result must have one")
-        if not self.ok and (self.items or self.truncated):
+        if not self.ok and (
+            self.items or self.truncated or self.total is not None or self.keyword_matches is not None
+        ):
             raise ValueError("a failed result cannot contain rows")
         return self
 
@@ -311,7 +317,7 @@ class BoundReadTools:
                 if (project := self.store.get_conversation_project(event.conversation_id)) is not None
                 and project.id == self.project.id
             ]
-        events = _search_by_keywords(
+        events, keyword_matches = _rank_by_keywords(
             events,
             arguments.keywords,
             lambda event: f"{event.title} {event.description or ''}",
@@ -325,6 +331,8 @@ class BoundReadTools:
             scope=scope_kind,
             items=[_calendar_item(event) for event in selected],
             truncated=truncated,
+            total=len(events),
+            keyword_matches=keyword_matches,
         )
 
     def _search_project_records(self, arguments: _ToolArguments) -> ReadToolResult:
@@ -337,7 +345,7 @@ class BoundReadTools:
         if arguments.kinds:
             requested_kinds = set(arguments.kinds)
             records = [record for record in records if record.kind in requested_kinds]
-        records = _search_by_keywords(
+        records, keyword_matches = _rank_by_keywords(
             records,
             arguments.keywords,
             lambda record: f"{record.content} {record.rationale or ''}",
@@ -349,6 +357,8 @@ class BoundReadTools:
             scope="project",
             items=[_project_record_item(record) for record in selected],
             truncated=truncated,
+            total=len(records),
+            keyword_matches=keyword_matches,
         )
 
     def _search_saved_items(self, arguments: _ToolArguments) -> ReadToolResult:
@@ -372,7 +382,7 @@ class BoundReadTools:
                 workspace_id=self.conversation.workspace_id,
                 kinds=kinds,
             )
-        items = _search_by_keywords(
+        items, keyword_matches = _rank_by_keywords(
             items,
             arguments.keywords,
             lambda item: item.content,
@@ -384,6 +394,8 @@ class BoundReadTools:
             scope=scope_kind,
             items=[_saved_item(item) for item in selected],
             truncated=truncated,
+            total=len(items),
+            keyword_matches=keyword_matches,
         )
 
     def _observe(
@@ -416,11 +428,16 @@ def _contains_credential(value: Any) -> bool:
     return False
 
 
-def _search_by_keywords(rows: list, keywords: list[str], text_for_row) -> list:
-    """Match literal phrases; rank by matched keywords, keeping storage order for ties."""
+def _rank_by_keywords(rows: list, keywords: list[str], text_for_row) -> tuple[list, int | None]:
+    """Match literal phrases; rank by matched keywords, keeping storage order for ties.
+
+    Keywords that match nothing fall back to the rows the other filters selected, because
+    an empty result would say the scope is empty, and that is a different fact. Whether an
+    unmatched row answers the question is the model's judgement, not this function's.
+    """
 
     if not keywords:
-        return rows
+        return rows, None
     patterns = [
         re.compile(
             rf"(?<![a-z0-9_]){re.escape(keyword)}(?![a-z0-9_])" if keyword.isascii() else re.escape(keyword),
@@ -434,7 +451,10 @@ def _search_by_keywords(rows: list, keywords: list[str], text_for_row) -> list:
         score = sum(pattern.search(text) is not None for pattern in patterns)
         if score:
             ranked.append((-score, position, row))
-    return [row for _, _, row in sorted(ranked, key=lambda entry: (entry[0], entry[1]))]
+    if not ranked:
+        return rows, 0
+    ranked.sort(key=lambda entry: (entry[0], entry[1]))
+    return [row for _, _, row in ranked], len(ranked)
 
 
 def _bounded(rows: list, limit: int, offset: int) -> tuple[list, bool]:
