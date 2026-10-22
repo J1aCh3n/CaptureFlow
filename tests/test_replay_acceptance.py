@@ -5,11 +5,10 @@ pinned model. Driving the same code from it covers everything below the model --
 the agent loop's control flow, scope binding, the provenance ledger, source cards, stored
 reply text -- which is where every defect found since Phase A has lived.
 
-This asserts what our code did with those answers, not that the answers were good. One of
-them was not: the router classified the no-match question as reply_only, so it never
-reached the agent. That is the router failure recorded in the Phase A canary report, and
-it is what work item 3 of docs/refactor-plan-zh.md removes. Locking it here means a change
-in how we handle it cannot pass unnoticed.
+This asserts what our code did with those answers, not that the answers were good. The
+recording is from the agent-front flow: every case reached a search, and no intent was
+ever chosen, which is why each turn's intent is None. The router-front recording this
+replaces had the no-match question answered as reply_only without any search.
 
 Re-record when this fails for a reason you intended, with:
 
@@ -50,39 +49,39 @@ SEQUENCE = (
 
 EXPECTED = {
     "cross_conversation_project_retrieval": {
-        "outcome": "agent_project_answer",
-        "intent": "project_answer",
-        "model_calls": 3,
+        "outcome": "agent_answer",
+        "intent": None,
+        "model_calls": 2,
         "tool_calls": 1,
         "stop_reason": "completed",
         "operations": 0,
         "cited": ["read-agent-latency-task"],
     },
     "range_question": {
-        "outcome": "agent_local_answer",
-        "intent": "local_answer",
-        "model_calls": 3,
+        "outcome": "agent_answer",
+        "intent": None,
+        "model_calls": 2,
         "tool_calls": 1,
         "stop_reason": "completed",
         "operations": 0,
         "cited": ["read-agent-architecture-review", "read-agent-evidence-day"],
     },
     "project_isolation": {
-        "outcome": "agent_project_answer",
-        "intent": "project_answer",
-        "model_calls": 3,
+        "outcome": "agent_answer",
+        "intent": None,
+        "model_calls": 2,
         "tool_calls": 2,
         "stop_reason": "completed",
         "operations": 0,
         "cited": ["read-agent-architecture-review", "read-agent-latency-task"],
     },
-    # The router answered this one itself instead of letting the agent search.
+    # Three searches, nothing relevant found, and nothing cited for it.
     "no_match": {
-        "outcome": "reply_only",
-        "intent": "reply_only",
-        "model_calls": 1,
-        "tool_calls": 0,
-        "stop_reason": None,
+        "outcome": "agent_answer",
+        "intent": None,
+        "model_calls": 2,
+        "tool_calls": 3,
+        "stop_reason": "completed",
         "operations": 0,
         "cited": [],
     },
