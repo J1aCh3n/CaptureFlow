@@ -22,6 +22,7 @@ from captureflow.conversation_router_service import ConversationRouterService
 from captureflow.llm import ModelSettings, OpenAICompatibleModel
 from captureflow.models import CalendarEvent, Conversation, Message, Project, ProjectRecord, SavedItem
 from captureflow.storage import CaptureStore
+from scripts.model_replay import RecordingModel
 from scripts.run_phase10_live_acceptance import (
     TokenCounter,
     _git_revision,
@@ -65,6 +66,12 @@ def main() -> int:
         help="Cases to cover; every case runs when this is omitted. The selection is recorded "
         "in the trace, and traces covering different cases are refused by summarize.",
     )
+    run.add_argument(
+        "--record",
+        action="store_true",
+        help="Also write recording.json, the model's answers to this run, so the same turns "
+        "can be replayed offline by tests instead of bought again.",
+    )
     summarize = commands.add_parser("summarize")
     summarize.add_argument("traces", type=Path, nargs="+")
     args = parser.parse_args()
@@ -81,7 +88,11 @@ def main() -> int:
         raise SystemExit("output directory must not already exist")
     args.output_dir.mkdir(parents=True)
     trace = run_fixture(
-        args.output_dir / "captureflow.sqlite3", args.answer_mode, args.allow_model_override, cases
+        args.output_dir / "captureflow.sqlite3",
+        args.answer_mode,
+        args.allow_model_override,
+        cases,
+        args.output_dir / "recording.json" if args.record else None,
     )
     (args.output_dir / "trace.json").write_text(json.dumps(trace, ensure_ascii=False, indent=2), encoding="utf-8")
     return 0 if trace["passed"] else 1
@@ -92,6 +103,7 @@ def run_fixture(
     answer_mode: str,
     allow_model_override: bool,
     cases: set[str] | None = None,
+    record_to: Path | None = None,
 ) -> dict:
     fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
     protocol = fixture["protocol"]
@@ -104,9 +116,12 @@ def run_fixture(
     model = OpenAICompatibleModel(settings)
     tokens = TokenCounter(model)
     tools = ToolResultRecorder()
+    # The counter patches the live client, so it wraps the real model; the router sees the
+    # recorder, which only observes the answers on their way back.
+    recorder = RecordingModel(model) if record_to is not None else None
     router = ConversationRouterService(
         store,
-        model,
+        recorder or model,
         date.fromisoformat(protocol["reference_date"]),
         protocol["timezone"],
         answer_mode=answer_mode,
@@ -209,6 +224,25 @@ def run_fixture(
 
     trace["finished_at"] = datetime.now(timezone.utc).isoformat()
     trace["provider_interrupted"] = provider_interrupted(trace["submits"])
+    if recorder is not None:
+        # The header carries what the recording is only valid for: this fixture, protocol,
+        # commit, mode and case set.
+        recording = recorder.recording(
+            **{
+                key: trace[key]
+                for key in (
+                    "answer_mode",
+                    "model",
+                    "protocol_version",
+                    "commit",
+                    "working_tree_dirty",
+                    "fixture_sha256",
+                    "cases",
+                )
+            }
+        )
+        record_to.write_text(json.dumps(recording, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        trace["recorded_calls"] = len(recording["calls"])
     trace["passed"] = all(trace["checks"].values()) and not trace["violations"] and not trace["provider_interrupted"]
     return trace
 
