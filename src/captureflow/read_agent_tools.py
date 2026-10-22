@@ -24,7 +24,6 @@ MAX_TOOL_ROWS = 20
 # The record states search_project_records may return, and so a citation may still be in.
 SEARCHABLE_RECORD_STATES = ("active", "completed", "resolved", "superseded")
 
-ReadAgentRoute = Literal["local_answer", "project_answer"]
 ResourceType = Literal["calendar_event", "project_record", "saved_item"]
 ScopeKind = Literal["workspace", "project"]
 ToolErrorCategory = Literal[
@@ -72,11 +71,17 @@ class _CalendarArguments(_KeywordArguments):
 
 
 class SearchCalendarArgs(_CalendarArguments):
-    this_project_only: bool = False
+    """Offered when the conversation has a project, which is also the default scope."""
+
+    scope: Literal["project", "workspace"] = Field(
+        default="project",
+        description="Where to search. Defaults to the current project; use workspace only "
+        "when the question is not about this project.",
+    )
 
 
-class SearchProjectCalendarArgs(_CalendarArguments):
-    pass
+class SearchWorkspaceCalendarArgs(_CalendarArguments):
+    """Offered when the conversation has no project, so the workspace is the only scope."""
 
 
 class SearchProjectRecordsArgs(_KeywordArguments):
@@ -158,28 +163,24 @@ class BoundReadTools:
 
     store: CaptureStore
     conversation: Conversation
-    route: ReadAgentRoute
     project: Project | None
     observed_resources: dict[str, ObservedResource] = field(default_factory=dict)
     _definitions: dict[str, ReadToolDefinition] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        if self.route == "project_answer" and self.project is None:
-            raise ValueError("project_answer tools require an assigned project")
-
-        calendar_arguments = (
-            SearchProjectCalendarArgs if self.route == "project_answer" else SearchCalendarArgs
-        )
+        # The scope comes from the conversation, not from a route: the agent runs before any
+        # intent exists. The workspace is the hard bound either way.
+        in_project = self.project is not None
         definitions = {
             "search_calendar": ReadToolDefinition(
                 name="search_calendar",
                 description=(
-                    "Search active calendar events in the current project."
-                    if self.route == "project_answer"
-                    else "Search active calendar events in the current workspace; optionally narrow to the current project."
+                    "Search active calendar events in the current project, or in the whole workspace."
+                    if in_project
+                    else "Search active calendar events in the current workspace."
                 )
                 + " Filter by start_date and/or end_date, or omit both to search all dates. Keywords filter titles and descriptions.",
-                arguments_model=calendar_arguments,
+                arguments_model=SearchCalendarArgs if in_project else SearchWorkspaceCalendarArgs,
             ),
             "search_saved_items": ReadToolDefinition(
                 name="search_saved_items",
@@ -200,14 +201,11 @@ class BoundReadTools:
         self._definitions = definitions
 
     @classmethod
-    def for_conversation(
-        cls, store: CaptureStore, conversation_id: str, route: ReadAgentRoute
-    ) -> "BoundReadTools":
+    def for_conversation(cls, store: CaptureStore, conversation_id: str) -> "BoundReadTools":
         conversation = store.get_conversation(conversation_id)
         return cls(
             store=store,
             conversation=conversation,
-            route=route,
             project=store.get_conversation_project(conversation_id),
         )
 
@@ -292,11 +290,9 @@ class BoundReadTools:
         raise AssertionError(f"unhandled read tool: {name}")
 
     def _search_calendar(
-        self, arguments: SearchCalendarArgs | SearchProjectCalendarArgs
+        self, arguments: SearchCalendarArgs | SearchWorkspaceCalendarArgs
     ) -> ReadToolResult:
-        project_only = self.route == "project_answer" or (
-            isinstance(arguments, SearchCalendarArgs) and arguments.this_project_only
-        )
+        project_only = isinstance(arguments, SearchCalendarArgs) and arguments.scope == "project"
         if project_only and self.project is None:
             return _error(
                 "clarification_required",
@@ -365,8 +361,8 @@ class BoundReadTools:
         if not isinstance(arguments, SearchSavedItemsArgs):
             raise TypeError("search_saved_items received unexpected arguments")
         kinds = tuple(arguments.kinds)
-        # Notes follow the router's candidate rule for both routes: the conversation's
-        # project when it has one, otherwise the workspace.
+        # Notes keep the router's candidate rule: the conversation's project when it has
+        # one, otherwise the workspace.
         if self.project is not None:
             scope_kind: ScopeKind = "project"
             scope_id = self.project.id

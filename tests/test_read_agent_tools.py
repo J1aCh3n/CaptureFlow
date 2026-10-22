@@ -31,9 +31,7 @@ class BoundReadToolsTests(unittest.TestCase):
         self.temporary_directory.cleanup()
 
     def test_model_definitions_never_expose_scope_identifiers(self) -> None:
-        tools = BoundReadTools.for_conversation(
-            self.store, self.conversation.id, "local_answer"
-        )
+        tools = BoundReadTools.for_conversation(self.store, self.conversation.id)
 
         definitions = tools.definitions_for_model()
         serialized = repr(definitions)
@@ -50,11 +48,11 @@ class BoundReadToolsTests(unittest.TestCase):
             for definition in definitions
             if definition["function"]["name"] == "search_calendar"
         )
-        self.assertIn("this_project_only", calendar_schema["properties"])
+        self.assertIn("scope", calendar_schema["properties"])
 
-    def test_unassigned_local_answer_does_not_offer_project_records(self) -> None:
+    def test_an_unassigned_conversation_does_not_offer_project_records(self) -> None:
         conversation = self.store.save_conversation(Conversation(id="unassigned", title="Inbox"))
-        tools = BoundReadTools.for_conversation(self.store, conversation.id, "local_answer")
+        tools = BoundReadTools.for_conversation(self.store, conversation.id)
 
         names = {definition["function"]["name"] for definition in tools.definitions_for_model()}
 
@@ -63,7 +61,7 @@ class BoundReadToolsTests(unittest.TestCase):
         self.assertFalse(denied.ok)
         self.assertEqual(denied.error.category, "policy_denied")
 
-    def test_calendar_scope_can_only_be_narrowed_and_ledgers_returned_rows(self) -> None:
+    def test_calendar_scope_defaults_to_the_project_and_widens_only_within_the_workspace(self) -> None:
         same_project = self._event("same-project-event", "Design review", date(2026, 9, 20))
         other_conversation = self.store.save_conversation(
             Conversation(id="other-conversation", title="Other")
@@ -86,36 +84,53 @@ class BoundReadToolsTests(unittest.TestCase):
             source_message_id=other_source.id,
             source_quote=other_source.content,
         )
-        tools = BoundReadTools.for_conversation(
-            self.store, self.conversation.id, "local_answer"
+        tools = BoundReadTools.for_conversation(self.store, self.conversation.id)
+
+        # No scope given: the conversation's own project, as the router's project route used
+        # to force. Widening is the model's explicit choice and is recorded per row.
+        default_result = tools.invoke(
+            "search_calendar", {"start_date": "2026-09-20", "end_date": "2026-09-21"}
         )
 
-        workspace_result = tools.invoke(
-            "search_calendar",
-            {"start_date": "2026-09-20", "end_date": "2026-09-21", "limit": 1},
-        )
-        project_result = tools.invoke(
-            "search_calendar",
-            {
-                "start_date": "2026-09-20",
-                "end_date": "2026-09-21",
-                "this_project_only": True,
-            },
-        )
-
-        self.assertEqual([item["id"] for item in workspace_result.items], [same_project.id])
-        self.assertTrue(workspace_result.truncated)
-        self.assertEqual(workspace_result.scope, "workspace")
-        self.assertEqual([item["id"] for item in project_result.items], [same_project.id])
-        self.assertEqual(project_result.scope, "project")
-        self.assertIn(same_project.id, tools.observed_resources)
+        self.assertEqual([item["id"] for item in default_result.items], [same_project.id])
+        self.assertEqual(default_result.scope, "project")
+        self.assertEqual(default_result.total, 1)
+        self.assertEqual(tools.observed_resources[same_project.id].scope_kind, "project")
         self.assertNotIn(other_event.id, tools.observed_resources)
 
-    def test_project_answer_forces_project_scope_and_hides_narrowing_parameter(self) -> None:
-        event = self._event("project-event", "Roadmap", date(2026, 9, 22))
-        tools = BoundReadTools.for_conversation(
-            self.store, self.conversation.id, "project_answer"
+        widened = tools.invoke(
+            "search_calendar",
+            {"start_date": "2026-09-20", "end_date": "2026-09-21", "scope": "workspace", "limit": 1},
         )
+
+        self.assertEqual([item["id"] for item in widened.items], [same_project.id])
+        self.assertTrue(widened.truncated)
+        self.assertEqual(widened.scope, "workspace")
+        self.assertEqual(widened.total, 2)
+        # Widening stays inside the workspace, and only rows actually returned are ledgered.
+        self.assertNotIn(other_event.id, tools.observed_resources)
+
+    def test_a_conversation_without_a_project_is_not_offered_a_scope_to_choose(self) -> None:
+        # Offering a parameter whose only legal value is the default invites a guaranteed
+        # error, so an unassigned conversation simply searches its workspace.
+        conversation = self.store.save_conversation(Conversation(id="inbox", title="Inbox"))
+        source = self.store.save_message(
+            Message(
+                id="inbox-source",
+                conversation_id=conversation.id,
+                role="user",
+                content="Roadmap 2026-09-22",
+            )
+        )
+        event = self._event(
+            "inbox-event",
+            "Roadmap",
+            date(2026, 9, 22),
+            conversation_id=conversation.id,
+            source_message_id=source.id,
+            source_quote=source.content,
+        )
+        tools = BoundReadTools.for_conversation(self.store, conversation.id)
         calendar_schema = next(
             definition["function"]["parameters"]
             for definition in tools.definitions_for_model()
@@ -126,27 +141,25 @@ class BoundReadToolsTests(unittest.TestCase):
             "search_calendar", {"start_date": "2026-09-22", "end_date": "2026-09-22"}
         )
 
-        self.assertNotIn("this_project_only", calendar_schema["properties"])
-        self.assertEqual(result.scope, "project")
+        self.assertNotIn("scope", calendar_schema["properties"])
+        self.assertEqual(result.scope, "workspace")
         self.assertEqual([item["id"] for item in result.items], [event.id])
 
     def test_calendar_can_search_by_keyword_without_inventing_a_date_range(self) -> None:
         matching = self._event("japan-flight", "Japan flight booking", date(2027, 4, 10))
         self._event("design-review", "Design review", date(2026, 9, 22))
-        tools = BoundReadTools.for_conversation(
-            self.store, self.conversation.id, "local_answer"
-        )
+        tools = BoundReadTools.for_conversation(self.store, self.conversation.id)
 
         result = tools.invoke("search_calendar", {"keywords": ["Japan", "flight"]})
 
         self.assertTrue(result.ok)
         self.assertEqual([item["id"] for item in result.items], [matching.id])
-        self.assertEqual(result.scope, "workspace")
+        self.assertEqual(result.scope, "project")
 
     def test_calendar_can_list_all_dates_or_use_open_ended_ranges(self) -> None:
         past = self._event("past", "Past review", date(2026, 9, 1))
         future = self._event("future", "Future review", date(2027, 4, 10))
-        tools = BoundReadTools.for_conversation(self.store, self.conversation.id, "local_answer")
+        tools = BoundReadTools.for_conversation(self.store, self.conversation.id)
 
         for query, expected in (
             ({}, [past.id, future.id]),
@@ -182,9 +195,7 @@ class BoundReadToolsTests(unittest.TestCase):
                 source_quote=self.source.content,
             )
         )
-        tools = BoundReadTools.for_conversation(
-            self.store, self.conversation.id, "project_answer"
-        )
+        tools = BoundReadTools.for_conversation(self.store, self.conversation.id)
 
         records = tools.invoke(
             "search_project_records", {"kinds": ["task"], "keywords": ["latency"]}
@@ -208,7 +219,7 @@ class BoundReadToolsTests(unittest.TestCase):
         )
         self.store.save_project_record(task.model_copy(update={"id": "closed-task", "state": "completed"}))
         self.store.save_project_record(task.model_copy(update={"id": "decision", "kind": "decision"}))
-        tools = BoundReadTools.for_conversation(self.store, self.conversation.id, "project_answer")
+        tools = BoundReadTools.for_conversation(self.store, self.conversation.id)
 
         listed = tools.invoke("search_project_records", {"kinds": ["task"]})
         narrowed = tools.invoke("search_project_records", {"kinds": ["task"], "keywords": ["数据库"]})
@@ -221,7 +232,7 @@ class BoundReadToolsTests(unittest.TestCase):
     def test_chinese_keywords_match_phrases_instead_of_shared_characters(self) -> None:
         flight = self._event("flight", "日本机票预订", date(2026, 9, 20))
         self._event("robot", "机械臂延迟评审会议", date(2026, 9, 21))
-        tools = BoundReadTools.for_conversation(self.store, self.conversation.id, "local_answer")
+        tools = BoundReadTools.for_conversation(self.store, self.conversation.id)
 
         result = tools.invoke("search_calendar", {"keywords": ["日本", "机票"]})
 
@@ -243,7 +254,7 @@ class BoundReadToolsTests(unittest.TestCase):
                 source_message_id=source.id, source_quote=source.content,
             )
         )
-        tools = BoundReadTools.for_conversation(self.store, self.conversation.id, "project_answer")
+        tools = BoundReadTools.for_conversation(self.store, self.conversation.id)
 
         for name in ("search_calendar", "search_project_records", "search_saved_items"):
             with self.subTest(tool=name):
@@ -257,7 +268,7 @@ class BoundReadToolsTests(unittest.TestCase):
     def test_latin_keyword_phrases_are_case_insensitive_and_do_not_match_partial_words(self) -> None:
         exact = self._event("exact", "ROS 2 CAT review", date(2026, 9, 20))
         self._event("unrelated", "ROS 1 category review", date(2026, 9, 21))
-        tools = BoundReadTools.for_conversation(self.store, self.conversation.id, "local_answer")
+        tools = BoundReadTools.for_conversation(self.store, self.conversation.id)
 
         for keywords in (["ros 2"], ["cat"]):
             with self.subTest(keywords=keywords):
@@ -266,7 +277,7 @@ class BoundReadToolsTests(unittest.TestCase):
 
     def test_calendar_pages_reach_all_matches_in_order(self) -> None:
         events = [self._event(f"event-{index:02}", "Review", date(2026, 9, 20)) for index in range(25)]
-        tools = BoundReadTools.for_conversation(self.store, self.conversation.id, "local_answer")
+        tools = BoundReadTools.for_conversation(self.store, self.conversation.id)
         query = {"start_date": "2026-09-20", "end_date": "2026-09-20", "limit": 20}
 
         first = tools.invoke("search_calendar", query)
@@ -294,7 +305,7 @@ class BoundReadToolsTests(unittest.TestCase):
             self._note(f"note-{index}", "Latency measurement", self.conversation.id, self.source.id)
         self.store.save_project_record(record.model_copy(update={"id": "other", "content": "Design review"}))
         self._note("other-note", "Design review", self.conversation.id, self.source.id)
-        tools = BoundReadTools.for_conversation(self.store, self.conversation.id, "project_answer")
+        tools = BoundReadTools.for_conversation(self.store, self.conversation.id)
 
         for name in ("search_project_records", "search_saved_items"):
             with self.subTest(tool=name):
@@ -321,7 +332,7 @@ class BoundReadToolsTests(unittest.TestCase):
                 source_message_id=self.source.id, source_quote=self.source.content,
             )
         )
-        tools = BoundReadTools.for_conversation(self.store, self.conversation.id, "project_answer")
+        tools = BoundReadTools.for_conversation(self.store, self.conversation.id)
 
         result = tools.invoke("search_project_records", {"keywords": ["待办"]})
 
@@ -333,7 +344,7 @@ class BoundReadToolsTests(unittest.TestCase):
     def test_rows_matching_more_keywords_rank_first_and_are_counted(self) -> None:
         both = self._event("both", "Japan flight booking", date(2026, 9, 20))
         one = self._event("one", "Flight log review", date(2026, 9, 21))
-        tools = BoundReadTools.for_conversation(self.store, self.conversation.id, "local_answer")
+        tools = BoundReadTools.for_conversation(self.store, self.conversation.id)
 
         result = tools.invoke("search_calendar", {"keywords": ["Japan", "flight"]})
 
@@ -344,7 +355,7 @@ class BoundReadToolsTests(unittest.TestCase):
     def test_a_search_without_keywords_reports_no_keyword_count(self) -> None:
         first = self._event("first", "Design review", date(2026, 9, 20))
         second = self._event("second", "Budget review", date(2026, 9, 21))
-        tools = BoundReadTools.for_conversation(self.store, self.conversation.id, "local_answer")
+        tools = BoundReadTools.for_conversation(self.store, self.conversation.id)
 
         result = tools.invoke("search_calendar", {})
 
@@ -356,7 +367,7 @@ class BoundReadToolsTests(unittest.TestCase):
         for index in range(5):
             self._event(f"match-{index}", "Latency review", date(2026, 9, 20))
         self._event("other", "Design review", date(2026, 9, 20))
-        tools = BoundReadTools.for_conversation(self.store, self.conversation.id, "local_answer")
+        tools = BoundReadTools.for_conversation(self.store, self.conversation.id)
         query = {"keywords": ["latency"], "limit": 3}
 
         first = tools.invoke("search_calendar", query)
@@ -384,7 +395,7 @@ class BoundReadToolsTests(unittest.TestCase):
         self.store.save_project_record(closed)
         self.store.save_project_record(closed.model_copy(update={"id": "open-decision", "kind": "decision", "state": "active"}))
         open_task = self.store.save_project_record(closed.model_copy(update={"id": "open-task", "state": "active"}))
-        tools = BoundReadTools.for_conversation(self.store, self.conversation.id, "project_answer")
+        tools = BoundReadTools.for_conversation(self.store, self.conversation.id)
 
         dated = tools.invoke("search_calendar", {"keywords": ["待办"], "start_date": "2026-09-09"})
         typed = tools.invoke("search_project_records", {"keywords": ["待办"], "kinds": ["task"]})
@@ -399,11 +410,12 @@ class BoundReadToolsTests(unittest.TestCase):
 
     def test_a_failed_result_reports_no_counts(self) -> None:
         conversation = self.store.save_conversation(Conversation(id="unassigned", title="Unassigned"))
-        tools = BoundReadTools.for_conversation(self.store, conversation.id, "local_answer")
+        tools = BoundReadTools.for_conversation(self.store, conversation.id)
 
-        refused = tools.invoke("search_calendar", {"this_project_only": True})
+        refused = tools.invoke("search_project_records", {})
 
         self.assertFalse(refused.ok)
+        self.assertEqual(refused.error.category, "policy_denied")
         self.assertIsNone(refused.total)
         self.assertIsNone(refused.keyword_matches)
 
@@ -426,7 +438,7 @@ class BoundReadToolsTests(unittest.TestCase):
             )
         )
         original = self.store.transition_project_record(original.id, "superseded")
-        tools = BoundReadTools.for_conversation(self.store, self.conversation.id, "project_answer")
+        tools = BoundReadTools.for_conversation(self.store, self.conversation.id)
 
         result = tools.invoke("search_project_records", {"kinds": ["decision"], "states": ["active", "superseded"]})
         rows = {row["id"]: row for row in result.items}
@@ -438,9 +450,7 @@ class BoundReadToolsTests(unittest.TestCase):
         self.assertEqual({row.id for row in tools.resolve_observed(list(rows))}, {original.id, replacement.id})
 
     def test_invalid_or_credential_bearing_arguments_return_typed_errors(self) -> None:
-        tools = BoundReadTools.for_conversation(
-            self.store, self.conversation.id, "local_answer"
-        )
+        tools = BoundReadTools.for_conversation(self.store, self.conversation.id)
 
         invalid_range = tools.invoke(
             "search_calendar", {"start_date": "2026-12-01", "end_date": "2026-09-01"}
@@ -456,9 +466,7 @@ class BoundReadToolsTests(unittest.TestCase):
         self.assertEqual(tools.observed_resources, {})
 
     def test_calendar_validation_explains_the_rule_without_echoing_values(self) -> None:
-        tools = BoundReadTools.for_conversation(
-            self.store, self.conversation.id, "local_answer"
-        )
+        tools = BoundReadTools.for_conversation(self.store, self.conversation.id)
 
         reversed_range = tools.invoke("search_calendar", {"start_date": "2026-09-02", "end_date": "2026-09-01"})
         malformed = tools.invoke(
@@ -484,9 +492,9 @@ class BoundReadToolsTests(unittest.TestCase):
         other = self._note("other-note", "Latency budget elsewhere", other_conversation.id, other_source.id)
         inbox = self.store.save_conversation(Conversation(id="inbox", title="Inbox"))
 
-        in_project = BoundReadTools.for_conversation(self.store, self.conversation.id, "local_answer")
+        in_project = BoundReadTools.for_conversation(self.store, self.conversation.id)
         project_result = in_project.invoke("search_saved_items", {"keywords": ["latency"]})
-        unassigned = BoundReadTools.for_conversation(self.store, inbox.id, "local_answer")
+        unassigned = BoundReadTools.for_conversation(self.store, inbox.id)
         workspace_result = unassigned.invoke("search_saved_items", {"keywords": ["latency"]})
 
         self.assertEqual(project_result.scope, "project")
@@ -499,7 +507,7 @@ class BoundReadToolsTests(unittest.TestCase):
         event = self._event("fading-event", "Design review", date(2026, 9, 20))
         note = self._note("moving-note", "Design review notes", self.conversation.id, self.source.id)
         kept = self._event("kept-event", "Design review follow-up", date(2026, 9, 21))
-        tools = BoundReadTools.for_conversation(self.store, self.conversation.id, "project_answer")
+        tools = BoundReadTools.for_conversation(self.store, self.conversation.id)
         tools.invoke("search_calendar", {"start_date": "2026-09-20", "end_date": "2026-09-21"})
         tools.invoke("search_saved_items", {"keywords": ["design"]})
 
@@ -533,7 +541,7 @@ class BoundReadToolsTests(unittest.TestCase):
             )
         )
         unchanged = self._event("unchanged-event", "Design review follow-up", date(2026, 9, 21))
-        tools = BoundReadTools.for_conversation(self.store, self.conversation.id, "local_answer")
+        tools = BoundReadTools.for_conversation(self.store, self.conversation.id)
         tools.invoke("search_calendar", {"start_date": "2026-09-20", "end_date": "2026-09-21"})
         tools.invoke("search_saved_items", {})
         tools.invoke("search_project_records", {})
@@ -547,11 +555,19 @@ class BoundReadToolsTests(unittest.TestCase):
                 tools.resolve_observed([changed])
         self.assertEqual([row.id for row in tools.resolve_observed([unchanged.id])], [unchanged.id])
 
-    def test_project_answer_requires_an_assigned_project(self) -> None:
+    def test_an_unassigned_conversation_binds_to_its_workspace_without_a_route(self) -> None:
+        # The agent runs before any intent exists, so the scope comes from the conversation
+        # itself rather than from a route the router chose.
         conversation = self.store.save_conversation(Conversation(id="no-project", title="No project"))
 
-        with self.assertRaisesRegex(ValueError, "assigned project"):
-            BoundReadTools.for_conversation(self.store, conversation.id, "project_answer")
+        tools = BoundReadTools.for_conversation(self.store, conversation.id)
+
+        self.assertIsNone(tools.project)
+        self.assertEqual(
+            {definition["function"]["name"] for definition in tools.definitions_for_model()},
+            {"search_calendar", "search_saved_items"},
+        )
+        self.assertEqual(tools.invoke("search_calendar", {}).scope, "workspace")
 
     def _note(self, item_id: str, content: str, conversation_id: str, source_message_id: str) -> SavedItem:
         source = self.store.get_message(source_message_id)

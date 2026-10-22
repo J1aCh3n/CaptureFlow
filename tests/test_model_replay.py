@@ -20,7 +20,7 @@ from captureflow.models import (
     Project,
     ProjectRecord,
 )
-from captureflow.read_agent import AgentFinalResponse, AgentModelTurn, AgentToolCall
+from captureflow.read_agent import HAND_OFF_TOOL, AgentFinalResponse, AgentModelTurn, AgentToolCall
 from captureflow.storage import CaptureStore
 from scripts.model_replay import RECORDING_VERSION, RecordingModel, ReplayModel
 
@@ -34,8 +34,8 @@ def _scripted():
     """One agent read turn, then one write turn, as the model would answer them."""
 
     return ScriptedContextualModel(
+        # Only the handed-back write reaches the router's decision.
         [
-            {"intent": "local_answer"},
             {
                 "intent": "save_note",
                 "action": {
@@ -43,7 +43,7 @@ def _scripted():
                     "content": "Latency work starts after the review.",
                     "source_message_ids": ["replay-write"],
                 },
-            },
+            }
         ],
         agent_turns=[
             AgentModelTurn(
@@ -59,6 +59,15 @@ def _scripted():
                 final_response=AgentFinalResponse(
                     reply="The design review is on the 18th.", source_ids=["replay-event"]
                 )
+            ),
+            AgentModelTurn(
+                tool_calls=[
+                    AgentToolCall(
+                        id="hand-off",
+                        name=HAND_OFF_TOOL,
+                        arguments={"request": "Save a note about latency work."},
+                    )
+                ]
             ),
         ],
     )
@@ -150,7 +159,7 @@ class ModelReplayTests(unittest.TestCase):
         self.assertEqual(
             [call["method"] for call in recording["calls"]],
             [
-                "propose_conversation_decision",
+                "next_read_agent_turn",
                 "next_read_agent_turn",
                 "next_read_agent_turn",
                 "propose_conversation_decision",
@@ -173,7 +182,7 @@ class ModelReplayTests(unittest.TestCase):
             ReplayModel(json.loads(destination.read_text(encoding="utf-8"))),
         )
 
-        self.assertEqual(turns[0].outcome, "agent_local_answer")
+        self.assertEqual(turns[0].outcome, "agent_answer")
         self.assertEqual(turns[1].operations[0].tool_name, "save_note")
 
     def test_a_run_that_sends_a_different_request_is_refused(self) -> None:
@@ -185,23 +194,15 @@ class ModelReplayTests(unittest.TestCase):
 
         replay = ReplayModel(recording)
         with self.assertRaisesRegex(AssertionError, "different request"):
-            replay.propose_conversation_decision(
-                current_message={"message_id": "x", "content": "not what was recorded"},
-                recent_messages=[],
-                candidate_events=[],
-                candidate_saved_items=[],
-                candidate_project_records=[],
-                reference_date="2026-09-09",
-                timezone="America/Vancouver",
-            )
+            replay.next_read_agent_turn(messages=[{"role": "user", "content": "other"}], tools=[])
 
     def test_a_run_that_calls_a_different_method_is_refused(self) -> None:
         recorder = RecordingModel(_scripted())
         self._run(self._store("recorded"), recorder)
         replay = ReplayModel(recorder.recording(model="scripted"))
 
-        with self.assertRaisesRegex(AssertionError, "is propose_conversation_decision"):
-            replay.next_read_agent_turn(messages=[], tools=[])
+        with self.assertRaisesRegex(AssertionError, "is next_read_agent_turn"):
+            replay.propose_conversation_decision(current_message={}, recent_messages=[])
 
     def test_a_run_longer_than_its_recording_is_refused(self) -> None:
         recorder = RecordingModel(_scripted())

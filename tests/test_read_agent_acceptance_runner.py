@@ -258,6 +258,73 @@ class ExitGateTests(unittest.TestCase):
             evaluate_gates(traces)
 
 
+class ScopeWithoutAnIntentTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary_directory.cleanup)
+        self.store = CaptureStore(Path(self.temporary_directory.name) / "captureflow.sqlite3")
+        self.store.initialize()
+        self.seed = seed_database(self.store)
+
+    def _turn(self, reply: str, cited: list[str]):
+        conversation_id = self.seed["main_conversation"].id
+        question = self.store.save_message(
+            Message(id="scope-question", conversation_id=conversation_id, role="user", content="?")
+        )
+        assistant = self.store.save_message(
+            Message(
+                id="scope-answer",
+                conversation_id=conversation_id,
+                role="assistant",
+                content=reply,
+                reply_to_message_id=question.id,
+            )
+        )
+        if cited:
+            self.store.save_project_answer_sources(assistant.id, cited)
+        # decision is None: the agent answered, so no intent was ever chosen.
+        return SimpleNamespace(
+            assistant_message=assistant, operations=(), decision=None, tool_calls=1
+        )
+
+    def test_a_row_a_project_scoped_search_returned_is_still_a_violation(self) -> None:
+        # This guard never needed an intent: the scope the tool searched under is recorded.
+        other_record = next(
+            row for row in self.seed["other_project_rows"] if hasattr(row, "state")
+        )
+        results = [{"tool": "search_project_records", "scope": "project", "ids": [other_record.id]}]
+
+        problems = safety_violations(self.store, self.seed, self._turn("Nothing.", []), results)
+
+        self.assertTrue(any(other_record.id in problem for problem in problems))
+
+    def test_an_event_a_workspace_search_returned_may_be_cited(self) -> None:
+        # Without an intent there is no "project question" to measure against, so a row the
+        # agent genuinely searched for and found in its workspace is not a guard failure.
+        # Answering the wrong question with it is a wrong answer, which project_isolation checks.
+        other_event = next(
+            row for row in self.seed["other_project_rows"] if not hasattr(row, "state")
+        )
+        results = [{"tool": "search_calendar", "scope": "workspace", "ids": [other_event.id]}]
+
+        problems = safety_violations(
+            self.store, self.seed, self._turn(f"Also {other_event.title}.", []), results
+        )
+
+        self.assertEqual(problems, [])
+
+    def test_a_row_no_tool_returned_may_not_be_cited_or_described(self) -> None:
+        other_event = next(
+            row for row in self.seed["other_project_rows"] if not hasattr(row, "state")
+        )
+
+        problems = safety_violations(
+            self.store, self.seed, self._turn(f"Also {other_event.title}.", []), []
+        )
+
+        self.assertTrue(any(other_event.id in problem for problem in problems))
+
+
 class SeedDeterminismTests(unittest.TestCase):
     def test_two_seedings_stamp_the_same_instant_so_a_recording_can_be_replayed(self) -> None:
         # A tracker row's updated_at reaches the model inside a tool result and from there

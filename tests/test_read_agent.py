@@ -8,6 +8,7 @@ from pydantic import ValidationError
 from captureflow.llm import InvalidStructuredOutput
 from captureflow.models import CalendarEvent, Conversation, Message
 from captureflow.read_agent import (
+    HAND_OFF_TOOL,
     RESPOND_TOOL,
     AgentFinalResponse,
     AgentModelTurn,
@@ -72,9 +73,7 @@ class ReadAgentLoopTests(unittest.TestCase):
                 timezone="America/Vancouver",
             )
         )
-        self.tools = BoundReadTools.for_conversation(
-            self.store, self.conversation.id, "local_answer"
-        )
+        self.tools = BoundReadTools.for_conversation(self.store, self.conversation.id)
 
     def tearDown(self) -> None:
         self.temporary_directory.cleanup()
@@ -355,6 +354,137 @@ class ReadAgentLoopTests(unittest.TestCase):
         self.assertEqual(usage.model_calls, 2)
         self.assertEqual(usage.tool_calls, 1)
         self.assertGreater(usage.model_seconds, 0)
+
+    # Handing a write back to the router
+
+    def test_the_hand_off_tool_is_offered_only_when_the_caller_allows_a_write(self) -> None:
+        for allowed, expected in ((False, False), (True, True)):
+            with self.subTest(hand_off=allowed):
+                model = ScriptedReadAgentModel(
+                    [AgentModelTurn(final_response=AgentFinalResponse(reply="Nothing matched."))]
+                )
+
+                ReadAgentLoop(model).run(
+                    system_prompt="Answer from tool results.",
+                    user_input={"question": "anything?"},
+                    tools=self.tools,
+                    hand_off=allowed,
+                )
+
+                offered = [tool["function"]["name"] for tool in model.requests[0][1]]
+                self.assertEqual(HAND_OFF_TOOL in offered, expected)
+                self.assertIn(RESPOND_TOOL, offered)
+                self.assertIn("search_calendar", offered)
+
+    def test_handing_off_ends_the_turn_without_an_answer_of_its_own(self) -> None:
+        model = ScriptedReadAgentModel(
+            [
+                AgentModelTurn(
+                    tool_calls=[
+                        AgentToolCall(
+                            id="hand-off",
+                            name=HAND_OFF_TOOL,
+                            arguments={"request": "Save a note that latency work starts Monday."},
+                        )
+                    ]
+                )
+            ]
+        )
+
+        run = ReadAgentLoop(model).run(
+            system_prompt="Answer from tool results.",
+            user_input={"question": "Note that latency work starts Monday."},
+            tools=self.tools,
+            hand_off=True,
+        )
+
+        self.assertEqual(run.stop_reason, "handed_off")
+        self.assertIsNone(run.final_response)
+        self.assertEqual(run.hand_off, "Save a note that latency work starts Monday.")
+        self.assertEqual((run.model_calls, run.tool_calls), (1, 0))
+
+    def test_a_hand_off_alongside_a_search_runs_no_search(self) -> None:
+        # The write goes to the router, which reads the message itself, so a search
+        # returned with it would spend budget on a turn that is already over.
+        model = ScriptedReadAgentModel(
+            [
+                AgentModelTurn(
+                    tool_calls=[
+                        AgentToolCall(
+                            id="calendar-call",
+                            name="search_calendar",
+                            arguments={"start_date": "2026-09-18", "end_date": "2026-09-18"},
+                        ),
+                        AgentToolCall(
+                            id="hand-off", name=HAND_OFF_TOOL, arguments={"request": "Move the review."}
+                        ),
+                    ]
+                )
+            ]
+        )
+
+        run = ReadAgentLoop(model).run(
+            system_prompt="Answer from tool results.",
+            user_input={"question": "Move the review to Monday."},
+            tools=self.tools,
+            hand_off=True,
+        )
+
+        self.assertEqual(run.stop_reason, "handed_off")
+        self.assertEqual(run.tool_calls, 0)
+        self.assertEqual(run.hand_off, "Move the review.")
+        self.assertEqual(len(model.requests), 1)
+
+    def test_the_reserved_last_call_can_still_hand_off_instead_of_answering(self) -> None:
+        # Offering only respond at the budget edge would force the model to answer a
+        # message that asked for a write.
+        model = ScriptedReadAgentModel(
+            [
+                AgentModelTurn(
+                    tool_calls=[
+                        AgentToolCall(
+                            id="hand-off", name=HAND_OFF_TOOL, arguments={"request": "Save the note."}
+                        )
+                    ]
+                )
+            ]
+        )
+
+        run = ReadAgentLoop(model, max_model_calls=1).run(
+            system_prompt="Answer from tool results.",
+            user_input={"question": "Save a note."},
+            tools=self.tools,
+            hand_off=True,
+        )
+
+        self.assertEqual(run.stop_reason, "handed_off")
+        self.assertEqual(
+            sorted(tool["function"]["name"] for tool in model.requests[0][1]),
+            sorted([HAND_OFF_TOOL, RESPOND_TOOL]),
+        )
+
+    def test_a_hand_off_the_caller_did_not_allow_is_refused_like_any_other_tool(self) -> None:
+        model = ScriptedReadAgentModel(
+            [
+                AgentModelTurn(
+                    tool_calls=[
+                        AgentToolCall(id="hand-off", name=HAND_OFF_TOOL, arguments={"request": "Save it."})
+                    ]
+                ),
+                AgentModelTurn(final_response=AgentFinalResponse(reply="I cannot write anything here.")),
+            ]
+        )
+
+        run = ReadAgentLoop(model).run(
+            system_prompt="Answer from tool results.",
+            user_input={"question": "Save a note."},
+            tools=self.tools,
+            hand_off=False,
+        )
+
+        self.assertEqual(run.stop_reason, "completed")
+        self.assertIsNone(run.hand_off)
+        self.assertIn("not available", model.requests[1][0][-1]["content"])
 
     def _calendar_call(self) -> AgentModelTurn:
         return AgentModelTurn(

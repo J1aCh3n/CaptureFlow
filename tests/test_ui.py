@@ -406,7 +406,8 @@ class UiTests(unittest.TestCase):
         self.assertTrue(any("Agent review" in markdown.value for markdown in app.markdown))
         self.assertTrue(any("The agent review is scheduled." in markdown.value for markdown in app.markdown))
         self.assertTrue(any("Mode: contextual_router_agent" in caption.value for caption in app.caption))
-        self.assertTrue(any("Model calls: 3" in caption.value for caption in app.caption))
+        # The router no longer classifies first, so the turn is the agent's two calls.
+        self.assertTrue(any("Model calls: 2" in caption.value for caption in app.caption))
         self.assertTrue(any("Agent tools: 1 · Stop: completed" in caption.value for caption in app.caption))
 
     def test_unconfigured_router_persists_a_visible_no_write_reply(self) -> None:

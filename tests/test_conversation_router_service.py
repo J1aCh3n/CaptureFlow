@@ -18,7 +18,7 @@ from captureflow.models import (
     ToolOperation,
 )
 from captureflow.storage import CaptureStore
-from captureflow.read_agent import AgentFinalResponse, AgentModelTurn, AgentToolCall
+from captureflow.read_agent import HAND_OFF_TOOL, AgentFinalResponse, AgentModelTurn, AgentToolCall
 
 
 class ScriptedContextualModel:
@@ -115,6 +115,154 @@ class ConversationRouterServiceTests(unittest.TestCase):
             )
         )
 
+    # The agent in front of the turn
+
+    def test_a_question_is_answered_without_the_router_classifying_it(self) -> None:
+        # The router's one-shot classification is what kept read questions from reaching
+        # the agent, so in this mode it is not consulted at all.
+        event = self._saved_event("front-review", "Design review", date(2026, 9, 18))
+        model = ScriptedContextualModel(
+            [],
+            agent_turns=[
+                AgentModelTurn(
+                    tool_calls=[
+                        AgentToolCall(
+                            id="search",
+                            name="search_calendar",
+                            arguments={"start_date": "2026-09-18", "end_date": "2026-09-18"},
+                        )
+                    ]
+                ),
+                AgentModelTurn(
+                    final_response=AgentFinalResponse(
+                        reply="The design review is on the 18th.", source_ids=[event.id]
+                    )
+                ),
+            ],
+        )
+
+        turn = self.submit(model, "What is scheduled on September 18?", "front-read", answer_mode="agent")
+
+        self.assertEqual(model.calls, [])
+        self.assertIsNone(turn.decision)
+        self.assertEqual(turn.outcome, "agent_answer")
+        self.assertEqual(turn.agent_stop_reason, "completed")
+        self.assertEqual((turn.model_calls, turn.tool_calls), (2, 1))
+        self.assertEqual(turn.operations, ())
+        self.assertIn(event.title, turn.assistant_message.content)
+
+    def test_a_write_request_is_handed_back_to_the_router_unchanged(self) -> None:
+        agent_model = ScriptedContextualModel(
+            [
+                {
+                    "intent": "save_note",
+                    "action": action("save_note", "front-write", content="Latency work starts Monday."),
+                }
+            ],
+            agent_turns=[
+                AgentModelTurn(
+                    tool_calls=[
+                        AgentToolCall(
+                            id="hand-off",
+                            name=HAND_OFF_TOOL,
+                            arguments={"request": "Save a note about latency work."},
+                        )
+                    ]
+                )
+            ],
+        )
+
+        handed = self.submit(
+            agent_model, "Note that latency work starts Monday.", "front-write", answer_mode="agent"
+        )
+
+        self.assertEqual(len(agent_model.calls), 1)
+        self.assertEqual(handed.decision.intent, "save_note")
+        self.assertEqual([operation.tool_name for operation in handed.operations], ["save_note"])
+        # The agent's call is counted with the router's, so spend is not under-reported.
+        self.assertEqual(handed.model_calls, 2)
+        self.assertEqual(handed.agent_stop_reason, "handed_off")
+
+    def test_the_handed_back_write_matches_what_the_workflow_would_have_written(self) -> None:
+        decision = {
+            "intent": "save_note",
+            "action": action("save_note", "same-write", content="Latency work starts Monday."),
+        }
+        workflow = self.submit(
+            ScriptedContextualModel([decision]), "Note that latency work starts Monday.", "same-write"
+        )
+        other = self._fresh_conversation("agent-write-conversation")
+        agent = ConversationRouterService(
+            self.store,
+            ScriptedContextualModel(
+                [{**decision, "action": action("save_note", "same-write-agent", content="Latency work starts Monday.")}],
+                agent_turns=[
+                    AgentModelTurn(
+                        tool_calls=[
+                            AgentToolCall(id="hand-off", name=HAND_OFF_TOOL, arguments={"request": "Save it."})
+                        ]
+                    )
+                ],
+            ),
+            date(2026, 9, 9),
+            answer_mode="agent",
+        ).submit(other.id, "Note that latency work starts Monday.", "same-write-agent")
+
+        self.assertEqual(
+            [operation.tool_name for operation in workflow.operations],
+            [operation.tool_name for operation in agent.operations],
+        )
+        self.assertEqual(workflow.outcome, agent.outcome)
+        self.assertEqual(workflow.assistant_message.content, agent.assistant_message.content)
+
+    def test_a_replayed_question_needs_no_model_call_in_agent_front_mode(self) -> None:
+        event = self._saved_event("replay-review", "Design review", date(2026, 9, 18))
+        turns = [
+            AgentModelTurn(
+                tool_calls=[
+                    AgentToolCall(
+                        id="search",
+                        name="search_calendar",
+                        arguments={"start_date": "2026-09-18", "end_date": "2026-09-18"},
+                    )
+                ]
+            ),
+            AgentModelTurn(
+                final_response=AgentFinalResponse(reply="The review is on the 18th.", source_ids=[event.id])
+            ),
+        ]
+        model = ScriptedContextualModel([], agent_turns=turns)
+        router = ConversationRouterService(self.store, model, date(2026, 9, 9), answer_mode="agent")
+
+        first = router.submit(self.conversation.id, "What is on September 18?", "replay-read")
+        again = router.submit(self.conversation.id, "What is on September 18?", "replay-read")
+
+        self.assertEqual(again.model_calls, 0)
+        self.assertEqual(again.assistant_message.id, first.assistant_message.id)
+        self.assertEqual(len(model.agent_calls), 2)
+
+    def test_a_question_without_a_project_still_reaches_the_agent(self) -> None:
+        # The router used to refuse a project question before any model call; with no intent
+        # there is nothing to refuse, and the project tools simply are not offered.
+        unassigned = self.store.save_conversation(Conversation(id="no-project-chat", title="Inbox"))
+        model = ScriptedContextualModel(
+            [],
+            agent_turns=[
+                AgentModelTurn(
+                    final_response=AgentFinalResponse(reply="No project data is stored for this chat.")
+                )
+            ],
+        )
+
+        turn = self.submit(
+            model, "这个项目有什么待办？", "no-project-read", conversation_id=unassigned.id, answer_mode="agent"
+        )
+
+        self.assertEqual(turn.outcome, "agent_answer")
+        offered = {tool["function"]["name"] for tool in model.agent_calls[0]["tools"]}
+        self.assertNotIn("search_project_records", offered)
+        self.assertIn(HAND_OFF_TOOL, offered)
+
     # Optional Phase A read agent
 
     def test_agent_local_answer_shows_model_reply_with_stored_dates_and_sources(self) -> None:
@@ -157,8 +305,8 @@ class ConversationRouterServiceTests(unittest.TestCase):
         self.assertIn("calendar table", agent_system)
         self.assertEqual(agent_input["reference_time"], "09:30")
         self.assertEqual(agent_input["calendar"], calendar_reference(date(2026, 9, 9)))
-        self.assertEqual(turn.outcome, "agent_local_answer")
-        self.assertEqual(turn.model_calls, 3)
+        self.assertEqual(turn.outcome, "agent_answer")
+        self.assertEqual(turn.model_calls, 2)
         self.assertEqual(turn.tool_calls, 1)
         self.assertEqual(turn.agent_stop_reason, "completed")
         self.assertIn(event.title, turn.assistant_message.content)
@@ -230,7 +378,7 @@ class ConversationRouterServiceTests(unittest.TestCase):
             answer_mode="agent",
         )
 
-        self.assertEqual(turn.outcome, "agent_project_answer")
+        self.assertEqual(turn.outcome, "agent_answer")
         self.assertIn("Latency measurement is still open.", turn.assistant_message.content)
         self.assertIn(task.due_at.isoformat(), turn.assistant_message.content)
         self.assertEqual(
@@ -336,7 +484,7 @@ class ConversationRouterServiceTests(unittest.TestCase):
         turn = self.submit(model, "What is on September 18?", "agent-failure-turn", answer_mode="agent")
 
         self.assertEqual(turn.outcome, "agent_model_failure")
-        self.assertEqual(turn.model_calls, 3)
+        self.assertEqual(turn.model_calls, 2)
         self.assertEqual(turn.tool_calls, 1)
         self.assertEqual(turn.operations, ())
         self.assertIn("timeout", turn.failure_reason)
@@ -370,27 +518,11 @@ class ConversationRouterServiceTests(unittest.TestCase):
             if message.reply_to_message_id == "unsaved-sources-turn"
         ]
         self.assertEqual(turn.outcome, "write_or_dispatch_failure")
-        self.assertEqual(turn.model_calls, 3)
+        self.assertEqual(turn.model_calls, 2)
         self.assertEqual(turn.tool_calls, 1)
         self.assertEqual(replies, [turn.assistant_message])
         self.assertNotIn("Latency is still open.", turn.assistant_message.content)
         self.assertEqual(self.store.list_project_answer_sources(turn.assistant_message.id), [])
-
-    def test_an_agent_project_question_without_a_project_reaches_no_agent(self) -> None:
-        unassigned = self.store.save_conversation(Conversation(id="agent-unassigned", title="Loose"))
-        model = ScriptedContextualModel([{"intent": "project_answer"}])
-
-        turn = self.submit(
-            model,
-            "项目进展如何？",
-            "agent-unassigned-project-question",
-            conversation_id=unassigned.id,
-            answer_mode="agent",
-        )
-
-        self.assertEqual(turn.outcome, "project_answer_unavailable")
-        self.assertEqual(turn.model_calls, 1)
-        self.assertEqual(model.agent_calls, [])
 
     # Calendar creation
 

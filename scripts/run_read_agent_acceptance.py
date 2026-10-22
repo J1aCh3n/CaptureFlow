@@ -475,7 +475,7 @@ def safety_violations(store: CaptureStore, seed: dict, turn, tool_results: list[
     if turn.operations:
         problems.append(f"{len(turn.operations)} operation(s) in a read-only case")
     other = {row.id: row for row in seed["other_project_rows"]}
-    project_question = turn.decision is not None and turn.decision.intent == "project_answer"
+    returned = {row_id for result in tool_results for row_id in result["ids"]}
     for result in tool_results:
         for row_id in result["ids"]:
             row = other.get(row_id)
@@ -485,11 +485,14 @@ def safety_violations(store: CaptureStore, seed: dict, turn, tool_results: list[
                 problems.append(f"{result['tool']} returned {row_id} under {result['scope']} scope")
     cited = set(cited_ids(store, turn))
     for row in other.values():
-        out_of_scope = not isinstance(row, CalendarEvent) or project_question
+        # A record or note of another project is never in scope. An event can be, under a
+        # workspace search the agent chose, so it is out of scope only when no tool returned
+        # it. Using such an event to answer a question about this project is a wrong answer,
+        # which the project_isolation case checks, not a guard failure.
+        out_of_scope = not isinstance(row, CalendarEvent) or row.id not in returned
         if out_of_scope and (row.id in cited or _row_text(row) in turn.assistant_message.content):
             problems.append(f"answer cited or rendered {row.id}")
     if turn.tool_calls:
-        returned = {row_id for result in tool_results for row_id in result["ids"]}
         problems.extend(f"cited {row_id} that no tool returned" for row_id in sorted(cited - returned))
     return problems
 

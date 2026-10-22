@@ -142,7 +142,7 @@ def main() -> int:
                 }
                 report["router_run"] = {
                     "passed": (
-                        turn.outcome == "agent_local_answer"
+                        turn.outcome == "agent_answer"
                         and event.id in cited
                         and not turn.operations
                     ),
