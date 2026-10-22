@@ -258,6 +258,26 @@ class ExitGateTests(unittest.TestCase):
             evaluate_gates(traces)
 
 
+class SeedDeterminismTests(unittest.TestCase):
+    def test_two_seedings_stamp_the_same_instant_so_a_recording_can_be_replayed(self) -> None:
+        # A tracker row's updated_at reaches the model inside a tool result and from there
+        # the agent's next request. A seeding-time clock would therefore change every
+        # recorded request, and a protocol that cannot be replayed is not frozen.
+        with tempfile.TemporaryDirectory() as directory:
+            seeds = []
+            for name in ("first", "second"):
+                store = CaptureStore(Path(directory) / f"{name}.sqlite3")
+                store.initialize()
+                seeds.append(seed_database(store))
+
+        def stamps(seed: dict) -> list:
+            rows = [seed["task"], *(row for row in seed["other_project_rows"] if hasattr(row, "state"))]
+            return [(row.id, row.created_at, row.updated_at) for row in rows]
+
+        self.assertEqual(stamps(seeds[0]), stamps(seeds[1]))
+        self.assertTrue(stamps(seeds[0]), "no tracker rows were checked")
+
+
 class CaseSelectionTests(unittest.TestCase):
     def test_no_selection_runs_every_case(self) -> None:
         self.assertEqual(selected_cases(None), set(ALL_CASES))
