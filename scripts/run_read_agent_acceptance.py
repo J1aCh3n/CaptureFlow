@@ -34,6 +34,19 @@ FIXTURE = ROOT / "tests" / "fixtures" / "read_agent_acceptance.json"
 
 LATENCY_CASES = ("meeting_question", "cross_conversation_local_retrieval", "cross_conversation_project_retrieval")
 RUNS_PER_MODE = 5
+ALL_CASES = (
+    "meeting_question",
+    "cross_conversation_local_retrieval",
+    "cross_conversation_project_retrieval",
+    "range_question",
+    "project_isolation",
+    "no_match",
+    "stored_instruction",
+    "answer_replay",
+)
+# A case that reads an earlier case's submit cannot stand on its own: answer_replay
+# re-submits the meeting question's own message, so a replay without it measures nothing.
+CASE_DEPENDENCIES = {"answer_replay": ("meeting_question",)}
 # The provider refusing access (an exhausted quota, a bad key) rather than the model failing.
 PROVIDER_ACCESS_ERROR = re.compile(r"Error code: (401|403)\b")
 
@@ -45,6 +58,13 @@ def main() -> int:
     run.add_argument("--answer-mode", choices=("workflow", "agent"), required=True)
     run.add_argument("--output-dir", type=Path, required=True)
     run.add_argument("--allow-model-override", action="store_true")
+    run.add_argument(
+        "--cases",
+        nargs="+",
+        choices=ALL_CASES,
+        help="Cases to cover; every case runs when this is omitted. The selection is recorded "
+        "in the trace, and traces covering different cases are refused by summarize.",
+    )
     summarize = commands.add_parser("summarize")
     summarize.add_argument("traces", type=Path, nargs="+")
     args = parser.parse_args()
@@ -55,19 +75,29 @@ def main() -> int:
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return 0 if report["passed"] else 1
 
+    # Validated before the directory exists, so a rejected selection leaves nothing behind.
+    cases = selected_cases(args.cases)
     if args.output_dir.exists():
         raise SystemExit("output directory must not already exist")
     args.output_dir.mkdir(parents=True)
-    trace = run_fixture(args.output_dir / "captureflow.sqlite3", args.answer_mode, args.allow_model_override)
+    trace = run_fixture(
+        args.output_dir / "captureflow.sqlite3", args.answer_mode, args.allow_model_override, cases
+    )
     (args.output_dir / "trace.json").write_text(json.dumps(trace, ensure_ascii=False, indent=2), encoding="utf-8")
     return 0 if trace["passed"] else 1
 
 
-def run_fixture(database_path: Path, answer_mode: str, allow_model_override: bool) -> dict:
+def run_fixture(
+    database_path: Path,
+    answer_mode: str,
+    allow_model_override: bool,
+    cases: set[str] | None = None,
+) -> dict:
     fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
     protocol = fixture["protocol"]
     settings = ModelSettings.from_environment()
     model_overridden = _validate_model_selection(settings.model, protocol["model"], allow_model_override)
+    cases = set(ALL_CASES) if cases is None else cases
     store = CaptureStore(database_path)
     store.initialize()
     seed = seed_database(store)
@@ -92,6 +122,7 @@ def run_fixture(database_path: Path, answer_mode: str, allow_model_override: boo
         "commit": _git_revision(),
         "working_tree_dirty": _working_tree_dirty(),
         "fixture_sha256": hashlib.sha256(FIXTURE.read_bytes()).hexdigest(),
+        "cases": sorted(cases),
         "submits": [],
         "checks": {},
         "violations": [],
@@ -132,45 +163,71 @@ def run_fixture(database_path: Path, answer_mode: str, allow_model_override: boo
     task = seed["task"]
     main_id, later_id = seed["main_conversation"].id, seed["later_conversation"].id
 
-    asked = submit("meeting_question", main_id, "read-agent-meeting")
-    trace["checks"]["meeting_question"] = answered_with(store, asked, [meeting.id], rendered=[meeting])
-    cross_local = submit("cross_conversation_local_retrieval", later_id, "read-agent-cross-local")
-    trace["checks"]["cross_conversation_local_retrieval"] = answered_with(store, cross_local, [meeting.id], rendered=[meeting])
-    cross_project = submit("cross_conversation_project_retrieval", later_id, "read-agent-cross-project")
-    trace["checks"]["cross_conversation_project_retrieval"] = answered_with(store, cross_project, [task.id])
-    week = submit("range_question", main_id, "read-agent-range")
-    trace["checks"]["range_question"] = answered_range(
-        store, week, seed["events"], *(date.fromisoformat(day) for day in protocol["next_week"])
-    )
-    isolated = submit("project_isolation", main_id, "read-agent-isolation")
-    trace["checks"]["project_isolation"] = answered_with(store, isolated, [task.id]) and not cites_or_renders(
-        store, isolated, seed["other_project_rows"]
-    )
-    unknown = submit("no_match", main_id, "read-agent-no-match")
-    trace["checks"]["no_match"] = answered_without_sources(
-        store, unknown, trace["submits"][-1].get("tool_results", [])
-    )
-    notes = submit("stored_instruction", main_id, "read-agent-notes")
-    thanks = submit("stored_instruction_neutral", main_id, "read-agent-thanks")
-    trace["checks"]["stored_instruction"] = (
-        answered_with(store, notes, [seed["note"].id])
-        and thanks is not None
-        and thanks.failure_reason is None
-        and not thanks.operations
-        and all(store.get_calendar_event(event.id).status == "active" for event in seed["events"])
-    )
-    replay = submit("answer_replay", main_id, "read-agent-meeting")
-    trace["checks"]["answer_replay"] = (
-        asked is not None
-        and replay is not None
-        and replay.model_calls == 0
-        and replay.assistant_message.id == asked.assistant_message.id
-    )
+    asked = None
+    if "meeting_question" in cases:
+        asked = submit("meeting_question", main_id, "read-agent-meeting")
+        trace["checks"]["meeting_question"] = answered_with(store, asked, [meeting.id], rendered=[meeting])
+    if "cross_conversation_local_retrieval" in cases:
+        cross_local = submit("cross_conversation_local_retrieval", later_id, "read-agent-cross-local")
+        trace["checks"]["cross_conversation_local_retrieval"] = answered_with(store, cross_local, [meeting.id], rendered=[meeting])
+    if "cross_conversation_project_retrieval" in cases:
+        cross_project = submit("cross_conversation_project_retrieval", later_id, "read-agent-cross-project")
+        trace["checks"]["cross_conversation_project_retrieval"] = answered_with(store, cross_project, [task.id])
+    if "range_question" in cases:
+        week = submit("range_question", main_id, "read-agent-range")
+        trace["checks"]["range_question"] = answered_range(
+            store, week, seed["events"], *(date.fromisoformat(day) for day in protocol["next_week"])
+        )
+    if "project_isolation" in cases:
+        isolated = submit("project_isolation", main_id, "read-agent-isolation")
+        trace["checks"]["project_isolation"] = answered_with(store, isolated, [task.id]) and not cites_or_renders(
+            store, isolated, seed["other_project_rows"]
+        )
+    if "no_match" in cases:
+        unknown = submit("no_match", main_id, "read-agent-no-match")
+        trace["checks"]["no_match"] = answered_without_sources(
+            store, unknown, trace["submits"][-1].get("tool_results", [])
+        )
+    if "stored_instruction" in cases:
+        notes = submit("stored_instruction", main_id, "read-agent-notes")
+        thanks = submit("stored_instruction_neutral", main_id, "read-agent-thanks")
+        trace["checks"]["stored_instruction"] = (
+            answered_with(store, notes, [seed["note"].id])
+            and thanks is not None
+            and thanks.failure_reason is None
+            and not thanks.operations
+            and all(store.get_calendar_event(event.id).status == "active" for event in seed["events"])
+        )
+    if "answer_replay" in cases:
+        replay = submit("answer_replay", main_id, "read-agent-meeting")
+        trace["checks"]["answer_replay"] = (
+            asked is not None
+            and replay is not None
+            and replay.model_calls == 0
+            and replay.assistant_message.id == asked.assistant_message.id
+        )
 
     trace["finished_at"] = datetime.now(timezone.utc).isoformat()
     trace["provider_interrupted"] = provider_interrupted(trace["submits"])
     trace["passed"] = all(trace["checks"].values()) and not trace["violations"] and not trace["provider_interrupted"]
     return trace
+
+
+def selected_cases(names: list[str] | None) -> set[str]:
+    """The cases a run will cover, refusing names that do not exist or cannot stand alone."""
+
+    if names is None:
+        return set(ALL_CASES)
+    unknown = sorted(set(names) - set(ALL_CASES))
+    if unknown:
+        raise ValueError(f"unknown case(s): {unknown}")
+    selected = set(names)
+    for case, required in CASE_DEPENDENCIES.items():
+        if case in selected:
+            missing = sorted(set(required) - selected)
+            if missing:
+                raise ValueError(f"{case} needs {', '.join(missing)} in the same run")
+    return selected
 
 
 def provider_interrupted(submits: list[dict]) -> bool:
@@ -435,6 +492,14 @@ def check_comparable(traces: list[dict]) -> None:
         values = {str(trace.get(key)) for trace in traces}
         if len(values) != 1:
             problems.append(f"{key} differs across traces: {sorted(values)}")
+    # The fixture hash is the same whichever subset ran, so the covered cases are their own
+    # comparability fact: four cases against eight must not summarize as a pass.
+    if any(trace.get("cases") is None for trace in traces):
+        problems.append("a trace does not say which cases it ran")
+    elif len({tuple(sorted(trace["cases"])) for trace in traces}) != 1:
+        problems.append(
+            "cases differ across traces: " + str(sorted({tuple(sorted(trace["cases"])) for trace in traces}))
+        )
     if any(trace.get("commit") is None for trace in traces):
         problems.append("a trace has no commit")
     if any(trace.get("model_overridden") is not False or trace.get("model") != trace.get("protocol_model") for trace in traces):

@@ -11,6 +11,7 @@ from captureflow.models import CalendarEvent, Message, ProjectRecord
 from captureflow.project_answer_service import with_stored_dates
 from captureflow.storage import CaptureStore
 from scripts.run_read_agent_acceptance import (
+    ALL_CASES,
     answered_range,
     answered_with,
     answered_without_sources,
@@ -18,6 +19,7 @@ from scripts.run_read_agent_acceptance import (
     provider_interrupted,
     safety_violations,
     seed_database,
+    selected_cases,
 )
 
 
@@ -148,6 +150,7 @@ def _trace(mode, *, range_passed=True, violations=(), meeting_passed=True, secon
         "working_tree_dirty": False,
         "fixture_sha256": "fixture-hash",
         "provider_interrupted": False,
+        "cases": sorted(checks),
         **header,
         "checks": checks,
         "submits": submits,
@@ -237,6 +240,48 @@ class ExitGateTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "more than once"):
             evaluate_gates(traces)
+
+    def test_runs_that_covered_different_cases_are_refused_rather_than_judged(self) -> None:
+        # The fixture hash is the same whichever subset ran, so without this a summary would
+        # compare a run of four cases against a run of eight and report a pass.
+        traces = self.runs()
+        traces[-1]["cases"] = sorted(set(ALL_CASES) - {"no_match"})
+
+        with self.assertRaisesRegex(ValueError, "cases differ"):
+            evaluate_gates(traces)
+
+    def test_a_trace_that_does_not_say_which_cases_ran_is_refused(self) -> None:
+        traces = self.runs()
+        del traces[-1]["cases"]
+
+        with self.assertRaisesRegex(ValueError, "does not say which cases"):
+            evaluate_gates(traces)
+
+
+class CaseSelectionTests(unittest.TestCase):
+    def test_no_selection_runs_every_case(self) -> None:
+        self.assertEqual(selected_cases(None), set(ALL_CASES))
+
+    def test_a_subset_is_kept_as_given(self) -> None:
+        self.assertEqual(
+            selected_cases(["no_match", "project_isolation"]), {"no_match", "project_isolation"}
+        )
+
+    def test_an_unknown_case_is_refused(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unknown case"):
+            selected_cases(["no_such_case"])
+
+    def test_a_case_that_needs_an_earlier_submit_refuses_to_run_without_it(self) -> None:
+        # answer_replay re-submits the meeting question's own message, so a replay without
+        # the first submit would measure nothing and silently pass.
+        with self.assertRaisesRegex(ValueError, "answer_replay needs meeting_question"):
+            selected_cases(["answer_replay"])
+
+    def test_the_dependency_is_satisfied_when_both_are_selected(self) -> None:
+        self.assertEqual(
+            selected_cases(["answer_replay", "meeting_question"]),
+            {"answer_replay", "meeting_question"},
+        )
 
 
 if __name__ == "__main__":
