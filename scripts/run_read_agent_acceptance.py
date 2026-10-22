@@ -386,6 +386,7 @@ class ToolResultRecorder:
     def __init__(self) -> None:
         self.results: list[dict] = []
         invoke = read_agent_tools.BoundReadTools.invoke
+        self._original = invoke
         recorder = self
 
         def recorded_invoke(tools, name, arguments):
@@ -401,6 +402,11 @@ class ToolResultRecorder:
             return result
 
         read_agent_tools.BoundReadTools.invoke = recorded_invoke
+
+    def restore(self) -> None:
+        """Put the real tool back; a test process outlives one run, unlike the script."""
+
+        read_agent_tools.BoundReadTools.invoke = self._original
 
 
 def cited_ids(store: CaptureStore, turn) -> list[str]:

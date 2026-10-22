@@ -1,0 +1,193 @@
+{
+  "version": 1,
+  "recorded_at": "2026-10-22T22:40:52.873077+00:00",
+  "answer_mode": "agent",
+  "model": "qwen3.8-27b",
+  "protocol_version": 3,
+  "commit": "cc955c494e5dbde5f80ec02472b0aa59c54db5f8",
+  "working_tree_dirty": false,
+  "fixture_sha256": "dd1b917b347da8db2ba191b047aacf44aa0f2dd0fbedcb12b8b30bbcc56eda4a",
+  "cases": [
+    "cross_conversation_project_retrieval",
+    "no_match",
+    "project_isolation",
+    "range_question"
+  ],
+  "calls": [
+    {
+      "method": "propose_conversation_decision",
+      "request_sha256": "9b867fdba077d899103c2d3e33d53c98bb13ede7b3682861ee41a2d0a1998434",
+      "response": {
+        "intent": "project_answer",
+        "action": null,
+        "project_changes": [],
+        "follow_up_question": null,
+        "reply": null,
+        "source_ids": []
+      }
+    },
+    {
+      "method": "next_read_agent_turn",
+      "request_sha256": "74564f0d01cdf53bf3e0e852db63dc2604c91415c679a76ced35c49b1d60afcd",
+      "response": {
+        "tool_calls": [
+          {
+            "id": "call_362e94aae01e4dbbadb938d1",
+            "name": "search_project_records",
+            "arguments": {
+              "kinds": [
+                "task"
+              ],
+              "states": [
+                "active"
+              ],
+              "limit": 20
+            }
+          }
+        ],
+        "final_response": null
+      }
+    },
+    {
+      "method": "next_read_agent_turn",
+      "request_sha256": "dacffa030fd8939ed0655abf3bebe1c7fa4eb2db2862fb99dda73513447ba317",
+      "response": {
+        "tool_calls": [],
+        "final_response": {
+          "reply": "当前项目有 1 个待办任务：\n\n- 排查 ROS 2 发布者-订阅者节点之间的延迟问题（read-agent-latency-task）\n\n未设置截止日期。",
+          "source_ids": [
+            "read-agent-latency-task"
+          ]
+        }
+      }
+    },
+    {
+      "method": "propose_conversation_decision",
+      "request_sha256": "532f49f69f20d7cf22770c02cf31eef66e11e41cc996d71cdb8a2b5991db7ac4",
+      "response": {
+        "intent": "local_answer",
+        "action": null,
+        "project_changes": [],
+        "follow_up_question": null,
+        "reply": null,
+        "source_ids": [
+          "read-agent-other-review",
+          "read-agent-review-meeting",
+          "read-agent-code-freeze",
+          "read-agent-architecture-review",
+          "read-agent-evidence-day",
+          "read-agent-release-demo"
+        ]
+      }
+    },
+    {
+      "method": "next_read_agent_turn",
+      "request_sha256": "95e1d8d346ffd2bdeb9e1a4f6707caf2183882e3a99d6850f83474f4b55f7b45",
+      "response": {
+        "tool_calls": [
+          {
+            "id": "call_d16eaf2de4e1436c8f790b55",
+            "name": "search_calendar",
+            "arguments": {
+              "start_date": "2026-09-14",
+              "end_date": "2026-09-20",
+              "limit": 20
+            }
+          }
+        ],
+        "final_response": null
+      }
+    },
+    {
+      "method": "next_read_agent_turn",
+      "request_sha256": "0de28ca1032371d266ce8d6404e115fe0e33007a4497b36e83b10b7d7020d29b",
+      "response": {
+        "tool_calls": [],
+        "final_response": {
+          "reply": "你下周（2026-09-14 至 2026-09-20）有两项安排：\n\n1. 架构评审 —— 周二上午 10:00–11:00（read-agent-architecture-review）\n2. Phase A 证据复核 —— 周四全天（read-agent-evidence-day）",
+          "source_ids": [
+            "read-agent-architecture-review",
+            "read-agent-evidence-day"
+          ]
+        }
+      }
+    },
+    {
+      "method": "propose_conversation_decision",
+      "request_sha256": "d0e658969d4364d9d17e159765b39f03b207936e7937bf8ff18a74ba2ba37739",
+      "response": {
+        "intent": "project_answer",
+        "action": null,
+        "project_changes": [],
+        "follow_up_question": null,
+        "reply": null,
+        "source_ids": [
+          "read-agent-latency-task",
+          "read-agent-other-review",
+          "read-agent-review-meeting",
+          "read-agent-architecture-review"
+        ]
+      }
+    },
+    {
+      "method": "next_read_agent_turn",
+      "request_sha256": "73c2473b4874aa8d88a305ee8e2121047596ab5b2a95290bbe9f5f8cc160c79e",
+      "response": {
+        "tool_calls": [
+          {
+            "id": "call_e769958ccc844d26a5b690bd",
+            "name": "search_project_records",
+            "arguments": {
+              "keywords": [
+                "延迟",
+                "评审"
+              ],
+              "kinds": [
+                "task"
+              ],
+              "limit": 20
+            }
+          },
+          {
+            "id": "call_51a6b387f7f448b193c28b96",
+            "name": "search_calendar",
+            "arguments": {
+              "keywords": [
+                "延迟",
+                "评审"
+              ],
+              "limit": 20
+            }
+          }
+        ],
+        "final_response": null
+      }
+    },
+    {
+      "method": "next_read_agent_turn",
+      "request_sha256": "ad6e0e7762302febf2f759305eedc804564a2371ada9560e71b6781702c3787d",
+      "response": {
+        "tool_calls": [],
+        "final_response": {
+          "reply": "和“延迟、评审”相关的记录有两条：\n\n1. 待办（task）：排查 ROS 2 发布者-订阅者节点之间的延迟问题（read-agent-latency-task），当前状态为 active，未设置截止日期。\n2. 会议（calendar）：架构评审（read-agent-architecture-review），周二上午 10:00–11:00（America/Vancouver）。",
+          "source_ids": [
+            "read-agent-latency-task",
+            "read-agent-architecture-review"
+          ]
+        }
+      }
+    },
+    {
+      "method": "propose_conversation_decision",
+      "request_sha256": "a08b8f89225bcd727624fae557c373d1a4625ca0aca940a4ebfbdd2fe6c978a1",
+      "response": {
+        "intent": "reply_only",
+        "action": null,
+        "project_changes": [],
+        "follow_up_question": null,
+        "reply": "我这里没有记录你去日本的机票是否已订。",
+        "source_ids": []
+      }
+    }
+  ]
+}
