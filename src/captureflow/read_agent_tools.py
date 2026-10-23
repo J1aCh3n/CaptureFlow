@@ -487,7 +487,11 @@ class BoundReadTools:
             return ReadToolResult(ok=True, scope="project", items=[], total=0, detail=note)
         self._observe([record], "project_record", "project", self.project.id)
         return ReadToolResult(
-            ok=True, scope="project", items=[_project_record_item(record)], total=1, detail=note
+            ok=True,
+            scope="project",
+            items=[_project_record_item(record, recorded_at=False)],
+            total=1,
+            detail=note,
         )
 
     def _already_wrote(self) -> ReadToolResult | None:
@@ -617,8 +621,16 @@ def _calendar_item(event: CalendarEvent) -> dict[str, Any]:
     }
 
 
-def _project_record_item(record: ProjectRecord) -> dict[str, Any]:
-    return {
+def _project_record_item(record: ProjectRecord, *, recorded_at: bool = True) -> dict[str, Any]:
+    """A tracker row as the model sees it.
+
+    A search includes when the row last changed, which is how a decision's history reads.
+    A write's own result does not: the model just made this row, so when the database
+    recorded it tells it nothing, and a timestamp from inside the turn would make the turn
+    impossible to replay offline.
+    """
+
+    item = {
         "id": record.id,
         "type": "project_record",
         "kind": record.kind,
@@ -627,8 +639,10 @@ def _project_record_item(record: ProjectRecord) -> dict[str, Any]:
         "due_at": record.due_at.isoformat() if record.due_at is not None else None,
         "state": record.state,
         "supersedes_record_id": record.supersedes_record_id,
-        "updated_at": record.updated_at.isoformat(),
     }
+    if recorded_at:
+        item["updated_at"] = record.updated_at.isoformat()
+    return item
 
 
 def _saved_item(item: SavedItem) -> dict[str, Any]:

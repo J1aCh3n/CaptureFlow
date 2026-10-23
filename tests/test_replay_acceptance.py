@@ -23,6 +23,7 @@ import tempfile
 import unittest
 from datetime import date
 from pathlib import Path
+from uuid import NAMESPACE_URL, uuid5
 
 from captureflow.conversation_router_service import ConversationRouterService, _stable_id
 from captureflow.storage import CaptureStore
@@ -37,7 +38,7 @@ from scripts.run_read_agent_acceptance import (
 )
 
 
-RECORDING = Path(__file__).parent / "fixtures" / "replay" / "agent_27b_six_cases.json"
+RECORDING = Path(__file__).parent / "fixtures" / "replay" / "agent_27b_eight_cases.json"
 
 # The order run_fixture submits these cases in, with the conversation and message ID each
 # one uses. A different order or ID would send a different request, which replay refuses.
@@ -47,8 +48,21 @@ SEQUENCE = (
     ("project_isolation", "main", "read-agent-isolation"),
     ("no_match", "main", "read-agent-no-match"),
     ("note_write", "main", "read-agent-note-write"),
+    ("idea_write", "main", "read-agent-idea-write"),
+    ("record_write", "main", "read-agent-record-write"),
     ("event_write", "main", "read-agent-event-write"),
 )
+
+
+def _created_record_id(message_id: str) -> str:
+    """The stable ID chain a created record is derived through, spelled out here on purpose.
+
+    A change to either formula breaks this, which is the point: a resumed crash depends on
+    both being derivable from the message ID and the change's position in the turn.
+    """
+
+    operation = str(uuid5(NAMESPACE_URL, f"captureflow:project-change:{message_id}:0:create_record"))
+    return str(uuid5(NAMESPACE_URL, f"captureflow:project-change-record:{operation}"))
 
 EXPECTED = {
     "cross_conversation_project_retrieval": {
@@ -84,7 +98,7 @@ EXPECTED = {
         "outcome": "agent_answer",
         "intent": None,
         "model_calls": 2,
-        "tool_calls": 2,
+        "tool_calls": 3,
         "stop_reason": "completed",
         "operations": 0,
         "cited": [],
@@ -98,6 +112,25 @@ EXPECTED = {
         "stop_reason": "completed",
         "operations": 1,
         "cited": [_stable_id("read-agent-note-write", "contextual-note")],
+    },
+    "idea_write": {
+        "outcome": "save_idea",
+        "intent": None,
+        "model_calls": 2,
+        "tool_calls": 1,
+        "stop_reason": "completed",
+        "operations": 1,
+        "cited": [_stable_id("read-agent-idea-write", "contextual-idea")],
+    },
+    # Created through the router's validated path, so Python attached its deadline.
+    "record_write": {
+        "outcome": "tracker_change",
+        "intent": None,
+        "model_calls": 2,
+        "tool_calls": 1,
+        "stop_reason": "completed",
+        "operations": 1,
+        "cited": [_created_record_id("read-agent-record-write")],
     },
     # A calendar request is still the router's: the agent hands it back and writes nothing
     # itself, which is why it ran no tool at all.

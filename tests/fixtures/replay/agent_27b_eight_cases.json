@@ -1,0 +1,328 @@
+{
+  "version": 1,
+  "recorded_at": "2026-10-23T03:13:30.884056+00:00",
+  "answer_mode": "agent",
+  "model": "qwen3.8-27b",
+  "protocol_version": 5,
+  "commit": "cc09b396df92ddecc075ae52bd309bd4ba9e1826",
+  "working_tree_dirty": false,
+  "fixture_sha256": "beaff5325e41fd2d82eb44af8a4e83deb5742222d29f1b658498f8c63c11c75b",
+  "cases": [
+    "cross_conversation_project_retrieval",
+    "event_write",
+    "idea_write",
+    "no_match",
+    "note_write",
+    "project_isolation",
+    "range_question",
+    "record_write"
+  ],
+  "calls": [
+    {
+      "method": "next_read_agent_turn",
+      "request_sha256": "8591c1765c89fce66626719337c4bba523c532227148677235199e1eb56de923",
+      "response": {
+        "tool_calls": [
+          {
+            "id": "call_581c645fd89543e9b7e6a3e7",
+            "name": "search_project_records",
+            "arguments": {
+              "kinds": [
+                "task",
+                "blocker"
+              ],
+              "states": [
+                "active"
+              ],
+              "limit": 20
+            }
+          }
+        ],
+        "final_response": null
+      }
+    },
+    {
+      "method": "next_read_agent_turn",
+      "request_sha256": "6162b5afd73eba1fceb55032eaab1525401c6e65b09fcf0e5c8a1ebffccce595",
+      "response": {
+        "tool_calls": [],
+        "final_response": {
+          "reply": "当前项目有 1 个待办：\n\n- [read-agent-latency-task] 排查 ROS 2 发布者-订阅者节点之间的延迟问题（进行中，未设截止日期）",
+          "source_ids": [
+            "read-agent-latency-task"
+          ]
+        }
+      }
+    },
+    {
+      "method": "next_read_agent_turn",
+      "request_sha256": "ce51568d33da966fc58c6badbe82150c600f8c1877492315dbb44e9cc1d970e0",
+      "response": {
+        "tool_calls": [
+          {
+            "id": "call_2c3a23f1e17241a4bd7ddd05",
+            "name": "search_calendar",
+            "arguments": {
+              "start_date": "2026-09-14",
+              "end_date": "2026-09-20",
+              "limit": 20
+            }
+          }
+        ],
+        "final_response": null
+      }
+    },
+    {
+      "method": "next_read_agent_turn",
+      "request_sha256": "c0a2d5713c1ffe7a47da4969d71752261f55008d7f2bee44c5fbe9f77b011a42",
+      "response": {
+        "tool_calls": [],
+        "final_response": {
+          "reply": "你下周（2026-09-14 至 2026-09-20）有 2 项安排：\n\n1. 架构评审 — 周二上午 10:00–11:00 [read-agent-architecture-review]\n2. Phase A 证据复核 — 周四全天 [read-agent-evidence-day]",
+          "source_ids": [
+            "read-agent-architecture-review",
+            "read-agent-evidence-day"
+          ]
+        }
+      }
+    },
+    {
+      "method": "next_read_agent_turn",
+      "request_sha256": "a31a2b4eb0b251548ac76b18c82917ec6dbb442300fa81c0336467c50bf05c5f",
+      "response": {
+        "tool_calls": [
+          {
+            "id": "call_1c3180098a5b4e71836c6269",
+            "name": "search_project_records",
+            "arguments": {
+              "keywords": [
+                "延迟",
+                "评审"
+              ],
+              "kinds": [
+                "task"
+              ],
+              "limit": 20
+            }
+          },
+          {
+            "id": "call_726ce3250b914b3ca39e0408",
+            "name": "search_calendar",
+            "arguments": {
+              "keywords": [
+                "延迟",
+                "评审"
+              ],
+              "limit": 20
+            }
+          }
+        ],
+        "final_response": null
+      }
+    },
+    {
+      "method": "next_read_agent_turn",
+      "request_sha256": "64d5525f6510108e483f8c49052f5b03a07579757a443ff8a89d2f3d89491ff7",
+      "response": {
+        "tool_calls": [],
+        "final_response": {
+          "reply": "项目里与延迟、评审相关的记录有 2 条：\n\n待办（任务）：\n1. 排查 ROS 2 发布者-订阅者节点之间的延迟问题 [read-agent-latency-task]\n\n会议：\n1. 架构评审 — 周二上午 10:00–11:00 [read-agent-architecture-review]",
+          "source_ids": [
+            "read-agent-latency-task",
+            "read-agent-architecture-review"
+          ]
+        }
+      }
+    },
+    {
+      "method": "next_read_agent_turn",
+      "request_sha256": "c29c68156db1cc473107a9017e47f04b033c80ec04be79d3014b267bb435d160",
+      "response": {
+        "tool_calls": [
+          {
+            "id": "call_cbb7144e94b14ffd80da90f1",
+            "name": "search_calendar",
+            "arguments": {
+              "keywords": [
+                "日本",
+                "机票",
+                "航班",
+                "Japan"
+              ],
+              "limit": 10
+            }
+          },
+          {
+            "id": "call_28e8263268b54cacb6d4768a",
+            "name": "search_saved_items",
+            "arguments": {
+              "keywords": [
+                "日本",
+                "机票",
+                "航班",
+                "Japan"
+              ],
+              "limit": 10
+            }
+          },
+          {
+            "id": "call_eb1257028be748588f902802",
+            "name": "search_project_records",
+            "arguments": {
+              "keywords": [
+                "日本",
+                "机票",
+                "航班",
+                "Japan"
+              ],
+              "limit": 10
+            }
+          }
+        ],
+        "final_response": null
+      }
+    },
+    {
+      "method": "next_read_agent_turn",
+      "request_sha256": "04734a7e4925e1618d06d2d9380022b8e99554ab62d710378e6016a530a5e2ee",
+      "response": {
+        "tool_calls": [],
+        "final_response": {
+          "reply": "我在项目里的日历、笔记和任务记录中都搜索了“日本 / 机票 / 航班”等关键词，没有找到任何与去日本机票相关的记录。因此无法确认是否已订——存储数据里没有相关信息。如果你已经订票或有相关安排，可以告诉我，我帮你记下来。",
+          "source_ids": []
+        }
+      }
+    },
+    {
+      "method": "next_read_agent_turn",
+      "request_sha256": "79a0ae0239cdd21ac84e0bf6ebb3a1199dfa3958971b176676ab745eb491b4d7",
+      "response": {
+        "tool_calls": [
+          {
+            "id": "call_6c32264319314900bbeac156",
+            "name": "save_note",
+            "arguments": {
+              "content": "延迟排查从下周一开始。"
+            }
+          }
+        ],
+        "final_response": null
+      }
+    },
+    {
+      "method": "next_read_agent_turn",
+      "request_sha256": "85c2dddfefe147345cd1419c96ee7c569f13bc4b7e46387ec4458ca3757038a4",
+      "response": {
+        "tool_calls": [],
+        "final_response": {
+          "reply": "已记下：延迟排查从下周一开始。[63e83efe-7d14-5999-aad8-7ad7e8463215]",
+          "source_ids": [
+            "63e83efe-7d14-5999-aad8-7ad7e8463215"
+          ]
+        }
+      }
+    },
+    {
+      "method": "next_read_agent_turn",
+      "request_sha256": "fae36d49c487b5f551d3095b08dc3fa91b613e48d02b8807111bf8c92a728291",
+      "response": {
+        "tool_calls": [
+          {
+            "id": "call_1b86244efdc044508eb7fc3d",
+            "name": "save_idea",
+            "arguments": {
+              "content": "用流式读取来降低延迟。"
+            }
+          }
+        ],
+        "final_response": null
+      }
+    },
+    {
+      "method": "next_read_agent_turn",
+      "request_sha256": "139f0cfab4ddf250a46bf3fbab3581f098d648391ba8d3f4960bfdcc8a2f4ab4",
+      "response": {
+        "tool_calls": [],
+        "final_response": {
+          "reply": "已记下这个主意：用流式读取来降低延迟。[fc5535da-7017-549e-8e2c-0d2933247091]",
+          "source_ids": [
+            "fc5535da-7017-549e-8e2c-0d2933247091"
+          ]
+        }
+      }
+    },
+    {
+      "method": "next_read_agent_turn",
+      "request_sha256": "7d3185354e8a2a0642926d88b07d8e4d86b587a2da999090b577d45086717d1c",
+      "response": {
+        "tool_calls": [
+          {
+            "id": "call_bc695f8871b347a194d510a8",
+            "name": "create_record",
+            "arguments": {
+              "kind": "task",
+              "content": "排查发布者节点的延迟",
+              "due_date": "2026-09-18"
+            }
+          }
+        ],
+        "final_response": null
+      }
+    },
+    {
+      "method": "next_read_agent_turn",
+      "request_sha256": "6d890a9ec015ca4f8ef7bd1251a3e103e9927c80cf29c9fc72e62a860c97c4c8",
+      "response": {
+        "tool_calls": [],
+        "final_response": {
+          "reply": "已添加任务：排查发布者节点的延迟，截止日期 9 月 18 号（周五）。[f650e66b-60b1-549d-aab1-877c6597ae8e]",
+          "source_ids": [
+            "f650e66b-60b1-549d-aab1-877c6597ae8e"
+          ]
+        }
+      }
+    },
+    {
+      "method": "next_read_agent_turn",
+      "request_sha256": "f91f0d451ef5fe26e011214fc72f34d21971875bd8af33e5e5333edbdd68929e",
+      "response": {
+        "tool_calls": [
+          {
+            "id": "call_51bdb67a9c9443068fd9e286",
+            "name": "hand_off_write",
+            "arguments": {
+              "request": "在日历中添加一个会议：下周三（2026-09-16）下午 3:00–4:00 和导师开会。"
+            }
+          }
+        ],
+        "final_response": null
+      }
+    },
+    {
+      "method": "propose_conversation_decision",
+      "request_sha256": "c4346b23cfd4e3cbcdebe0f1e566942eb33362bf5715b4546b74054c37f2ab5e",
+      "response": {
+        "intent": "calendar_create",
+        "action": {
+          "action": "create_event",
+          "content": "和导师开会",
+          "description": null,
+          "date": "2026-09-16",
+          "start_time": "15:00",
+          "end_time": "16:00",
+          "duration_minutes": null,
+          "timezone": null,
+          "recurring": false,
+          "target_event_id": null,
+          "source_message_ids": [
+            "read-agent-event-write"
+          ]
+        },
+        "project_changes": [],
+        "follow_up_question": null,
+        "reply": "已创建日程：和导师开会，2026-09-16（下周三）15:00–16:00。",
+        "source_ids": []
+      }
+    }
+  ]
+}
