@@ -21,6 +21,14 @@ from .storage import CaptureStore
 
 
 MAX_TOOL_ROWS = 20
+# Each write that names something already stored, and the kind of row it may name.
+_TARGET_TOOLS: dict[str, "ResourceType"] = {
+    "update_event": "calendar_event",
+    "delete_event": "calendar_event",
+    "transition_record": "project_record",
+    "set_deadline": "project_record",
+    "supersede_record": "project_record",
+}
 # The record states search_project_records may return, and so a citation may still be in.
 SEARCHABLE_RECORD_STATES = ("active", "completed", "resolved", "superseded")
 
@@ -147,6 +155,10 @@ class CreateRecordArgs(_ToolArguments):
         return value
 
 
+class _TargetUnavailable(Exception):
+    """A write named a target the ledger will not vouch for."""
+
+
 class WriteNeedsClarification(Exception):
     """A write rule that asks the user instead of refusing, with the question to relay.
 
@@ -208,6 +220,68 @@ class CreateEventArgs(_ToolArguments):
         return value
 
 
+class _TargetArguments(_ToolArguments):
+    """A write that names something already stored, which the ledger has to vouch for."""
+
+    target_id: str = Field(
+        min_length=1,
+        description="The id of the item to change, copied exactly from a search result in "
+        "this same turn. Search for it first: an id from memory or from the conversation is "
+        "refused.",
+    )
+
+
+class UpdateEventArgs(_TargetArguments):
+    date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$", description="The new date, YYYY-MM-DD.")
+    start_time: str | None = Field(
+        default=None, pattern=r"^([01]\d|2[0-3]):[0-5]\d$", description="The new start, 24-hour HH:MM."
+    )
+    end_time: str | None = Field(
+        default=None, pattern=r"^([01]\d|2[0-3]):[0-5]\d$", description="The new end, 24-hour HH:MM."
+    )
+    duration_minutes: int | None = Field(default=None, ge=1, le=720, description="The new length in minutes.")
+    title: str | None = Field(default=None, min_length=1, max_length=4_000, description="A new title.")
+    description: str | None = Field(default=None, max_length=4_000, description="A new description.")
+    timezone: str | None = Field(
+        default=None, min_length=1, max_length=100, description="An IANA zone the message names."
+    )
+    recurring: bool = Field(default=False, description="True when the message makes it repeating.")
+
+
+class DeleteEventArgs(_TargetArguments):
+    """Deletion is prepared and waits for the user; nothing is removed by this call."""
+
+
+class TransitionRecordArgs(_TargetArguments):
+    target_state: Literal["completed", "resolved"] = Field(
+        description="completed for work that is done, resolved for a question or blocker that "
+        "no longer stands."
+    )
+
+
+class SetDeadlineArgs(_TargetArguments):
+    due_date: str = Field(
+        pattern=r"^\d{4}-\d{2}-\d{2}$",
+        description="The deadline, as YYYY-MM-DD. Resolve wording such as 下周五 from "
+        "reference_date and the supplied calendar table.",
+    )
+    due_time: str | None = Field(
+        default=None,
+        pattern=r"^([01]\d|2[0-3]):[0-5]\d$",
+        description="The deadline's clock time, 24-hour HH:MM, only when the message states one.",
+    )
+
+
+class SupersedeRecordArgs(_TargetArguments):
+    kind: Literal["decision", "constraint"] = Field(
+        description="Only a decision or a constraint can be replaced, and by one of its own kind."
+    )
+    content: str = Field(min_length=1, max_length=4_000, description="What replaces it.")
+    rationale: str | None = Field(
+        default=None, max_length=1_000, description="Why it changed, when the message says."
+    )
+
+
 class TurnWriter(Protocol):
     """The router's own write path, which a write tool calls instead of writing itself."""
 
@@ -219,6 +293,10 @@ class TurnWriter(Protocol):
     def create_record(self, **fields: Any) -> tuple[ProjectRecord | None, str]: ...
 
     def create_event(self, **fields: Any) -> tuple[CalendarEvent, str]: ...
+
+    def change_target(
+        self, action: str, target: CalendarEvent | ProjectRecord, **fields: Any
+    ) -> tuple[CalendarEvent | ProjectRecord | None, str]: ...
 
 
 class ReadToolError(BaseModel):
@@ -331,6 +409,28 @@ class BoundReadTools:
                     ),
                     arguments_model=SaveItemArgs,
                 )
+            for name, what, arguments in (
+                (
+                    "update_event",
+                    "Change a calendar event that already exists: its date, time, length, title "
+                    "or description. Give only what the message changes.",
+                    UpdateEventArgs,
+                ),
+                (
+                    "delete_event",
+                    "Ask to delete a calendar event. CaptureFlow prepares the deletion and the "
+                    "user confirms it, so nothing is removed by this call.",
+                    DeleteEventArgs,
+                ),
+            ):
+                definitions[name] = ReadToolDefinition(
+                    name=name,
+                    description=what
+                    + " Search for the event first and copy its id: the id must come from a "
+                    "search in this same turn. One stored change per turn: a second write is "
+                    "refused.",
+                    arguments_model=arguments,
+                )
             definitions["create_event"] = ReadToolDefinition(
                 name="create_event",
                 description=(
@@ -344,6 +444,33 @@ class BoundReadTools:
                 arguments_model=CreateEventArgs,
             )
             if self.project is not None:
+                for name, what, arguments in (
+                    (
+                        "transition_record",
+                        "Finish a tracker record: mark work completed, or a question or blocker "
+                        "resolved.",
+                        TransitionRecordArgs,
+                    ),
+                    (
+                        "set_deadline",
+                        "Add or correct the deadline of a task that already exists.",
+                        SetDeadlineArgs,
+                    ),
+                    (
+                        "supersede_record",
+                        "Replace a decision or a constraint with a new one. CaptureFlow keeps "
+                        "this for review rather than applying it.",
+                        SupersedeRecordArgs,
+                    ),
+                ):
+                    definitions[name] = ReadToolDefinition(
+                        name=name,
+                        description=what
+                        + " Search for the record first and copy its id: the id must come from a "
+                        "search in this same turn. One stored change per turn: a second write is "
+                        "refused.",
+                        arguments_model=arguments,
+                    )
                 definitions["create_record"] = ReadToolDefinition(
                     name="create_record",
                     description=(
@@ -461,6 +588,8 @@ class BoundReadTools:
             return self._create_record(parsed)
         if name == "create_event":
             return self._create_event(parsed)
+        if name in _TARGET_TOOLS:
+            return self._change_target(name, parsed)
         if name == "search_saved_items":
             return self._search_saved_items(parsed)
         raise AssertionError(f"unhandled read tool: {name}")
@@ -593,6 +722,62 @@ class BoundReadTools:
             total=1,
             detail=note,
         )
+
+    def _change_target(self, name: str, arguments: _ToolArguments) -> ReadToolResult:
+        if not isinstance(arguments, _TargetArguments):
+            raise TypeError(f"{name} received unexpected arguments")
+        if _TARGET_TOOLS[name] == "project_record" and self.project is None:
+            return _error("policy_denied", "No project is available in the current scope.")
+        already = self._already_wrote()
+        if already is not None:
+            return already
+        assert self.writer is not None
+        fields = arguments.model_dump()
+        target_id = fields.pop("target_id")
+        try:
+            target = self._ledgered_target(target_id, _TARGET_TOOLS[name])
+            row, note = self.writer.change_target(name, target, **fields)
+        except _TargetUnavailable as refusal:
+            return _error("stale_target", str(refusal))
+        except WriteNeedsClarification as question:
+            return _error("clarification_required", str(question))
+        except ValueError as error:
+            return _error("policy_denied", f"The change was refused: {error}")
+        scope_kind, scope_id = self._write_scope()
+        if row is None:
+            # Prepared and waiting for the user, or held for review: no row to cite yet.
+            return ReadToolResult(ok=True, scope=scope_kind, items=[], total=0, detail=note)
+        resource_type: ResourceType = (
+            "calendar_event" if isinstance(row, CalendarEvent) else "project_record"
+        )
+        self._observe([row], resource_type, scope_kind, scope_id)
+        item = (
+            _calendar_item(row)
+            if isinstance(row, CalendarEvent)
+            else _project_record_item(row, recorded_at=False)
+        )
+        return ReadToolResult(ok=True, scope=scope_kind, items=[item], total=1, detail=note)
+
+    def _ledgered_target(self, target_id: str, expected: ResourceType):
+        """Vouch for a write's target with the ledger, which is what replaces the candidates.
+
+        The router resolved a target from lists it had pre-selected and handed to the model.
+        Here the model has to have searched for it: the id must be one a tool returned in
+        this turn, of the kind the tool changes, still in the scope and state it was returned
+        under, and unchanged since.
+        """
+
+        observed = self.observed_resources.get(target_id)
+        if observed is None:
+            raise _TargetUnavailable(
+                "the target must be an item a search returned in this turn; search for it first"
+            )
+        if observed.resource_type != expected:
+            raise _TargetUnavailable(f"that id is not a {expected.replace('_', ' ')}")
+        try:
+            return self.resolve_observed([target_id])[0]
+        except ValueError as error:
+            raise _TargetUnavailable(str(error)) from error
 
     def _already_wrote(self) -> ReadToolResult | None:
         """One stored change per turn: it is what keeps a prepared operation's stable ID
