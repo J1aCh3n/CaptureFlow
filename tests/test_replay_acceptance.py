@@ -92,8 +92,11 @@ EXPECTED = {
         "operations": 0,
         "cited": ["read-agent-architecture-review", "read-agent-latency-task"],
     },
-    # Two searches, nothing relevant found, and nothing cited for it. One of them widened
-    # to the workspace and returned another project's event, which the reply did not use.
+    # Three searches, nothing about Japan flights found, and the reply says so -- but it
+    # cited the events it had looked at to support "these are all work meetings", so Python
+    # rendered five unrelated dates under the answer. The no_match case requires no
+    # citations and therefore failed in this run. The recording keeps it: what this test
+    # locks is how our code handles the model's answer, not whether the answer was good.
     "no_match": {
         "outcome": "agent_answer",
         "intent": None,
@@ -101,7 +104,13 @@ EXPECTED = {
         "tool_calls": 3,
         "stop_reason": "completed",
         "operations": 0,
-        "cited": [],
+        "cited": [
+            "read-agent-review-meeting",
+            "read-agent-code-freeze",
+            "read-agent-architecture-review",
+            "read-agent-evidence-day",
+            "read-agent-release-demo",
+        ],
     },
     # The agent's own write, cited from the row the tool handed back.
     "note_write": {
