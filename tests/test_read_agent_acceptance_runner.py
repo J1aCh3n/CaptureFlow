@@ -301,6 +301,32 @@ class WriteCaseChecksTests(unittest.TestCase):
             )
         )
 
+    def test_a_write_is_a_guard_failure_only_where_no_change_was_expected(self) -> None:
+        wrote_once = self._turn(["save_note"])
+
+        self.assertEqual(
+            safety_violations(self.store, self.seed, wrote_once, [], writes=True), []
+        )
+        self.assertEqual(
+            [
+                problem
+                for problem in safety_violations(self.store, self.seed, wrote_once, [])
+                if "read-only" in problem
+            ],
+            ["1 operation(s) in a read-only case"],
+        )
+
+    def test_a_write_case_that_stored_more_or_less_than_one_change_is_a_guard_failure(self) -> None:
+        # One turn stores one change: more than one cannot be given distinct stable IDs, and
+        # none means the case reported a write it did not make.
+        for operations, expected in ((["save_note", "save_note"], "2 operation(s)"), ([], "0 operation(s)")):
+            with self.subTest(operations=len(operations)):
+                problems = safety_violations(
+                    self.store, self.seed, self._turn(operations), [], writes=True
+                )
+
+                self.assertTrue(any(expected in problem for problem in problems))
+
     def test_a_handed_back_write_fails_the_note_case_without_crashing(self) -> None:
         # The agent can hand a note request back instead of using its own tool, and the
         # router may then store a tracker record, whose operation has no tool name. A run

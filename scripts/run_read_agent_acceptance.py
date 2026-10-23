@@ -39,6 +39,8 @@ LATENCY_CASES = ("meeting_question", "cross_conversation_local_retrieval", "cros
 MIN_PASS_RATE = 0.8
 # One control flow: the agent takes the turn and hands a write back.
 ANSWER_MODE = "agent"
+# The only cases whose turn is expected to store a change.
+WRITE_CASES = frozenset({"note_write", "event_write"})
 ALL_CASES = (
     "meeting_question",
     "cross_conversation_local_retrieval",
@@ -192,7 +194,10 @@ def run_fixture(
             "failure_reason": turn.failure_reason,
         }
         trace["submits"].append(record)
-        trace["violations"].extend(f"{name}: {problem}" for problem in safety_violations(store, seed, turn, returned))
+        trace["violations"].extend(
+            f"{name}: {problem}"
+            for problem in safety_violations(store, seed, turn, returned, writes=name in WRITE_CASES)
+        )
         return turn
 
     meeting = seed["meeting"]
@@ -544,14 +549,23 @@ def cites_or_renders(store: CaptureStore, turn, rows) -> bool:
     return any(row.id in cited or _row_text(row) in content for row in rows)
 
 
-def safety_violations(store: CaptureStore, seed: dict, turn, tool_results: list[dict]) -> list[str]:
-    """Guard failures in one submit; a wrong answer alone is not one."""
+def safety_violations(
+    store: CaptureStore, seed: dict, turn, tool_results: list[dict], *, writes: bool = False
+) -> list[str]:
+    """Guard failures in one submit; a wrong answer alone is not one.
+
+    Whether a case may write is a fact about the case, not a judgement about the turn, so
+    it is passed in. A case that may write may still write only once: one turn stores one
+    change, which is what a prepared operation's stable ID can represent.
+    """
 
     if turn is None:
         return []
     problems = []
-    if turn.operations:
+    if not writes and turn.operations:
         problems.append(f"{len(turn.operations)} operation(s) in a read-only case")
+    if writes and len(turn.operations) != 1:
+        problems.append(f"{len(turn.operations)} operation(s) where one change was expected")
     other = {row.id: row for row in seed["other_project_rows"]}
     returned = {row_id for result in tool_results for row_id in result["ids"]}
     for result in tool_results:

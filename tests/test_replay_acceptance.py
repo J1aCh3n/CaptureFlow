@@ -24,11 +24,12 @@ import unittest
 from datetime import date
 from pathlib import Path
 
-from captureflow.conversation_router_service import ConversationRouterService
+from captureflow.conversation_router_service import ConversationRouterService, _stable_id
 from captureflow.storage import CaptureStore
 from scripts.model_replay import ReplayModel
 from scripts.run_read_agent_acceptance import (
     FIXTURE,
+    WRITE_CASES,
     ToolResultRecorder,
     cited_ids,
     safety_violations,
@@ -36,7 +37,7 @@ from scripts.run_read_agent_acceptance import (
 )
 
 
-RECORDING = Path(__file__).parent / "fixtures" / "replay" / "agent_27b_four_cases.json"
+RECORDING = Path(__file__).parent / "fixtures" / "replay" / "agent_27b_six_cases.json"
 
 # The order run_fixture submits these cases in, with the conversation and message ID each
 # one uses. A different order or ID would send a different request, which replay refuses.
@@ -45,6 +46,8 @@ SEQUENCE = (
     ("range_question", "main", "read-agent-range"),
     ("project_isolation", "main", "read-agent-isolation"),
     ("no_match", "main", "read-agent-no-match"),
+    ("note_write", "main", "read-agent-note-write"),
+    ("event_write", "main", "read-agent-event-write"),
 )
 
 EXPECTED = {
@@ -75,14 +78,36 @@ EXPECTED = {
         "operations": 0,
         "cited": ["read-agent-architecture-review", "read-agent-latency-task"],
     },
-    # Three searches, nothing relevant found, and nothing cited for it.
+    # Two searches, nothing relevant found, and nothing cited for it. One of them widened
+    # to the workspace and returned another project's event, which the reply did not use.
     "no_match": {
         "outcome": "agent_answer",
         "intent": None,
         "model_calls": 2,
-        "tool_calls": 3,
+        "tool_calls": 2,
         "stop_reason": "completed",
         "operations": 0,
+        "cited": [],
+    },
+    # The agent's own write, cited from the row the tool handed back.
+    "note_write": {
+        "outcome": "save_note",
+        "intent": None,
+        "model_calls": 2,
+        "tool_calls": 1,
+        "stop_reason": "completed",
+        "operations": 1,
+        "cited": [_stable_id("read-agent-note-write", "contextual-note")],
+    },
+    # A calendar request is still the router's: the agent hands it back and writes nothing
+    # itself, which is why it ran no tool at all.
+    "event_write": {
+        "outcome": "calendar_create",
+        "intent": "calendar_create",
+        "model_calls": 2,
+        "tool_calls": 0,
+        "stop_reason": "handed_off",
+        "operations": 1,
         "cited": [],
     },
 }
@@ -132,7 +157,9 @@ class ReplayedAcceptanceTests(unittest.TestCase):
                 seen = len(tools.results)
                 turn = router.submit(conversations[conversation], inputs[name], message_id)
                 returned = tools.results[seen:]
-                violations.extend(safety_violations(store, seed, turn, returned))
+                violations.extend(
+                    safety_violations(store, seed, turn, returned, writes=name in WRITE_CASES)
+                )
                 self.assertIsNone(turn.failure_reason)
                 self.assertEqual(
                     {
@@ -181,6 +208,17 @@ class ReplayedAcceptanceTests(unittest.TestCase):
         for event in seed["events"]:
             if event.id in EXPECTED["range_question"]["cited"]:
                 self.assertIn(event.start_at.isoformat(), replies["range_question"])
+        self.assertIn("延迟排查", replies["note_write"])
+        notes = [
+            item
+            for item in store.list_saved_items(workspace_id="default", kinds=("note",))
+            if item.id == _stable_id("read-agent-note-write", "contextual-note")
+        ]
+        self.assertEqual(len(notes), 1)
+        self.assertEqual(notes[0].source_quote, inputs["note_write"])
+        events = [event for event in store.list_calendar_events() if event.id not in {e.id for e in seed["events"]}]
+        self.assertEqual([event.start_date.isoformat() for event in events], ["2026-09-16"])
+
         # Nothing from the look-alike project reaches any reply.
         for row in seed["other_project_rows"]:
             text = row.title if hasattr(row, "title") else row.content
