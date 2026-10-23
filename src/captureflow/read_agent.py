@@ -85,9 +85,10 @@ _HAND_OFF_DEFINITION = {
     "function": {
         "name": HAND_OFF_TOOL,
         "description": (
-            "Call this when the message asks to create, change or delete something stored: a "
-            "calendar event, a note, an idea, or a tracker record. CaptureFlow carries out the "
-            "change itself after this call, so call it alone and do not search first."
+            "Call this when the message asks to create, change or delete a calendar event, an "
+            "idea, or a tracker record such as a task, decision or blocker. CaptureFlow carries "
+            "out the change itself after this call, so call it alone and do not search first. A "
+            "note is not one of these: save_note stores it, when that tool is offered."
         ),
         "parameters": HandOffRequest.model_json_schema(),
     },

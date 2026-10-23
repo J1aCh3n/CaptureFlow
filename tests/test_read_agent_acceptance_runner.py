@@ -301,6 +301,38 @@ class WriteCaseChecksTests(unittest.TestCase):
             )
         )
 
+    def test_a_handed_back_write_fails_the_note_case_without_crashing(self) -> None:
+        # The agent can hand a note request back instead of using its own tool, and the
+        # router may then store a tracker record, whose operation has no tool name. A run
+        # is paid for turn by turn, so this must read as a wrong answer, not an exception.
+        record = SimpleNamespace(record_id="r", action="create_record")
+
+        verdict = stored_a_note(
+            self.store, self._turn_with_operations([record]), self.seed, "延迟排查"
+        )
+
+        self.assertFalse(verdict)
+
+    def _turn_with_operations(self, operations):
+        assistant = self.store.save_message(
+            Message(
+                id="handed-back-answer",
+                conversation_id=self.question.conversation_id,
+                role="assistant",
+                content="Done.",
+                reply_to_message_id=self.question.id,
+            )
+        )
+        return SimpleNamespace(
+            user_message=self.question,
+            assistant_message=assistant,
+            operations=tuple(operations),
+            agent_stop_reason="handed_off",
+            failure_reason=None,
+            decision=None,
+            tool_calls=0,
+        )
+
     def test_a_stored_note_must_quote_the_message_it_came_from(self) -> None:
         self._note("延迟排查从下周一开始。")
 

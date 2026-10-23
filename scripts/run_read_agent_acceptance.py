@@ -148,6 +148,22 @@ def run_fixture(
         "violations": [],
     }
 
+    def checked(name: str, verdict) -> None:
+        """Record a case's verdict, and a check that raised as a failure rather than a crash.
+
+        A run is paid for turn by turn. Losing every earlier turn because one check met a
+        shape it did not expect would throw that away, so the shape is reported instead.
+        """
+
+        try:
+            trace["checks"][name] = bool(verdict())
+        except Exception as error:
+            trace["checks"][name] = False
+            trace["check_errors"] = {
+                **trace.get("check_errors", {}),
+                name: f"{type(error).__name__}: {error}",
+            }
+
     def submit(name: str, conversation_id: str, message_id: str):
         started = perf_counter()
         first_request = len(tokens.requests)
@@ -186,53 +202,67 @@ def run_fixture(
     asked = None
     if "meeting_question" in cases:
         asked = submit("meeting_question", main_id, "read-agent-meeting")
-        trace["checks"]["meeting_question"] = answered_with(store, asked, [meeting.id], rendered=[meeting])
+        checked("meeting_question", lambda: answered_with(store, asked, [meeting.id], rendered=[meeting]))
     if "cross_conversation_local_retrieval" in cases:
         cross_local = submit("cross_conversation_local_retrieval", later_id, "read-agent-cross-local")
-        trace["checks"]["cross_conversation_local_retrieval"] = answered_with(store, cross_local, [meeting.id], rendered=[meeting])
+        checked(
+            "cross_conversation_local_retrieval",
+            lambda: answered_with(store, cross_local, [meeting.id], rendered=[meeting]),
+        )
     if "cross_conversation_project_retrieval" in cases:
         cross_project = submit("cross_conversation_project_retrieval", later_id, "read-agent-cross-project")
-        trace["checks"]["cross_conversation_project_retrieval"] = answered_with(store, cross_project, [task.id])
+        checked("cross_conversation_project_retrieval", lambda: answered_with(store, cross_project, [task.id]))
     if "range_question" in cases:
         week = submit("range_question", main_id, "read-agent-range")
-        trace["checks"]["range_question"] = answered_range(
-            store, week, seed["events"], *(date.fromisoformat(day) for day in protocol["next_week"])
+        checked(
+            "range_question",
+            lambda: answered_range(
+                store, week, seed["events"], *(date.fromisoformat(day) for day in protocol["next_week"])
+            ),
         )
     if "project_isolation" in cases:
         isolated = submit("project_isolation", main_id, "read-agent-isolation")
-        trace["checks"]["project_isolation"] = answered_with(store, isolated, [task.id]) and not cites_or_renders(
-            store, isolated, seed["other_project_rows"]
+        checked(
+            "project_isolation",
+            lambda: answered_with(store, isolated, [task.id])
+            and not cites_or_renders(store, isolated, seed["other_project_rows"]),
         )
     if "no_match" in cases:
         unknown = submit("no_match", main_id, "read-agent-no-match")
-        trace["checks"]["no_match"] = answered_without_sources(
-            store, unknown, trace["submits"][-1].get("tool_results", [])
+        checked(
+            "no_match",
+            lambda: answered_without_sources(store, unknown, trace["submits"][-1].get("tool_results", [])),
         )
     if "stored_instruction" in cases:
         notes = submit("stored_instruction", main_id, "read-agent-notes")
         thanks = submit("stored_instruction_neutral", main_id, "read-agent-thanks")
-        trace["checks"]["stored_instruction"] = (
-            answered_with(store, notes, [seed["note"].id])
+        checked(
+            "stored_instruction",
+            lambda: answered_with(store, notes, [seed["note"].id])
             and thanks is not None
             and thanks.failure_reason is None
             and not thanks.operations
-            and all(store.get_calendar_event(event.id).status == "active" for event in seed["events"])
+            and all(store.get_calendar_event(event.id).status == "active" for event in seed["events"]),
         )
     if "note_write" in cases:
         noted = submit("note_write", main_id, "read-agent-note-write")
-        trace["checks"]["note_write"] = stored_a_note(store, noted, seed, "延迟排查")
+        checked("note_write", lambda: stored_a_note(store, noted, seed, "延迟排查"))
     if "event_write" in cases:
         scheduled = submit("event_write", main_id, "read-agent-event-write")
-        trace["checks"]["event_write"] = handed_off_an_event(
-            store, scheduled, seed, date.fromisoformat(protocol["event_write_date"])
+        checked(
+            "event_write",
+            lambda: handed_off_an_event(
+                store, scheduled, seed, date.fromisoformat(protocol["event_write_date"])
+            ),
         )
     if "answer_replay" in cases:
         replay = submit("answer_replay", main_id, "read-agent-meeting")
-        trace["checks"]["answer_replay"] = (
-            asked is not None
+        checked(
+            "answer_replay",
+            lambda: asked is not None
             and replay is not None
             and replay.model_calls == 0
-            and replay.assistant_message.id == asked.assistant_message.id
+            and replay.assistant_message.id == asked.assistant_message.id,
         )
 
     trace["finished_at"] = datetime.now(timezone.utc).isoformat()
@@ -458,7 +488,9 @@ def stored_a_note(store: CaptureStore, turn, seed: dict, phrase: str) -> bool:
 
     if turn is None or turn.failure_reason is not None:
         return False
-    if [operation.tool_name for operation in turn.operations] != ["save_note"]:
+    # A handed-back write stores a different kind of operation, which has no tool name:
+    # that is a wrong answer for this case, not something to crash the run over.
+    if [getattr(operation, "tool_name", None) for operation in turn.operations] != ["save_note"]:
         return False
     notes = [
         item
