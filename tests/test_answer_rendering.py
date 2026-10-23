@@ -90,6 +90,43 @@ class StoredDateRenderingTests(unittest.TestCase):
         self.assertIn(f"- Calendar {start.isoformat()} to {end.isoformat()}: Architecture review", rendered)
         self.assertTrue(rendered.startswith("Two things."))
 
+    def test_a_block_the_model_copied_is_replaced_by_the_stored_one(self) -> None:
+        # The model sees earlier replies in the conversation and has copied this block from
+        # one. Python owns the rendering, so a copy of it does not get through: the dates a
+        # user reads come from SQLite, not from the model.
+        copied = (
+            "已创建日程：和导师开会。\n"
+            "\n"
+            "Stored dates:\n"
+            "- Calendar 2026-09-16T15:00:00-07:00: 和导师开会"
+        )
+        start = datetime(2026, 9, 16, 15, 0, tzinfo=timezone.utc)
+
+        rendered = with_stored_dates(copied, (), (_event("e", "和导师开会", start),))
+
+        self.assertEqual(rendered.count("Stored dates:"), 1)
+        self.assertIn(f"- Calendar {start.isoformat()}: 和导师开会", rendered)
+        self.assertNotIn("2026-09-16T15:00:00-07:00", rendered)
+
+    def test_a_copied_block_goes_even_when_nothing_is_cited(self) -> None:
+        copied = "没找到。\n\nStored dates:\n- Calendar 2026-09-16: 编造的事件"
+
+        self.assertEqual(with_stored_dates(copied, (), ()), "没找到。")
+
+    def test_prose_around_a_copied_block_survives(self) -> None:
+        copied = "两件事。\n\nStored dates:\n- Calendar 2026-09-16: 会议\n\n还需要确认地点。"
+
+        rendered = with_stored_dates(copied, (), ())
+
+        self.assertIn("两件事。", rendered)
+        self.assertIn("还需要确认地点。", rendered)
+        self.assertNotIn("Stored dates:", rendered)
+
+    def test_the_words_in_ordinary_prose_are_left_alone(self) -> None:
+        reply = "我核对了 stored dates 之后再答复你。"
+
+        self.assertEqual(with_stored_dates(reply, (), ()), reply)
+
     def test_an_all_day_event_renders_without_an_end(self) -> None:
         rendered = with_stored_dates("One day.", (), (_event("e", "Evidence day", date(2026, 9, 17)),))
 
