@@ -6,7 +6,7 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from captureflow.llm import InvalidStructuredOutput
-from captureflow.models import CalendarEvent, Conversation, Message
+from captureflow.models import CalendarEvent, Conversation, Message, SavedItem
 from captureflow.read_agent import (
     HAND_OFF_TOOL,
     RESPOND_TOOL,
@@ -50,6 +50,28 @@ class AgentFinalResponseTests(unittest.TestCase):
         for reply in ("", "   "):
             with self.subTest(reply=reply), self.assertRaises(ValidationError):
                 AgentFinalResponse(reply=reply)
+
+
+class _StubWriter:
+    """Stands in for the router's write path without touching storage."""
+
+    def __init__(self) -> None:
+        self.saved: list[str] = []
+
+    @property
+    def wrote(self) -> bool:
+        return bool(self.saved)
+
+    def save_item(self, kind: str, content: str) -> SavedItem:
+        self.saved.append(content)
+        return SavedItem(
+            id=f"stub-{kind}-{len(self.saved)}",
+            conversation_id="agent-chat",
+            kind=kind,
+            content=content,
+            source_message_id="source",
+            source_quote="Review Friday.",
+        )
 
 
 class ReadAgentLoopTests(unittest.TestCase):
@@ -485,6 +507,66 @@ class ReadAgentLoopTests(unittest.TestCase):
         self.assertEqual(run.stop_reason, "completed")
         self.assertIsNone(run.hand_off)
         self.assertIn("not available", model.requests[1][0][-1]["content"])
+
+    def test_a_write_leaves_the_turn_running_so_the_model_can_report_it(self) -> None:
+        writer = _StubWriter()
+        tools = BoundReadTools.for_conversation(self.store, self.conversation.id, writer=writer)
+        model = ScriptedReadAgentModel(
+            [
+                AgentModelTurn(
+                    tool_calls=[
+                        AgentToolCall(id="save", name="save_note", arguments={"content": "Latency work."})
+                    ]
+                ),
+                AgentModelTurn(final_response=AgentFinalResponse(reply="Saved the note.")),
+            ]
+        )
+
+        run = ReadAgentLoop(model).run(
+            system_prompt="Answer from tool results.",
+            user_input={"message": "Note that latency work starts Monday."},
+            tools=tools,
+            hand_off=True,
+        )
+
+        self.assertEqual(run.stop_reason, "completed")
+        self.assertEqual((run.model_calls, run.tool_calls), (2, 1))
+        self.assertEqual(writer.saved, ["Latency work."])
+
+    def test_a_hand_off_after_a_write_is_neither_offered_nor_honoured(self) -> None:
+        # Honouring it would put a second stored change in one turn, which the stable IDs
+        # of a prepared operation cannot represent.
+        writer = _StubWriter()
+        tools = BoundReadTools.for_conversation(self.store, self.conversation.id, writer=writer)
+        model = ScriptedReadAgentModel(
+            [
+                AgentModelTurn(
+                    tool_calls=[
+                        AgentToolCall(id="save", name="save_note", arguments={"content": "Latency work."})
+                    ]
+                ),
+                AgentModelTurn(
+                    tool_calls=[
+                        AgentToolCall(id="hand", name=HAND_OFF_TOOL, arguments={"request": "Also move the review."})
+                    ]
+                ),
+                AgentModelTurn(
+                    final_response=AgentFinalResponse(reply="Saved the note; I cannot also move the review.")
+                ),
+            ]
+        )
+
+        run = ReadAgentLoop(model).run(
+            system_prompt="Answer from tool results.",
+            user_input={"message": "Note that latency work starts Monday."},
+            tools=tools,
+            hand_off=True,
+        )
+
+        self.assertNotEqual(run.stop_reason, "handed_off")
+        self.assertIsNone(run.hand_off)
+        self.assertNotIn(HAND_OFF_TOOL, [tool["function"]["name"] for tool in model.requests[1][1]])
+        self.assertEqual(writer.saved, ["Latency work."])
 
     def _calendar_call(self) -> AgentModelTurn:
         return AgentModelTurn(

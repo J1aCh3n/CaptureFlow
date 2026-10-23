@@ -263,9 +263,12 @@ class ReadAgentLoop:
         )
         messages = state["messages"]
         # A write can still be handed back on the reserved call: offering only respond would
-        # force an answer to a message that asked for a change.
+        # force an answer to a message that asked for a change. Once this turn has stored a
+        # change, handing another one back would make two, which the stable IDs of a prepared
+        # operation cannot represent.
+        hand_off_open = bool(state.get("hand_off_allowed")) and not state["tools"].wrote_this_turn
         closing = [_RESPOND_DEFINITION]
-        if state.get("hand_off_allowed"):
+        if hand_off_open:
             closing.append(_HAND_OFF_DEFINITION)
         definitions = [*state["tools"].definitions_for_model(), *closing]
         if finishing:
@@ -304,7 +307,7 @@ class ReadAgentLoop:
         handed_off = next(
             (call for call in turn.tool_calls if call.name == HAND_OFF_TOOL), None
         )
-        if handed_off is not None and state.get("hand_off_allowed"):
+        if handed_off is not None and hand_off_open:
             try:
                 update["hand_off"] = HandOffRequest.model_validate(handed_off.arguments).request
             except ValidationError:

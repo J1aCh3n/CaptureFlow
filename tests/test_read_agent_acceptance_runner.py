@@ -7,11 +7,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from captureflow.local_context_service import answer_source_references
-from captureflow.models import CalendarEvent, Message, ProjectRecord
+from captureflow.models import CalendarEvent, Message, ProjectRecord, SavedItem
 from captureflow.project_answer_service import with_stored_dates
 from captureflow.storage import CaptureStore
 from scripts.run_read_agent_acceptance import (
     ALL_CASES,
+    handed_off_an_event,
     answered_range,
     answered_with,
     answered_without_sources,
@@ -20,6 +21,7 @@ from scripts.run_read_agent_acceptance import (
     safety_violations,
     seed_database,
     selected_cases,
+    stored_a_note,
 )
 
 
@@ -256,6 +258,121 @@ class ExitGateTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "does not say which cases"):
             evaluate_gates(traces)
+
+
+class WriteCaseChecksTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary_directory.cleanup)
+        self.store = CaptureStore(Path(self.temporary_directory.name) / "captureflow.sqlite3")
+        self.store.initialize()
+        self.seed = seed_database(self.store)
+        self.question = self.store.save_message(
+            Message(
+                id="write-case-question",
+                conversation_id=self.seed["main_conversation"].id,
+                role="user",
+                content="记一下：延迟排查从下周一开始。",
+            )
+        )
+
+    def _turn(self, operations, stop_reason="completed"):
+        assistant = self.store.save_message(
+            Message(
+                id=f"write-case-answer-{len(operations)}-{stop_reason}",
+                conversation_id=self.question.conversation_id,
+                role="assistant",
+                content="Done.",
+                reply_to_message_id=self.question.id,
+            )
+        )
+        return SimpleNamespace(
+            user_message=self.question,
+            assistant_message=assistant,
+            operations=tuple(SimpleNamespace(tool_name=name) for name in operations),
+            agent_stop_reason=stop_reason,
+            failure_reason=None,
+            decision=None,
+            tool_calls=1,
+        )
+
+    def _note(self, content: str, source: Message | None = None) -> None:
+        source = source or self.question
+        self.store.save_saved_item(
+            SavedItem(
+                id="written-note",
+                conversation_id=source.conversation_id,
+                kind="note",
+                content=content,
+                source_message_id=source.id,
+                source_quote=source.content,
+            )
+        )
+
+    def test_a_stored_note_must_quote_the_message_it_came_from(self) -> None:
+        self._note("延迟排查从下周一开始。")
+
+        self.assertTrue(stored_a_note(self.store, self._turn(["save_note"]), self.seed, "延迟排查"))
+
+    def test_a_turn_that_wrote_nothing_does_not_pass_the_note_case(self) -> None:
+        # The case must not pass just because the fixture already holds a note.
+        self.assertFalse(stored_a_note(self.store, self._turn([]), self.seed, "延迟排查"))
+
+    def test_a_note_about_something_else_does_not_pass(self) -> None:
+        self._note("完全不相关的内容。")
+
+        self.assertFalse(stored_a_note(self.store, self._turn(["save_note"]), self.seed, "延迟排查"))
+
+    def test_a_note_not_quoting_the_turns_message_does_not_pass(self) -> None:
+        other = self.store.save_message(
+            Message(
+                id="write-case-other",
+                conversation_id=self.question.conversation_id,
+                role="user",
+                content="别的消息。",
+            )
+        )
+        self._note("延迟排查从下周一开始。", source=other)
+
+        self.assertFalse(stored_a_note(self.store, self._turn(["save_note"]), self.seed, "延迟排查"))
+
+    def test_an_event_must_be_created_by_a_hand_off_and_not_by_the_agent(self) -> None:
+        self._event_on(date(2026, 9, 16))
+
+        self.assertTrue(
+            handed_off_an_event(
+                self.store, self._turn(["create_local_event"], "handed_off"), self.seed, date(2026, 9, 16)
+            )
+        )
+        # A turn the agent finished itself is not a hand-off, whatever it stored.
+        self.assertFalse(
+            handed_off_an_event(
+                self.store, self._turn(["create_local_event"], "completed"), self.seed, date(2026, 9, 16)
+            )
+        )
+
+    def test_an_event_on_the_wrong_day_does_not_pass(self) -> None:
+        self._event_on(date(2026, 9, 17))
+
+        self.assertFalse(
+            handed_off_an_event(
+                self.store, self._turn(["create_local_event"], "handed_off"), self.seed, date(2026, 9, 16)
+            )
+        )
+
+    def _event_on(self, day: date) -> None:
+        self.store.save_calendar_event(
+            CalendarEvent(
+                id="written-event",
+                conversation_id=self.question.conversation_id,
+                title="导师会议",
+                source_message_id=self.question.id,
+                source_quote=self.question.content,
+                start_at=day,
+                all_day=True,
+                timezone="America/Vancouver",
+            )
+        )
 
 
 class ScopeWithoutAnIntentTests(unittest.TestCase):

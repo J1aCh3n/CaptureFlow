@@ -8,6 +8,35 @@ from captureflow.read_agent_tools import BoundReadTools
 from captureflow.storage import CaptureStore
 
 
+class _RecordingWriter:
+    """Stands in for the router's write path: stores the row and remembers what it wrote."""
+
+    def __init__(self, store: CaptureStore, conversation_id: str, source_message_id: str) -> None:
+        self.store = store
+        self.conversation_id = conversation_id
+        self.source_message_id = source_message_id
+        self.saved: list[str] = []
+
+    @property
+    def wrote(self) -> bool:
+        return bool(self.saved)
+
+    def save_item(self, kind: str, content: str) -> SavedItem:
+        source = self.store.get_message(self.source_message_id)
+        item = self.store.save_saved_item(
+            SavedItem(
+                id=f"written-{len(self.saved)}",
+                conversation_id=self.conversation_id,
+                kind=kind,
+                content=content,
+                source_message_id=source.id,
+                source_quote=source.content,
+            )
+        )
+        self.saved.append(content)
+        return item
+
+
 class BoundReadToolsTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory()
@@ -418,6 +447,71 @@ class BoundReadToolsTests(unittest.TestCase):
         self.assertEqual(refused.error.category, "policy_denied")
         self.assertIsNone(refused.total)
         self.assertIsNone(refused.keyword_matches)
+
+    # The first write tool
+
+    def test_a_note_cannot_be_saved_without_a_writer(self) -> None:
+        tools = BoundReadTools.for_conversation(self.store, self.conversation.id)
+
+        offered = {definition["function"]["name"] for definition in tools.definitions_for_model()}
+        refused = tools.invoke("save_note", {"content": "Latency work starts Monday."})
+
+        self.assertNotIn("save_note", offered)
+        self.assertFalse(refused.ok)
+        self.assertEqual(refused.error.category, "policy_denied")
+
+    def test_a_saved_note_is_stored_and_can_be_cited_as_its_own_source(self) -> None:
+        writer = _RecordingWriter(self.store, self.conversation.id, self.source.id)
+        tools = BoundReadTools.for_conversation(self.store, self.conversation.id, writer=writer)
+
+        offered = {definition["function"]["name"] for definition in tools.definitions_for_model()}
+        result = tools.invoke("save_note", {"content": "Latency work starts Monday."})
+
+        self.assertIn("save_note", offered)
+        self.assertTrue(result.ok)
+        stored = self.store.list_saved_items(workspace_id=self.conversation.workspace_id, kinds=("note",))
+        self.assertEqual([item.content for item in stored], ["Latency work starts Monday."])
+        # The new row is ledgered, so the reply may cite the note it just saved.
+        self.assertEqual([item["id"] for item in result.items], [stored[0].id])
+        self.assertEqual(tools.resolve_observed([stored[0].id])[0].id, stored[0].id)
+
+    def test_a_note_the_schema_refuses_writes_nothing(self) -> None:
+        for content, reason in (("", "at least 1"), ("   ", "blank"), ("x" * 4_001, "at most 4000")):
+            with self.subTest(content=content[:12]):
+                writer = _RecordingWriter(self.store, self.conversation.id, self.source.id)
+                tools = BoundReadTools.for_conversation(self.store, self.conversation.id, writer=writer)
+
+                refused = tools.invoke("save_note", {"content": content})
+
+                self.assertFalse(refused.ok)
+                self.assertEqual(refused.error.category, "retryable")
+                self.assertIn(reason, refused.error.message)
+                self.assertEqual(writer.saved, [])
+
+    def test_a_note_carrying_a_credential_is_refused_before_it_is_written(self) -> None:
+        writer = _RecordingWriter(self.store, self.conversation.id, self.source.id)
+        tools = BoundReadTools.for_conversation(self.store, self.conversation.id, writer=writer)
+
+        refused = tools.invoke("save_note", {"content": "The api key is sk-abcdefghijklmnop"})
+
+        self.assertFalse(refused.ok)
+        self.assertEqual(refused.error.category, "policy_denied")
+        self.assertEqual(writer.saved, [])
+
+    def test_only_one_write_happens_per_turn(self) -> None:
+        # One local action per turn is what keeps a stable ID unique and a crash
+        # recoverable, so the second call is refused rather than written.
+        writer = _RecordingWriter(self.store, self.conversation.id, self.source.id)
+        tools = BoundReadTools.for_conversation(self.store, self.conversation.id, writer=writer)
+
+        first = tools.invoke("save_note", {"content": "First note."})
+        second = tools.invoke("save_note", {"content": "Second note."})
+
+        self.assertTrue(first.ok)
+        self.assertFalse(second.ok)
+        self.assertEqual(second.error.category, "conflict")
+        self.assertEqual(writer.saved, ["First note."])
+        self.assertTrue(tools.wrote_this_turn)
 
     def test_decision_history_exposes_replacement_and_update_time(self) -> None:
         original = self.store.save_project_record(

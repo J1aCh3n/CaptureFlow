@@ -65,6 +65,38 @@ class ConversationRouterTurn:
     failure_reason: str | None = None
 
 
+class _TurnWriter:
+    """Carry out a write the agent asked for, through the router's own unchanged path.
+
+    The agent decides that a change is wanted and with what content; this still decides
+    whether it is allowed and how it is stored. One turn stores one change, which is what
+    keeps a prepared operation's stable ID unique and a crash in the middle recoverable.
+    """
+
+    def __init__(self, service: "ConversationRouterService", user_message: Message) -> None:
+        self.service = service
+        self.user_message = user_message
+        self.operations: tuple[RouterOperation, ...] = ()
+        self.replies: list[str] = []
+
+    @property
+    def wrote(self) -> bool:
+        return bool(self.operations)
+
+    def save_item(self, kind: str, content: str) -> SavedItem:
+        operations, reply = self.service._save_item(
+            self.user_message,
+            ContextualAction(
+                action=f"save_{kind}",
+                content=content,
+                source_message_ids=[self.user_message.id],
+            ),
+        )
+        self.operations = (*self.operations, *operations)
+        self.replies.append(reply)
+        return self.service.store.get_saved_item(_stable_id(self.user_message.id, f"contextual-{kind}"))
+
+
 class RouterState(TypedDict, total=False):
     """One turn as it moves through the router graph; it lives only for one submit()."""
 
@@ -272,7 +304,8 @@ class ConversationRouterService:
     def _agent_front(self, state: RouterState) -> RouterState:
         """Let the agent take the turn; a write it hands back continues to the router."""
 
-        tools = BoundReadTools.for_conversation(self.store, state["conversation_id"])
+        writer = _TurnWriter(self, state["user_message"])
+        tools = BoundReadTools.for_conversation(self.store, state["conversation_id"], writer=writer)
         prompt = (
             "You are CaptureFlow's local information agent. Use the available search tools "
             "to answer only from stored data. Do not assume an item exists merely because recent chat "
@@ -309,14 +342,16 @@ class ConversationRouterService:
                 "turn": self._agent_reply(
                     state,
                     usage,
-                    "I could not safely complete the read-agent turn, so nothing was changed.",
+                    "I could not safely complete the agent turn.",
                     outcome="agent_model_failure",
                     failure_reason=_failure_reason(error),
+                    writer=writer,
                 )
             }
 
         if run.stop_reason == "handed_off":
             # The turn is not finished: the router decides and validates the write, as before.
+            # A hand-off cannot follow a write, so there is nothing stored to carry over.
             return {"agent_usage": usage, "hand_off": run.hand_off}
 
         if run.final_response is None:
@@ -333,6 +368,7 @@ class ConversationRouterService:
                     outcome=f"agent_{run.stop_reason}",
                     stop_reason=run.stop_reason,
                     failure_reason=f"ReadAgentStop: {run.stop_reason}",
+                    writer=writer,
                 )
             }
 
@@ -349,6 +385,7 @@ class ConversationRouterService:
                         outcome="agent_validation_failed",
                         stop_reason="validation_failed",
                         failure_reason=f"ReadAgentStop: validation_failed: {error}",
+                        writer=writer,
                     )
                 }
             events = tuple(sorted((source for source in sources if isinstance(source, CalendarEvent)), key=_event_start))
@@ -361,7 +398,11 @@ class ConversationRouterService:
                 )
             else:
                 assistant = self._assistant_message(state["user_message"], content)
-            return {"turn": self._agent_turn(state, assistant, usage, run.stop_reason, "agent_answer")}
+            return {
+                "turn": self._agent_turn(
+                    state, assistant, usage, run.stop_reason, "agent_answer", writer=writer
+                )
+            }
         except (KeyError, ValidationError, ValueError) as error:
             # An answer and its sources are saved together, so nothing of the answer exists
             # here and the failure reply can take its message ID.
@@ -373,6 +414,7 @@ class ConversationRouterService:
                     outcome="write_or_dispatch_failure",
                     stop_reason=run.stop_reason,
                     failure_reason=_failure_reason(error),
+                    writer=writer,
                 )
             }
 
@@ -396,15 +438,17 @@ class ConversationRouterService:
         usage: ReadAgentUsage,
         stop_reason: str,
         outcome: str,
+        writer: _TurnWriter | None = None,
     ) -> ConversationRouterTurn:
+        operations = () if writer is None else writer.operations
         return ConversationRouterTurn(
             state["user_message"],
             assistant,
             state.get("decision"),
             state["context_window"],
             state["candidates"],
-            (),
-            outcome=outcome,
+            operations,
+            outcome=outcome if not operations else writer.operations[0].tool_name,
             model_calls=usage.model_calls,
             model_seconds=state.get("model_seconds", 0.0) + usage.model_seconds,
             local_seconds=usage.tool_seconds,
@@ -421,16 +465,24 @@ class ConversationRouterService:
         outcome: str,
         failure_reason: str,
         stop_reason: str | None = None,
+        writer: _TurnWriter | None = None,
     ) -> ConversationRouterTurn:
-        """A fixed reply for an agent turn without an answer, counting everything the agent spent."""
+        """A fixed reply for an agent turn without an answer, counting everything the agent spent.
 
+        A change the agent already stored is reported with it: the row is in SQLite by now,
+        so a reply that did not mention it would be false.
+        """
+
+        operations = () if writer is None else writer.operations
+        if operations:
+            content = "\n\n".join([*writer.replies, content])
         return self._reply(
             state["user_message"],
             content,
             state.get("decision"),
             state["context_window"],
             state["candidates"],
-            (),
+            operations,
             model_calls=usage.model_calls,
             model_seconds=state.get("model_seconds", 0.0) + usage.model_seconds,
             local_seconds=usage.tool_seconds,

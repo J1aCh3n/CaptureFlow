@@ -44,6 +44,8 @@ ALL_CASES = (
     "no_match",
     "stored_instruction",
     "answer_replay",
+    "note_write",
+    "event_write",
 )
 # A case that reads an earlier case's submit cannot stand on its own: answer_replay
 # re-submits the meeting question's own message, so a replay without it measures nothing.
@@ -215,6 +217,14 @@ def run_fixture(
             and thanks.failure_reason is None
             and not thanks.operations
             and all(store.get_calendar_event(event.id).status == "active" for event in seed["events"])
+        )
+    if "note_write" in cases:
+        noted = submit("note_write", main_id, "read-agent-note-write")
+        trace["checks"]["note_write"] = stored_a_note(store, noted, seed, "延迟排查")
+    if "event_write" in cases:
+        scheduled = submit("event_write", main_id, "read-agent-event-write")
+        trace["checks"]["event_write"] = handed_off_an_event(
+            store, scheduled, seed, date.fromisoformat(protocol["event_write_date"])
         )
     if "answer_replay" in cases:
         replay = submit("answer_replay", main_id, "read-agent-meeting")
@@ -441,6 +451,42 @@ def answered_range(store: CaptureStore, turn, events: list[CalendarEvent], first
     if not inside or set(cited) & outside or [source_id for source_id in cited if source_id in expected] != expected:
         return False
     return all(event.start_at.isoformat() in turn.assistant_message.content for event in inside)
+
+
+def stored_a_note(store: CaptureStore, turn, seed: dict, phrase: str) -> bool:
+    """The agent's own write: one note stored in this conversation, quoting the message."""
+
+    if turn is None or turn.failure_reason is not None:
+        return False
+    if [operation.tool_name for operation in turn.operations] != ["save_note"]:
+        return False
+    notes = [
+        item
+        for item in store.list_saved_items(workspace_id="default", kinds=("note",))
+        if item.id not in {row.id for row in seed["other_project_rows"]} and item.id != seed["note"].id
+    ]
+    return (
+        len(notes) == 1
+        and phrase in notes[0].content
+        and notes[0].source_message_id == turn.user_message.id
+        and notes[0].source_quote == turn.user_message.content
+    )
+
+
+def handed_off_an_event(store: CaptureStore, turn, seed: dict, on: date) -> bool:
+    """A calendar request is still the router's: the agent hands it back rather than storing it."""
+
+    if turn is None or turn.failure_reason is not None:
+        return False
+    if turn.agent_stop_reason != "handed_off":
+        return False
+    seeded = {event.id for event in seed["events"]}
+    created = [
+        event
+        for event in store.list_calendar_events()
+        if event.id not in seeded and event.status == "active"
+    ]
+    return len(created) == 1 and created[0].start_date == on
 
 
 def answered_without_sources(store: CaptureStore, turn, tool_results: list[dict]) -> bool:

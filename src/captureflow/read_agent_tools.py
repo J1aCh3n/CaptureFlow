@@ -11,7 +11,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
@@ -100,6 +100,31 @@ class SearchSavedItemsArgs(_KeywordArguments):
     )
 
 
+class SaveNoteArgs(_ToolArguments):
+    content: str = Field(
+        min_length=1,
+        max_length=4_000,
+        description="The note to store, in the user's own words. Keep what the message says; "
+        "do not add anything it does not.",
+    )
+
+    @field_validator("content")
+    @classmethod
+    def note_content_is_not_whitespace(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("a note must not be blank")
+        return value
+
+
+class TurnWriter(Protocol):
+    """The router's own write path, which a write tool calls instead of writing itself."""
+
+    @property
+    def wrote(self) -> bool: ...
+
+    def save_item(self, kind: str, content: str) -> SavedItem: ...
+
+
 class ReadToolError(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -164,6 +189,8 @@ class BoundReadTools:
     store: CaptureStore
     conversation: Conversation
     project: Project | None
+    # Without a writer the registry is read-only, which is what a read-only caller gets.
+    writer: TurnWriter | None = None
     observed_resources: dict[str, ObservedResource] = field(default_factory=dict)
     _definitions: dict[str, ReadToolDefinition] = field(init=False, repr=False)
 
@@ -192,6 +219,16 @@ class BoundReadTools:
                 arguments_model=SearchSavedItemsArgs,
             ),
         }
+        if self.writer is not None:
+            definitions["save_note"] = ReadToolDefinition(
+                name="save_note",
+                description=(
+                    "Store a note the message asks you to keep. CaptureFlow writes it, checks it and "
+                    "returns the stored row, which you may cite. One stored change per turn: a second "
+                    "write is refused."
+                ),
+                arguments_model=SaveNoteArgs,
+            )
         if self.project is not None:
             definitions["search_project_records"] = ReadToolDefinition(
                 name="search_project_records",
@@ -201,13 +238,20 @@ class BoundReadTools:
         self._definitions = definitions
 
     @classmethod
-    def for_conversation(cls, store: CaptureStore, conversation_id: str) -> "BoundReadTools":
+    def for_conversation(
+        cls, store: CaptureStore, conversation_id: str, writer: TurnWriter | None = None
+    ) -> "BoundReadTools":
         conversation = store.get_conversation(conversation_id)
         return cls(
             store=store,
             conversation=conversation,
             project=store.get_conversation_project(conversation_id),
+            writer=writer,
         )
+
+    @property
+    def wrote_this_turn(self) -> bool:
+        return self.writer is not None and self.writer.wrote
 
     def definitions_for_model(self) -> list[dict[str, Any]]:
         return [definition.for_model() for definition in self._definitions.values()]
@@ -285,6 +329,8 @@ class BoundReadTools:
             return self._search_calendar(parsed)
         if name == "search_project_records":
             return self._search_project_records(parsed)
+        if name == "save_note":
+            return self._save_note(parsed)
         if name == "search_saved_items":
             return self._search_saved_items(parsed)
         raise AssertionError(f"unhandled read tool: {name}")
@@ -356,6 +402,20 @@ class BoundReadTools:
             total=len(records),
             keyword_matches=keyword_matches,
         )
+
+    def _save_note(self, arguments: _ToolArguments) -> ReadToolResult:
+        if not isinstance(arguments, SaveNoteArgs):
+            raise TypeError("save_note received unexpected arguments")
+        assert self.writer is not None
+        if self.writer.wrote:
+            # One stored change per turn: it is what keeps a prepared operation's stable ID
+            # unique, and so what makes a crash in the middle of a turn recoverable.
+            return _error("conflict", "This turn has already stored a change; nothing was written.")
+        item = self.writer.save_item("note", arguments.content)
+        scope_kind: ScopeKind = "project" if self.project is not None else "workspace"
+        scope_id = self.project.id if self.project is not None else self.conversation.workspace_id
+        self._observe([item], "saved_item", scope_kind, scope_id)
+        return ReadToolResult(ok=True, scope=scope_kind, items=[_saved_item(item)], total=1)
 
     def _search_saved_items(self, arguments: _ToolArguments) -> ReadToolResult:
         if not isinstance(arguments, SearchSavedItemsArgs):

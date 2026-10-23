@@ -4,7 +4,7 @@ import unittest
 from datetime import date, datetime, time, timezone
 from pathlib import Path
 
-from captureflow.conversation_router_service import ConversationRouterService
+from captureflow.conversation_router_service import ConversationRouterService, _stable_id
 from captureflow.date_tool import calendar_reference
 from captureflow.llm import ModelError
 from captureflow.models import (
@@ -266,6 +266,102 @@ class ConversationRouterServiceTests(unittest.TestCase):
         offered = {tool["function"]["name"] for tool in model.agent_calls[0]["tools"]}
         self.assertNotIn("search_project_records", offered)
         self.assertIn(HAND_OFF_TOOL, offered)
+
+    # The agent's own first write
+
+    def test_the_agent_saves_a_note_through_the_routers_write_path(self) -> None:
+        model = ScriptedContextualModel(
+            [],
+            agent_turns=[
+                AgentModelTurn(
+                    tool_calls=[
+                        AgentToolCall(
+                            id="save",
+                            name="save_note",
+                            arguments={"content": "Latency work starts Monday."},
+                        )
+                    ]
+                ),
+                AgentModelTurn(final_response=AgentFinalResponse(reply="Saved your note.")),
+            ],
+        )
+
+        turn = self.submit(model, "记一下：延迟排查从周一开始。", "agent-note")
+
+        item = self.store.list_saved_items(workspace_id="default", kinds=("note",))[0]
+        self.assertEqual(model.calls, [])
+        self.assertEqual(turn.outcome, "save_note")
+        self.assertEqual([operation.tool_name for operation in turn.operations], ["save_note"])
+        self.assertEqual(item.content, "Latency work starts Monday.")
+        # The write keeps the router's grounding: the stored row quotes the message it came from.
+        self.assertEqual(item.source_message_id, "agent-note")
+        self.assertEqual(item.source_quote, "记一下：延迟排查从周一开始。")
+        self.assertIn("Saved your note.", turn.assistant_message.content)
+
+    def test_a_write_is_reported_even_when_the_turn_runs_out_of_budget_after_it(self) -> None:
+        # The note is in SQLite by then, so a reply that did not mention it would be false.
+        save = AgentModelTurn(
+            tool_calls=[
+                AgentToolCall(id="save", name="save_note", arguments={"content": "Latency work."})
+            ]
+        )
+        model = ScriptedContextualModel([], agent_turns=[save, save, save])
+
+        turn = self.submit(model, "记一下：延迟排查。", "agent-note-budget")
+
+        self.assertEqual([operation.tool_name for operation in turn.operations], ["save_note"])
+        self.assertEqual(turn.agent_stop_reason, "model_budget_exhausted")
+        self.assertIn("Saved note", turn.assistant_message.content)
+        self.assertEqual(len(self.store.list_saved_items(workspace_id="default", kinds=("note",))), 1)
+
+    def test_the_same_message_submitted_twice_saves_one_note(self) -> None:
+        turns = [
+            AgentModelTurn(
+                tool_calls=[
+                    AgentToolCall(id="save", name="save_note", arguments={"content": "Once only."})
+                ]
+            ),
+            AgentModelTurn(final_response=AgentFinalResponse(reply="Saved your note.")),
+        ]
+        model = ScriptedContextualModel([], agent_turns=turns)
+        router = ConversationRouterService(self.store, model, date(2026, 9, 9))
+
+        first = router.submit(self.conversation.id, "记一下：只记一次。", "agent-note-once")
+        again = router.submit(self.conversation.id, "记一下：只记一次。", "agent-note-once")
+
+        self.assertEqual(len(self.store.list_saved_items(workspace_id="default", kinds=("note",))), 1)
+        self.assertEqual(again.model_calls, 0)
+        self.assertEqual(again.assistant_message.id, first.assistant_message.id)
+        self.assertEqual(len(model.agent_calls), 2)
+
+    def test_a_note_prepared_but_not_committed_is_resumed_with_the_same_id(self) -> None:
+        # The stable ID is what makes this work, and it holds only because one turn stores
+        # one change.
+        model = ScriptedContextualModel(
+            [],
+            agent_turns=[
+                AgentModelTurn(
+                    tool_calls=[
+                        AgentToolCall(id="save", name="save_note", arguments={"content": "Interrupted."})
+                    ]
+                ),
+                AgentModelTurn(final_response=AgentFinalResponse(reply="Saved your note.")),
+            ],
+        )
+        committed = self.store.commit_prepared_saved_item
+        self.store.commit_prepared_saved_item = lambda *_, **__: (_ for _ in ()).throw(
+            RuntimeError("crashed after preparing the write")
+        )
+        with self.assertRaises(RuntimeError):
+            self.submit(model, "记一下：中断。", "agent-note-crash")
+        self.store.commit_prepared_saved_item = committed
+
+        resumed = self.submit(ScriptedContextualModel([]), "记一下：中断。", "agent-note-crash")
+
+        items = self.store.list_saved_items(workspace_id="default", kinds=("note",))
+        self.assertEqual(resumed.outcome, "resumed")
+        self.assertEqual([item.content for item in items], ["Interrupted."])
+        self.assertEqual(items[0].id, _stable_id("agent-note-crash", "contextual-note"))
 
     # Optional Phase A read agent
 
