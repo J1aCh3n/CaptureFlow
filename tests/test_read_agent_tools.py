@@ -4,7 +4,7 @@ from datetime import date
 from pathlib import Path
 
 from captureflow.models import CalendarEvent, Conversation, Message, Project, ProjectRecord, SavedItem
-from captureflow.read_agent_tools import BoundReadTools
+from captureflow.read_agent_tools import BoundReadTools, WriteNeedsClarification
 from captureflow.storage import CaptureStore
 
 
@@ -16,6 +16,7 @@ class _RecordingWriter:
         self.conversation_id = conversation_id
         self.source_message_id = source_message_id
         self.saved: list[str] = []
+        self.events: list[tuple[str, str]] = []
 
     @property
     def wrote(self) -> bool:
@@ -58,6 +59,41 @@ class _RecordingWriter:
         )
         self.saved.append(fields["content"])
         return record, "Tracker update applied."
+
+    def create_event(self, **fields) -> tuple[CalendarEvent, str]:
+        # The rules the router applies before writing, which the real writer delegates to it.
+        if fields.get("recurring"):
+            raise WriteNeedsClarification(
+                "I cannot store a repeating schedule, only single dated records. "
+                "Which one exact date should I use?"
+            )
+        if fields.get("timezone") not in (None, "America/Vancouver"):
+            raise WriteNeedsClarification(
+                "I only store America/Vancouver times and cannot convert another timezone. "
+                "What exact America/Vancouver time should I use for this local event?"
+            )
+        if fields["date"] > "2028-09-10":
+            raise WriteNeedsClarification("Which exact date should I use for this local event?")
+        if fields.get("end_time") and fields.get("duration_minutes") == 120:
+            raise WriteNeedsClarification(
+                "How long should this local event last (for example, 30 minutes)?"
+            )
+        source = self.store.get_message(self.source_message_id)
+        event = self.store.save_calendar_event(
+            CalendarEvent(
+                id=f"written-event-{len(self.events)}",
+                conversation_id=self.conversation_id,
+                title=fields["title"],
+                source_message_id=source.id,
+                source_quote=source.content,
+                start_at=date.fromisoformat(fields["date"]),
+                all_day=True,
+                timezone="America/Vancouver",
+            )
+        )
+        self.events.append((fields["title"], fields["date"]))
+        self.saved.append(fields["title"])
+        return event, f"Created local calendar event: {event.title}."
 
 
 class BoundReadToolsTests(unittest.TestCase):
@@ -631,6 +667,66 @@ class BoundReadToolsTests(unittest.TestCase):
                 self.assertEqual(refused.error.category, "retryable")
                 self.assertIn(reason, refused.error.message)
                 self.assertEqual(writer.saved, [])
+
+    def test_an_event_is_created_through_the_same_rules_and_can_be_cited(self) -> None:
+        writer = _RecordingWriter(self.store, self.conversation.id, self.source.id)
+        tools = BoundReadTools.for_conversation(self.store, self.conversation.id, writer=writer)
+
+        result = tools.invoke(
+            "create_event",
+            {
+                "title": "导师会议",
+                "date": "2026-09-16",
+                "start_time": "15:00",
+                "duration_minutes": 60,
+            },
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.items[0]["title"], "导师会议")
+        self.assertEqual(tools.resolve_observed([result.items[0]["id"]])[0].title, "导师会议")
+        self.assertEqual(writer.events, [("导师会议", "2026-09-16")])
+
+    def test_a_calendar_rule_that_needs_the_user_asks_rather_than_refusing(self) -> None:
+        # The router asks about these rather than rejecting the turn; the agent gets the
+        # same question back as a clarification it can relay.
+        writer = _RecordingWriter(self.store, self.conversation.id, self.source.id)
+        tools = BoundReadTools.for_conversation(self.store, self.conversation.id, writer=writer)
+
+        for arguments, expected in (
+            ({"title": "周会", "date": "2026-09-16", "recurring": True}, "repeating"),
+            ({"title": "通话", "date": "2026-09-16", "timezone": "Asia/Tokyo"}, "cannot convert"),
+            ({"title": "久远", "date": "2032-01-01"}, "exact date"),
+            (
+                {
+                    "title": "会议",
+                    "date": "2026-09-16",
+                    "start_time": "15:00",
+                    "end_time": "16:00",
+                    "duration_minutes": 120,
+                },
+                "How long",
+            ),
+        ):
+            with self.subTest(arguments=sorted(arguments)):
+                refused = tools.invoke("create_event", arguments)
+
+                self.assertFalse(refused.ok)
+                self.assertEqual(refused.error.category, "clarification_required")
+                self.assertIn(expected, refused.error.message)
+                self.assertEqual(writer.events, [])
+
+    def test_an_event_without_a_date_is_refused_by_the_schema(self) -> None:
+        # The router has to ask when the date is missing; here it cannot be left out.
+        writer = _RecordingWriter(self.store, self.conversation.id, self.source.id)
+        tools = BoundReadTools.for_conversation(self.store, self.conversation.id, writer=writer)
+
+        refused = tools.invoke("create_event", {"title": "会议"})
+
+        self.assertFalse(refused.ok)
+        self.assertEqual(refused.error.category, "retryable")
+        self.assertIn("date", refused.error.message)
+        self.assertEqual(writer.events, [])
 
     def test_decision_history_exposes_replacement_and_update_time(self) -> None:
         original = self.store.save_project_record(

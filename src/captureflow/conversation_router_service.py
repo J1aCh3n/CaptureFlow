@@ -34,7 +34,7 @@ from .models import (
 from .project_answer_service import with_stored_dates
 from .project_service import apply_validated_changes
 from .read_agent import ReadAgentLoop, ReadAgentUsage
-from .read_agent_tools import BoundReadTools
+from .read_agent_tools import BoundReadTools, WriteNeedsClarification
 from .storage import CaptureStore
 
 
@@ -112,6 +112,34 @@ class _TurnWriter:
         self.operations = (*self.operations, *operations)
         self.replies.append(reply)
         return self.service.store.get_saved_item(_stable_id(self.user_message.id, f"contextual-{kind}"))
+
+    def create_event(self, **fields: Any) -> tuple[CalendarEvent, str]:
+        """Create one calendar event through the router's validated path.
+
+        The rules that ask the user rather than refusing are the router's own, applied here
+        before the write so their wording lives in one place.
+        """
+
+        action = ContextualAction(
+            action="create_event",
+            content=fields.pop("title"),
+            source_message_ids=[self.user_message.id],
+            **fields,
+        )
+        missing = self.service._calendar_clarification_field(action)
+        if missing is not None:
+            raise WriteNeedsClarification(self.service._question(missing))
+        operations, reply = self.service._create_event(
+            self.user_message, action, self.context_window
+        )
+        self.operations = (*self.operations, *operations)
+        self.replies.append(reply)
+        return (
+            self.service.store.get_calendar_event(
+                _stable_id(self.user_message.id, "contextual-event")
+            ),
+            reply,
+        )
 
     def create_record(self, **fields: Any) -> tuple[ProjectRecord | None, str]:
         """Create one tracker record through the router's validated path.

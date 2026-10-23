@@ -1,7 +1,7 @@
 import tempfile
 import unittest
 from copy import deepcopy
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from itertools import count
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,7 +12,7 @@ from captureflow.project_answer_service import with_stored_dates
 from captureflow.storage import CaptureStore
 from scripts.run_read_agent_acceptance import (
     ALL_CASES,
-    handed_off_an_event,
+    handed_off_an_update,
     answered_range,
     answered_with,
     answered_without_sources,
@@ -22,6 +22,7 @@ from scripts.run_read_agent_acceptance import (
     seed_database,
     selected_cases,
     stored_a_record,
+    stored_an_event,
     stored_an_item,
 )
 
@@ -260,6 +261,7 @@ class WriteCaseChecksTests(unittest.TestCase):
         self.store = CaptureStore(Path(self.temporary_directory.name) / "captureflow.sqlite3")
         self.store.initialize()
         self.seed = seed_database(self.store)
+        self.answers = 0
         self.question = self.store.save_message(
             Message(
                 id="write-case-question",
@@ -269,10 +271,14 @@ class WriteCaseChecksTests(unittest.TestCase):
             )
         )
 
+    def _next_answer(self) -> int:
+        self.answers += 1
+        return self.answers
+
     def _turn(self, operations, stop_reason="completed"):
         assistant = self.store.save_message(
             Message(
-                id=f"write-case-answer-{len(operations)}-{stop_reason}",
+                id=f"write-case-answer-{self._next_answer()}",
                 conversation_id=self.question.conversation_id,
                 role="assistant",
                 content="Done.",
@@ -343,7 +349,7 @@ class WriteCaseChecksTests(unittest.TestCase):
     def _turn_with_operations(self, operations):
         assistant = self.store.save_message(
             Message(
-                id="handed-back-answer",
+                id=f"handed-back-answer-{self._next_answer()}",
                 conversation_id=self.question.conversation_id,
                 role="assistant",
                 content="Done.",
@@ -387,28 +393,56 @@ class WriteCaseChecksTests(unittest.TestCase):
 
         self.assertFalse(stored_an_item(self.store, self._turn(["save_note"]), self.seed, "note", "延迟排查"))
 
-    def test_an_event_must_be_created_by_a_hand_off_and_not_by_the_agent(self) -> None:
+    def test_an_event_the_agent_stored_itself_passes_on_the_right_day(self) -> None:
         self._event_on(date(2026, 9, 16))
 
         self.assertTrue(
-            handed_off_an_event(
-                self.store, self._turn(["create_local_event"], "handed_off"), self.seed, date(2026, 9, 16)
-            )
-        )
-        # A turn the agent finished itself is not a hand-off, whatever it stored.
-        self.assertFalse(
-            handed_off_an_event(
-                self.store, self._turn(["create_local_event"], "completed"), self.seed, date(2026, 9, 16)
-            )
+            stored_an_event(self.store, self._turn(["create_local_event"]), self.seed, date(2026, 9, 16))
         )
 
-    def test_an_event_on_the_wrong_day_does_not_pass(self) -> None:
+    def test_an_event_on_the_wrong_day_or_from_no_write_does_not_pass(self) -> None:
         self._event_on(date(2026, 9, 17))
 
         self.assertFalse(
-            handed_off_an_event(
-                self.store, self._turn(["create_local_event"], "handed_off"), self.seed, date(2026, 9, 16)
+            stored_an_event(self.store, self._turn(["create_local_event"]), self.seed, date(2026, 9, 16))
+        )
+        self.assertFalse(stored_an_event(self.store, self._turn([]), self.seed, date(2026, 9, 17)))
+
+    def test_an_update_must_be_handed_back_and_must_move_the_event(self) -> None:
+        # The one path the agent still does not own, and the one that needs a target ID.
+        # An event with no stored end, so the unit test can move it with one store call.
+        target = next(event for event in self.seed["events"] if event.end_at is None)
+        moved = SimpleNamespace(event_id=target.id)
+
+        self.assertFalse(
+            handed_off_an_update(
+                self.store,
+                self._turn_with_operations([moved]),
+                self.seed,
+                target.id,
+                date(2026, 9, 18),
+            ),
+            "the seeded event has not moved, so the case must not pass",
+        )
+        self.store.update_calendar_event(
+            target.id,
+            title=target.title,
+            start_at=datetime(2026, 9, 18, 14, 0, tzinfo=timezone(timedelta(hours=-7))),
+        )
+
+        self.assertTrue(
+            handed_off_an_update(
+                self.store,
+                self._turn_with_operations([moved]),
+                self.seed,
+                target.id,
+                date(2026, 9, 18),
             )
+        )
+        # A turn the agent finished itself is not a hand-off, whatever moved.
+        finished = self._turn(["create_local_event"])
+        self.assertFalse(
+            handed_off_an_update(self.store, finished, self.seed, target.id, date(2026, 9, 18))
         )
 
     def _event_on(self, day: date) -> None:

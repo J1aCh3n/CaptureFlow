@@ -86,10 +86,10 @@ _HAND_OFF_DEFINITION = {
         "name": HAND_OFF_TOOL,
         "description": (
             "Call this when the message asks for a stored change that none of the offered write "
-            "tools makes: a calendar event, or finishing, replacing or re-dating a record that "
-            "already exists. CaptureFlow carries out the change itself after this call, so call "
-            "it alone and do not search first. Anything a write tool above does covers, it does: "
-            "use that tool instead."
+            "tools makes: changing or deleting something that already exists, or finishing, "
+            "replacing or re-dating a record. CaptureFlow carries out the change itself after "
+            "this call, so call it alone and do not search first. Anything a write tool above "
+            "covers, it does: use that tool instead."
         ),
         "parameters": HandOffRequest.model_json_schema(),
     },

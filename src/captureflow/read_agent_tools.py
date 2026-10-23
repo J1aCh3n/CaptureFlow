@@ -147,6 +147,67 @@ class CreateRecordArgs(_ToolArguments):
         return value
 
 
+class WriteNeedsClarification(Exception):
+    """A write rule that asks the user instead of refusing, with the question to relay.
+
+    The router answers these with a plain question and writes nothing; a write tool returns
+    the same question as a clarification, so the rule and its wording stay in one place.
+    """
+
+
+class CreateEventArgs(_ToolArguments):
+    """The calendar rules a created event follows, as its parameters rather than as prose."""
+
+    title: str = Field(min_length=1, max_length=4_000, description="What the event is called.")
+    date: str = Field(
+        pattern=r"^\d{4}-\d{2}-\d{2}$",
+        description="The event's date, as YYYY-MM-DD. Resolve wording such as 下周三 from "
+        "reference_date and the supplied calendar table rather than counting days yourself.",
+    )
+    start_time: str | None = Field(
+        default=None,
+        pattern=r"^([01]\d|2[0-3]):[0-5]\d$",
+        description="24-hour HH:MM, only when the message states a time. Leave it out for an "
+        "all-day event. Never write a UTC offset: CaptureFlow attaches the timezone.",
+    )
+    end_time: str | None = Field(
+        default=None,
+        pattern=r"^([01]\d|2[0-3]):[0-5]\d$",
+        description="24-hour HH:MM, only when the message states when it ends.",
+    )
+    duration_minutes: int | None = Field(
+        default=None,
+        ge=1,
+        le=720,
+        description="How long it lasts, in whole minutes, only when the message states a length "
+        "rather than an end time.",
+    )
+    description: str | None = Field(
+        default=None,
+        max_length=4_000,
+        description="Agenda or attendance the message gives, in your own short words.",
+    )
+    timezone: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=100,
+        description="The IANA zone the message names, when it names one other than the "
+        "conversation's own. Leave it out otherwise.",
+    )
+    recurring: bool = Field(
+        default=False,
+        description="True when the message states a repeating schedule such as 每周一, instead "
+        "of silently choosing one occurrence.",
+    )
+
+    @field_validator("title")
+    @classmethod
+    def event_title_is_not_whitespace(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("an event must have a title")
+        return value
+
+
 class TurnWriter(Protocol):
     """The router's own write path, which a write tool calls instead of writing itself."""
 
@@ -156,6 +217,8 @@ class TurnWriter(Protocol):
     def save_item(self, kind: str, content: str) -> SavedItem: ...
 
     def create_record(self, **fields: Any) -> tuple[ProjectRecord | None, str]: ...
+
+    def create_event(self, **fields: Any) -> tuple[CalendarEvent, str]: ...
 
 
 class ReadToolError(BaseModel):
@@ -268,6 +331,18 @@ class BoundReadTools:
                     ),
                     arguments_model=SaveItemArgs,
                 )
+            definitions["create_event"] = ReadToolDefinition(
+                name="create_event",
+                description=(
+                    "Create a calendar event for something the message says is going to happen "
+                    "on a stated date. CaptureFlow checks it, stores it and returns the row, "
+                    "which you may cite; it attaches the timezone and renders the stored times, "
+                    "so do not restate them. A meeting the message reports as already held is "
+                    "not a future event: keep its minutes with save_note. One stored change per "
+                    "turn: a second write is refused."
+                ),
+                arguments_model=CreateEventArgs,
+            )
             if self.project is not None:
                 definitions["create_record"] = ReadToolDefinition(
                     name="create_record",
@@ -384,6 +459,8 @@ class BoundReadTools:
             return self._save_item(name.removeprefix("save_"), parsed)
         if name == "create_record":
             return self._create_record(parsed)
+        if name == "create_event":
+            return self._create_event(parsed)
         if name == "search_saved_items":
             return self._search_saved_items(parsed)
         raise AssertionError(f"unhandled read tool: {name}")
@@ -490,6 +567,29 @@ class BoundReadTools:
             ok=True,
             scope="project",
             items=[_project_record_item(record, recorded_at=False)],
+            total=1,
+            detail=note,
+        )
+
+    def _create_event(self, arguments: _ToolArguments) -> ReadToolResult:
+        if not isinstance(arguments, CreateEventArgs):
+            raise TypeError("create_event received unexpected arguments")
+        already = self._already_wrote()
+        if already is not None:
+            return already
+        assert self.writer is not None
+        try:
+            event, note = self.writer.create_event(**arguments.model_dump())
+        except WriteNeedsClarification as question:
+            # The rule asks rather than refuses, so the question is the model's to relay.
+            return _error("clarification_required", str(question))
+        except ValueError as error:
+            return _error("policy_denied", f"The change was refused: {error}")
+        self._observe([event], "calendar_event", "workspace", self.conversation.workspace_id)
+        return ReadToolResult(
+            ok=True,
+            scope="workspace",
+            items=[_calendar_item(event)],
             total=1,
             detail=note,
         )

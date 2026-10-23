@@ -40,7 +40,7 @@ MIN_PASS_RATE = 0.8
 # One control flow: the agent takes the turn and hands a write back.
 ANSWER_MODE = "agent"
 # The only cases whose turn is expected to store a change.
-WRITE_CASES = frozenset({"note_write", "idea_write", "record_write", "event_write"})
+WRITE_CASES = frozenset({"note_write", "idea_write", "record_write", "event_write", "event_update"})
 ALL_CASES = (
     "meeting_question",
     "cross_conversation_local_retrieval",
@@ -54,6 +54,7 @@ ALL_CASES = (
     "idea_write",
     "record_write",
     "event_write",
+    "event_update",
 )
 # A case that reads an earlier case's submit cannot stand on its own: answer_replay
 # re-submits the meeting question's own message, so a replay without it measures nothing.
@@ -264,8 +265,20 @@ def run_fixture(
         scheduled = submit("event_write", main_id, "read-agent-event-write")
         checked(
             "event_write",
-            lambda: handed_off_an_event(
+            lambda: stored_an_event(
                 store, scheduled, seed, date.fromisoformat(protocol["event_write_date"])
+            ),
+        )
+    if "event_update" in cases:
+        moved = submit("event_update", main_id, "read-agent-event-update")
+        checked(
+            "event_update",
+            lambda: handed_off_an_update(
+                store,
+                moved,
+                seed,
+                "read-agent-architecture-review",
+                date.fromisoformat(protocol["event_update_date"]),
             ),
         )
     if "answer_replay" in cases:
@@ -547,12 +560,10 @@ def _quotes_the_turn(row, turn) -> bool:
     return row.source_message_id == turn.user_message.id and row.source_quote == turn.user_message.content
 
 
-def handed_off_an_event(store: CaptureStore, turn, seed: dict, on: date) -> bool:
-    """A calendar request is still the router's: the agent hands it back rather than storing it."""
+def stored_an_event(store: CaptureStore, turn, seed: dict, on: date) -> bool:
+    """The agent's own calendar write, through the router's validated path."""
 
-    if turn is None or turn.failure_reason is not None:
-        return False
-    if turn.agent_stop_reason != "handed_off":
+    if not _wrote_exactly(turn, "create_local_event"):
         return False
     seeded = {event.id for event in seed["events"]}
     created = [
@@ -560,7 +571,23 @@ def handed_off_an_event(store: CaptureStore, turn, seed: dict, on: date) -> bool
         for event in store.list_calendar_events()
         if event.id not in seeded and event.status == "active"
     ]
-    return len(created) == 1 and created[0].start_date == on
+    return len(created) == 1 and created[0].start_date == on and _quotes_the_turn(created[0], turn)
+
+
+def handed_off_an_update(store: CaptureStore, turn, seed: dict, event_id: str, on: date) -> bool:
+    """Changing something that exists is still the router's: the agent hands it back.
+
+    This is the last path the agent does not own, and the one that needs a target ID, so it
+    is also what the provenance ledger has to take over before the agent can own it.
+    """
+
+    if turn is None or turn.failure_reason is not None:
+        return False
+    if turn.agent_stop_reason != "handed_off":
+        return False
+    if [getattr(operation, "event_id", None) for operation in turn.operations] != [event_id]:
+        return False
+    return store.get_calendar_event(event_id).start_date == on
 
 
 def answered_without_sources(store: CaptureStore, turn, tool_results: list[dict]) -> bool:

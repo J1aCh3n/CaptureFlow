@@ -390,6 +390,65 @@ class ConversationRouterServiceTests(unittest.TestCase):
         self.assertEqual(result["items"], [])
         self.assertIn("review", result["detail"])
 
+    def test_the_agent_creates_an_event_and_python_attaches_the_timezone(self) -> None:
+        model = ScriptedContextualModel(
+            [],
+            agent_turns=[
+                AgentModelTurn(
+                    tool_calls=[
+                        AgentToolCall(
+                            id="event",
+                            name="create_event",
+                            arguments={
+                                "title": "和导师开会",
+                                "date": "2026-09-16",
+                                "start_time": "15:00",
+                                "duration_minutes": 60,
+                            },
+                        )
+                    ]
+                ),
+                AgentModelTurn(final_response=AgentFinalResponse(reply="建好了。")),
+            ],
+        )
+
+        turn = self.submit(model, "下周三下午三点到四点和导师开会。", "agent-event")
+
+        event = self.store.list_calendar_events()[0]
+        self.assertEqual(model.calls, [])
+        self.assertEqual(turn.outcome, "create_local_event")
+        self.assertEqual(event.start_at, datetime.fromisoformat("2026-09-16T15:00:00-07:00"))
+        self.assertEqual(event.end_at, datetime.fromisoformat("2026-09-16T16:00:00-07:00"))
+        self.assertEqual(event.source_message_id, "agent-event")
+
+    def test_a_calendar_rule_that_asks_the_user_reaches_the_agent_as_a_question(self) -> None:
+        # The router's own wording, so the rule lives in one place whoever asked for the write.
+        model = ScriptedContextualModel(
+            [],
+            agent_turns=[
+                AgentModelTurn(
+                    tool_calls=[
+                        AgentToolCall(
+                            id="event",
+                            name="create_event",
+                            arguments={"title": "周会", "date": "2026-09-14", "recurring": True},
+                        )
+                    ]
+                ),
+                AgentModelTurn(
+                    final_response=AgentFinalResponse(reply="我只能存单次日程，具体哪一天？")
+                ),
+            ],
+        )
+
+        turn = self.submit(model, "每周一上午十点开周会。", "agent-recurring-event")
+
+        self.assertEqual(self.store.list_calendar_events(), [])
+        self.assertEqual(turn.operations, ())
+        feedback = json.loads(model.agent_calls[1]["messages"][-1]["content"])
+        self.assertEqual(feedback["error"]["category"], "clarification_required")
+        self.assertIn("repeating schedule", feedback["error"]["message"])
+
     def test_a_write_is_reported_even_when_the_turn_runs_out_of_budget_after_it(self) -> None:
         # The note is in SQLite by then, so a reply that did not mention it would be false.
         save = AgentModelTurn(
