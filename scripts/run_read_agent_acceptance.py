@@ -56,6 +56,24 @@ ALL_CASES = (
     "event_write",
     "event_update",
 )
+CASE_SEQUENCE = (
+    ("meeting_question", "main", "read-agent-meeting"),
+    ("cross_conversation_local_retrieval", "later", "read-agent-cross-local"),
+    ("cross_conversation_project_retrieval", "later", "read-agent-cross-project"),
+    ("range_question", "main", "read-agent-range"),
+    ("project_isolation", "main", "read-agent-isolation"),
+    ("no_match", "main", "read-agent-no-match"),
+    ("stored_instruction", "main", "read-agent-notes"),
+    ("stored_instruction_neutral", "main", "read-agent-thanks"),
+    ("note_write", "main", "read-agent-note-write"),
+    ("idea_write", "main", "read-agent-idea-write"),
+    ("record_write", "main", "read-agent-record-write"),
+    ("event_write", "main", "read-agent-event-write"),
+    ("event_update", "main", "read-agent-event-update"),
+    ("answer_replay", "main", "read-agent-meeting"),
+)
+# stored_instruction runs two submits and answer_replay re-sends an earlier message, so the
+# selectable cases are not the same list.
 # A case that reads an earlier case's submit cannot stand on its own: answer_replay
 # re-submits the meeting question's own message, so a replay without it measures nothing.
 CASE_DEPENDENCIES = {"answer_replay": ("meeting_question",)}

@@ -133,3 +133,67 @@ class ReplayModel:
 
 def _dump(response: Any) -> Any:
     return response.model_dump(mode="json") if isinstance(response, BaseModel) else response
+
+class LooseReplayModel:
+    """Return a recording's answers in order while ignoring whether the requests match.
+
+    This is for asking one question only: does our own code send the same requests twice?
+    A recording goes stale as soon as a tool or a prompt changes, and ReplayModel then
+    refuses it -- correctly, but that refusal hides whether the staleness is ours or the
+    clock's. Driving the same answers twice and comparing what we sent separates them, and
+    costs nothing, which is the point: a timestamp made inside a turn has twice burned a
+    recording that had already been paid for.
+    """
+
+    def __init__(self, recording: dict[str, Any]) -> None:
+        self.calls = list(recording["calls"])
+        self.position = 0
+        self.sent: list[tuple[str, str, dict[str, Any]]] = []
+
+    def propose_conversation_decision(self, **kwargs) -> ConversationDecision:
+        return self._next("propose_conversation_decision", kwargs)
+
+    def next_read_agent_turn(self, **kwargs) -> AgentModelTurn:
+        return self._next("next_read_agent_turn", kwargs)
+
+    def _next(self, method: str, kwargs: dict[str, Any]) -> Any:
+        self.sent.append((method, request_digest(method, kwargs), kwargs))
+        if self.position >= len(self.calls):
+            raise AssertionError(f"the recording has no call {self.position + 1} for {method}")
+        call = self.calls[self.position]
+        self.position += 1
+        if "error" in call:
+            error = call["error"]
+            raise _ERROR_CLASSES.get(error["type"], ModelError)(error["message"])
+        return RESPONSE_SCHEMAS[call["method"]].model_validate(call["response"])
+
+
+def first_unreproducible_request(
+    one: list[tuple[str, str, dict[str, Any]]], two: list[tuple[str, str, dict[str, Any]]]
+) -> str | None:
+    """Name the first request two identical runs did not send identically, with the text."""
+
+    if len(one) != len(two):
+        return f"the two runs made {len(one)} and {len(two)} calls"
+    for number, ((method, left, left_request), (_, right, right_request)) in enumerate(
+        zip(one, two), start=1
+    ):
+        if left == right:
+            continue
+        texts = [
+            json.dumps(request, sort_keys=True, ensure_ascii=False, default=str)
+            for request in (left_request, right_request)
+        ]
+        position = next(
+            (index for index, pair in enumerate(zip(*texts)) if pair[0] != pair[1]),
+            min(len(texts[0]), len(texts[1])),
+        )
+        window = slice(max(0, position - 80), position + 60)
+        return "\n".join(
+            [
+                f"call {number} ({method}) differs between two identical runs:",
+                f"  run 1: ...{texts[0][window]}",
+                f"  run 2: ...{texts[1][window]}",
+            ]
+        )
+    return None
