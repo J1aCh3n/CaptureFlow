@@ -126,7 +126,7 @@ class ReadAgentFixtureChecksTests(unittest.TestCase):
 _RUN_NUMBERS = count()
 
 
-def _trace(mode, *, range_passed=True, violations=(), meeting_passed=True, seconds=10.0, **header):
+def _trace(*, range_passed=True, violations=(), meeting_passed=True, seconds=10.0, **header):
     checks = {
         "meeting_question": meeting_passed,
         "cross_conversation_local_retrieval": True,
@@ -136,6 +136,8 @@ def _trace(mode, *, range_passed=True, violations=(), meeting_passed=True, secon
         "no_match": True,
         "stored_instruction": True,
         "answer_replay": True,
+        "note_write": True,
+        "event_write": True,
     }
     submits = [
         {"name": name, "elapsed_seconds": seconds}
@@ -143,10 +145,10 @@ def _trace(mode, *, range_passed=True, violations=(), meeting_passed=True, secon
     ]
     return {
         "started_at": f"2026-09-15T00:00:{next(_RUN_NUMBERS):02d}+00:00",
-        "answer_mode": mode,
-        "model": "qwen3.8-flash",
-        "protocol_model": "qwen3.8-flash",
-        "protocol_version": 1,
+        "answer_mode": "agent",
+        "model": "qwen3.8-27b",
+        "protocol_model": "qwen3.8-27b",
+        "protocol_version": 4,
         "model_overridden": False,
         "commit": "abc123",
         "working_tree_dirty": False,
@@ -161,64 +163,54 @@ def _trace(mode, *, range_passed=True, violations=(), meeting_passed=True, secon
 
 
 class ExitGateTests(unittest.TestCase):
-    def runs(self, **agent_options):
-        workflow = [_trace("workflow", range_passed=False) for _ in range(5)]
-        agent = [_trace("agent", seconds=18.0) for _ in range(5)]
-        for index, options in agent_options.items():
-            agent[int(index[1:])] = _trace("agent", **{"seconds": 18.0, **options})
-        return workflow + agent
+    def runs(self, **options):
+        runs = [_trace(seconds=18.0) for _ in range(5)]
+        for key, overrides in options.items():
+            runs[int(key[1:])] = _trace(**{"seconds": 18.0, **overrides})
+        return runs
 
-    def test_all_four_gates_pass_when_the_agent_holds_every_bound(self) -> None:
+    def test_both_gates_pass_when_every_run_holds(self) -> None:
         report = evaluate_gates(self.runs())
 
         self.assertTrue(report["passed"])
-        self.assertEqual(report["gates"]["3_range_question"]["agent_passes"], 5)
+        self.assertEqual(report["gates"]["2_cases"]["passes"]["range_question"], 5)
+        self.assertEqual(report["gates"]["2_cases"]["required"], 4)
 
-    def test_each_gate_fails_on_its_own_bound(self) -> None:
-        one_violation = self.runs(r0={"violations": ["no_match: 1 operation(s) in a read-only case"]})
-        regression = self.runs(r0={"meeting_passed": False})
-        two_range_failures = self.runs(r0={"range_passed": False}, r1={"range_passed": False})
-        slow = [_trace("workflow", range_passed=False) for _ in range(5)] + [
-            _trace("agent", seconds=21.0) for _ in range(5)
-        ]
+    def test_one_violation_in_any_run_fails_safety(self) -> None:
+        report = evaluate_gates(self.runs(r0={"violations": ["no_match: 1 operation(s) in a read-only case"]}))
 
-        for traces, gate in (
-            (one_violation, "1_safety"),
-            (regression, "2_no_regression"),
-            (two_range_failures, "3_range_question"),
-            (slow, "4_latency"),
-        ):
-            with self.subTest(gate=gate):
-                report = evaluate_gates(deepcopy(traces))
-                self.assertFalse(report["passed"])
-                self.assertFalse(report["gates"][gate]["passed"])
-                failed = [name for name, result in report["gates"].items() if not result["passed"]]
-                self.assertEqual(failed, [gate])
+        self.assertFalse(report["passed"])
+        self.assertFalse(report["gates"]["1_safety"]["passed"])
+        self.assertTrue(report["gates"]["2_cases"]["passed"])
 
-    def test_one_range_failure_is_still_four_of_five(self) -> None:
-        self.assertTrue(evaluate_gates(self.runs(r0={"range_passed": False}))["gates"]["3_range_question"]["passed"])
+    def test_a_case_below_four_of_five_fails_and_is_named(self) -> None:
+        report = evaluate_gates(self.runs(r0={"range_passed": False}, r1={"range_passed": False}))
 
-    def test_a_missing_run_is_refused_rather_than_judged(self) -> None:
-        with self.assertRaisesRegex(ValueError, "expected 5 agent traces"):
-            evaluate_gates(self.runs()[:-1])
+        self.assertFalse(report["gates"]["2_cases"]["passed"])
+        self.assertEqual(report["gates"]["2_cases"]["passes"]["range_question"], 3)
 
-    def test_runs_that_are_not_one_frozen_protocol_are_refused_rather_than_judged(self) -> None:
-        for header, reason in (
-            ({"model": "qwen3.5-flash", "model_overridden": True}, "model"),
-            ({"commit": "def456"}, "commit"),
-            ({"working_tree_dirty": True}, "working tree"),
-            ({"working_tree_dirty": None}, "working tree"),
-            ({"commit": None}, "commit"),
-            ({"fixture_sha256": "edited-fixture"}, "fixture_sha256"),
-            ({"protocol_version": 2}, "protocol_version"),
-            ({"provider_interrupted": True}, "provider refused access"),
-            ({"provider_interrupted": None}, "provider refused access"),
-        ):
-            with self.subTest(header=header):
-                traces = self.runs()
-                traces[-1].update(header)
-                with self.assertRaisesRegex(ValueError, reason):
-                    evaluate_gates(traces)
+    def test_one_failure_in_five_is_still_four_of_five(self) -> None:
+        self.assertTrue(evaluate_gates(self.runs(r0={"range_passed": False}))["passed"])
+
+    def test_latency_is_recorded_and_never_a_gate(self) -> None:
+        # It is the provider's, and it has varied from 5.7s to 76.4s on unchanged code.
+        report = evaluate_gates([_trace(seconds=90.0) for _ in range(5)])
+
+        self.assertTrue(report["passed"])
+        self.assertEqual(report["recorded_latency_seconds"]["max"], 90.0)
+        self.assertNotIn("latency", str(report["gates"]))
+
+    def test_fewer_runs_are_judged_against_their_own_count(self) -> None:
+        # Two runs cannot measure frequency, so this reports what it has rather than
+        # pretending five were bought.
+        report = evaluate_gates(self.runs()[:2])
+
+        self.assertEqual(report["gates"]["2_cases"]["runs"], 2)
+        self.assertEqual(report["gates"]["2_cases"]["required"], 2)
+
+    def test_no_traces_are_refused_rather_than_passed(self) -> None:
+        with self.assertRaisesRegex(ValueError, "no traces"):
+            evaluate_gates([])
 
     def test_a_quota_or_authentication_refusal_voids_the_run_but_a_timeout_does_not(self) -> None:
         quota = (

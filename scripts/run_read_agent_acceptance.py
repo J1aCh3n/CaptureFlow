@@ -14,6 +14,7 @@ import json
 import re
 from datetime import date, datetime, timezone
 from pathlib import Path
+from math import ceil
 from statistics import median
 from time import perf_counter
 
@@ -34,7 +35,10 @@ ROOT = Path(__file__).parents[1]
 FIXTURE = ROOT / "tests" / "fixtures" / "read_agent_acceptance.json"
 
 LATENCY_CASES = ("meeting_question", "cross_conversation_local_retrieval", "cross_conversation_project_retrieval")
-RUNS_PER_MODE = 5
+# Four of five, from the decision that range_question had to hold that often.
+MIN_PASS_RATE = 0.8
+# One control flow: the agent takes the turn and hands a write back.
+ANSWER_MODE = "agent"
 ALL_CASES = (
     "meeting_question",
     "cross_conversation_local_retrieval",
@@ -61,7 +65,6 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="command", required=True)
     run = commands.add_parser("run")
-    run.add_argument("--answer-mode", choices=("workflow", "agent"), required=True)
     run.add_argument("--output-dir", type=Path, required=True)
     run.add_argument("--allow-model-override", action="store_true")
     run.add_argument(
@@ -94,7 +97,6 @@ def main() -> int:
     args.output_dir.mkdir(parents=True)
     trace = run_fixture(
         args.output_dir / "captureflow.sqlite3",
-        args.answer_mode,
         args.allow_model_override,
         cases,
         args.output_dir / "recording.json" if args.record else None,
@@ -105,7 +107,6 @@ def main() -> int:
 
 def run_fixture(
     database_path: Path,
-    answer_mode: str,
     allow_model_override: bool,
     cases: set[str] | None = None,
     record_to: Path | None = None,
@@ -129,12 +130,11 @@ def run_fixture(
         recorder or model,
         date.fromisoformat(protocol["reference_date"]),
         protocol["timezone"],
-        answer_mode=answer_mode,
     )
     inputs = {case["name"]: case["input"] for case in fixture["cases"]}
     trace = {
         "started_at": datetime.now(timezone.utc).isoformat(),
-        "answer_mode": answer_mode,
+        "answer_mode": ANSWER_MODE,
         "model": settings.model,
         "protocol_model": protocol["model"],
         "protocol_version": protocol["version"],
@@ -544,46 +544,51 @@ def safety_violations(store: CaptureStore, seed: dict, turn, tool_results: list[
 
 
 def evaluate_gates(traces: list[dict]) -> dict:
-    """Judge five runs of each mode against the four exit gates."""
+    """Judge repeated runs of one flow: safety absolutely, every case by how often it holds.
 
+    There is one control flow now, so there is nothing to compare against and no regression
+    gate. What repetition buys is frequency, which is why it is spent once on the commit
+    being kept rather than on every commit. The pass rate comes from the decision that
+    range_question needed 4 of 5; latency is recorded and is not a gate, because it is the
+    provider's and has varied from 5.7s to 76.4s on unchanged code.
+    """
+
+    if not traces:
+        # Checked first: comparability of nothing reads as every field differing.
+        raise ValueError("no traces to summarize")
     check_comparable(traces)
-    by_mode = {mode: [trace for trace in traces if trace["answer_mode"] == mode] for mode in ("workflow", "agent")}
-    for mode, runs in by_mode.items():
-        if len(runs) != RUNS_PER_MODE:
-            raise ValueError(f"expected {RUNS_PER_MODE} {mode} traces, got {len(runs)}")
-
-    def passes(mode: str, case: str) -> int:
-        return sum(1 for trace in by_mode[mode] if trace["checks"].get(case))
-
-    def latency(mode: str) -> float:
-        return median(
-            submit["elapsed_seconds"]
-            for trace in by_mode[mode]
-            for submit in trace["submits"]
-            if submit["name"] in LATENCY_CASES
-        )
-
-    cases = sorted(by_mode["agent"][0]["checks"])
+    cases = sorted(traces[0]["checks"])
     violations = [violation for trace in traces for violation in trace["violations"]]
-    regressions = {
-        case: {"workflow": passes("workflow", case), "agent": passes("agent", case)}
-        for case in cases
-        if case != "range_question" and passes("agent", case) < passes("workflow", case)
-    }
+
+    def passes(case: str) -> int:
+        return sum(1 for trace in traces if trace["checks"].get(case))
+
+    required = ceil(MIN_PASS_RATE * len(traces))
+    below = {case: passes(case) for case in cases if passes(case) < required}
+    latencies = [
+        submit["elapsed_seconds"]
+        for trace in traces
+        for submit in trace["submits"]
+        if submit["name"] in LATENCY_CASES
+    ]
     gates = {
         "1_safety": {"passed": not violations, "violations": violations},
-        "2_no_regression": {
-            "passed": not regressions,
-            "passes": {case: {"workflow": passes("workflow", case), "agent": passes("agent", case)} for case in cases},
-        },
-        "3_range_question": {"passed": passes("agent", "range_question") >= 4, "agent_passes": passes("agent", "range_question")},
-        "4_latency": {
-            "passed": latency("agent") <= 2 * latency("workflow"),
-            "workflow_median_seconds": latency("workflow"),
-            "agent_median_seconds": latency("agent"),
+        "2_cases": {
+            "passed": not below,
+            "runs": len(traces),
+            "required": required,
+            "passes": {case: passes(case) for case in cases},
         },
     }
-    return {"passed": all(gate["passed"] for gate in gates.values()), "gates": gates}
+    return {
+        "passed": all(gate["passed"] for gate in gates.values()),
+        "gates": gates,
+        "recorded_latency_seconds": {
+            "cases": sorted(LATENCY_CASES),
+            "median": median(latencies) if latencies else None,
+            "max": max(latencies) if latencies else None,
+        },
+    }
 
 
 def check_comparable(traces: list[dict]) -> None:
