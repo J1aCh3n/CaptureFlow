@@ -30,7 +30,35 @@ from scripts.run_read_agent_acceptance import (
     seed_database,
 )
 
+from captureflow.read_agent import AgentFinalResponse, AgentModelTurn, AgentToolCall
+from scripts.model_replay import request_digest
+
 from tests.test_replay_acceptance import RECORDING, SEQUENCE
+
+
+def _tools(*calls) -> AgentModelTurn:
+    return AgentModelTurn(
+        tool_calls=[
+            AgentToolCall(id=f"call-{index}", name=name, arguments=arguments)
+            for index, (name, arguments) in enumerate(calls)
+        ]
+    )
+
+
+def _answer(reply: str) -> AgentModelTurn:
+    return AgentModelTurn(final_response=AgentFinalResponse(reply=reply))
+
+
+class _ScriptedTurns:
+    """Answer from a script, recording the digest of each request it was sent."""
+
+    def __init__(self, turns: list[AgentModelTurn]) -> None:
+        self.turns = list(turns)
+        self.sent: list[tuple[str, str, dict]] = []
+
+    def next_read_agent_turn(self, **kwargs) -> AgentModelTurn:
+        self.sent.append(("next_read_agent_turn", request_digest("next_read_agent_turn", kwargs), kwargs))
+        return self.turns.pop(0)
 
 
 class ReplayDeterminismTests(unittest.TestCase):
@@ -66,6 +94,55 @@ class ReplayDeterminismTests(unittest.TestCase):
         difference = first_unreproducible_request(self._one_pass("first"), self._one_pass("second"))
 
         self.assertIsNone(difference, difference)
+
+    def test_a_target_write_turn_is_reproducible_before_it_is_ever_recorded(self) -> None:
+        # Driven by a script rather than a recording, so the question can be asked of a case
+        # that has never been recorded, which is exactly when it needs asking. A target
+        # write searches, changes what it found, and answers: three turns' worth of values
+        # that could each carry a clock.
+        seeded_event = "read-agent-architecture-review"
+
+        def script(seed) -> list:
+            return [
+                _tools(("search_calendar", {})),
+                _tools(("update_event", {"target_id": seeded_event, "date": "2026-09-18", "start_time": "14:00"})),
+                _answer("改好了。"),
+                _tools(("search_project_records", {})),
+                _tools(("transition_record", {"target_id": seed["task"].id, "target_state": "completed"})),
+                _answer("标记完成。"),
+            ]
+
+        sent = [
+            self._scripted_pass(f"target-{attempt}", script, ("event_update", "record_done"))
+            for attempt in ("first", "second")
+        ]
+        difference = first_unreproducible_request(*sent)
+
+        self.assertIsNone(difference, difference)
+
+    def _scripted_pass(self, name: str, script, cases: tuple[str, ...]) -> list:
+        store = CaptureStore(Path(self.temporary_directory.name) / f"{name}.sqlite3")
+        store.initialize()
+        seed = seed_database(store)
+        model = _ScriptedTurns(script(seed))
+        tools = ToolResultRecorder()
+        self.addCleanup(tools.restore)
+        router = ConversationRouterService(
+            store,
+            model,
+            date.fromisoformat(self.fixture["protocol"]["reference_date"]),
+            self.fixture["protocol"]["timezone"],
+        )
+        inputs = {case["name"]: case["input"] for case in self.fixture["cases"]}
+        wanted = {case: (conversation, message_id) for case, conversation, message_id in CASE_SEQUENCE}
+        conversations = {
+            "main": seed["main_conversation"].id,
+            "later": seed["later_conversation"].id,
+        }
+        for case in cases:
+            conversation, message_id = wanted[case]
+            router.submit(conversations[conversation], inputs[case], message_id)
+        return model.sent
 
     def test_the_sequence_the_replay_uses_is_the_one_the_live_run_submits(self) -> None:
         # Two lists of the same turns would drift, and the digests would then refuse a

@@ -40,7 +40,9 @@ MIN_PASS_RATE = 0.8
 # One control flow: the agent takes the turn and hands a write back.
 ANSWER_MODE = "agent"
 # The only cases whose turn is expected to store a change.
-WRITE_CASES = frozenset({"note_write", "idea_write", "record_write", "event_write", "event_update"})
+WRITE_CASES = frozenset(
+    {"note_write", "idea_write", "record_write", "event_write", "event_update", "record_done"}
+)
 ALL_CASES = (
     "meeting_question",
     "cross_conversation_local_retrieval",
@@ -55,6 +57,7 @@ ALL_CASES = (
     "record_write",
     "event_write",
     "event_update",
+    "record_done",
 )
 CASE_SEQUENCE = (
     ("meeting_question", "main", "read-agent-meeting"),
@@ -70,6 +73,7 @@ CASE_SEQUENCE = (
     ("record_write", "main", "read-agent-record-write"),
     ("event_write", "main", "read-agent-event-write"),
     ("event_update", "main", "read-agent-event-update"),
+    ("record_done", "main", "read-agent-record-done"),
     ("answer_replay", "main", "read-agent-meeting"),
 )
 # stored_instruction runs two submits and answer_replay re-sends an earlier message, so the
@@ -291,7 +295,7 @@ def run_fixture(
         moved = submit("event_update", main_id, "read-agent-event-update")
         checked(
             "event_update",
-            lambda: handed_off_an_update(
+            lambda: updated_an_event(
                 store,
                 moved,
                 seed,
@@ -299,6 +303,9 @@ def run_fixture(
                 date.fromisoformat(protocol["event_update_date"]),
             ),
         )
+    if "record_done" in cases:
+        finished = submit("record_done", main_id, "read-agent-record-done")
+        checked("record_done", lambda: finished_a_record(store, finished, seed["task"].id))
     if "answer_replay" in cases:
         replay = submit("answer_replay", main_id, "read-agent-meeting")
         checked(
@@ -592,20 +599,34 @@ def stored_an_event(store: CaptureStore, turn, seed: dict, on: date) -> bool:
     return len(created) == 1 and created[0].start_date == on and _quotes_the_turn(created[0], turn)
 
 
-def handed_off_an_update(store: CaptureStore, turn, seed: dict, event_id: str, on: date) -> bool:
-    """Changing something that exists is still the router's: the agent hands it back.
+def updated_an_event(store: CaptureStore, turn, seed: dict, event_id: str, on: date) -> bool:
+    """The agent changed something that already existed, which means it searched for it first.
 
-    This is the last path the agent does not own, and the one that needs a target ID, so it
-    is also what the provenance ledger has to take over before the agent can own it.
+    The ledger is what lets it: the id has to be one a search returned in this same turn,
+    so a target the model only remembered is refused before any write.
     """
 
     if turn is None or turn.failure_reason is not None:
         return False
-    if turn.agent_stop_reason != "handed_off":
+    if turn.agent_stop_reason != "completed":
         return False
     if [getattr(operation, "event_id", None) for operation in turn.operations] != [event_id]:
         return False
+    if [getattr(operation, "status", None) for operation in turn.operations] != ["committed"]:
+        return False
     return store.get_calendar_event(event_id).start_date == on
+
+
+def finished_a_record(store: CaptureStore, turn, record_id: str) -> bool:
+    """The agent finished a tracker record it searched for."""
+
+    if turn is None or turn.failure_reason is not None:
+        return False
+    if turn.agent_stop_reason != "completed":
+        return False
+    if [getattr(operation, "status", None) for operation in turn.operations] != ["committed"]:
+        return False
+    return store.get_project_record(record_id).state == "completed"
 
 
 def answered_without_sources(store: CaptureStore, turn, tool_results: list[dict]) -> bool:

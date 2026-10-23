@@ -86,6 +86,9 @@ class _TurnWriter:
         self.candidates = candidates
         self.operations: tuple[RouterOperation, ...] = ()
         self.replies: list[str] = []
+        # What the write was, named by the step that made it rather than guessed from the
+        # operation's type, which three kinds of write now share.
+        self.outcomes: list[str] = []
 
     @property
     def wrote(self) -> bool:
@@ -95,10 +98,7 @@ class _TurnWriter:
     def outcome(self) -> str | None:
         """What the turn did, in the same vocabulary a routed write reports."""
 
-        if not self.operations:
-            return None
-        first = self.operations[0]
-        return first.tool_name if isinstance(first, ToolOperation) else "tracker_change"
+        return self.outcomes[0] if self.outcomes else None
 
     def save_item(self, kind: str, content: str) -> SavedItem:
         operations, reply = self.service._save_item(
@@ -111,7 +111,72 @@ class _TurnWriter:
         )
         self.operations = (*self.operations, *operations)
         self.replies.append(reply)
+        self.outcomes.append(f"save_{kind}")
         return self.service.store.get_saved_item(_stable_id(self.user_message.id, f"contextual-{kind}"))
+
+    def change_target(
+        self, action: str, target: CalendarEvent | ProjectRecord, **fields: Any
+    ) -> tuple[CalendarEvent | ProjectRecord | None, str]:
+        """Change something already stored, through the router's own validated path.
+
+        The target arrives vouched for by the ledger instead of chosen from a pre-selected
+        candidate list, and is passed on as the only candidate, so every rule the router
+        applies to a target still applies to this one.
+        """
+
+        if action in {"update_event", "delete_event"}:
+            return self._change_event(action, target, **fields)
+        return self._change_record(action, target, **fields)
+
+    def _change_event(
+        self, action: str, target: CalendarEvent, **fields: Any
+    ) -> tuple[CalendarEvent | None, str]:
+        contextual = ContextualAction(
+            action="update_event" if action == "update_event" else "delete_event",
+            target_event_id=target.id,
+            content=fields.pop("title", None),
+            source_message_ids=[self.user_message.id],
+            **fields,
+        )
+        missing = self.service._calendar_clarification_field(contextual)
+        if missing is not None:
+            raise WriteNeedsClarification(self.service._question(missing))
+        step = self.service._update_event if action == "update_event" else self.service._delete_event
+        operations, reply = step(self.user_message, contextual, self.context_window)
+        self.operations = (*self.operations, *operations)
+        self.replies.append(reply)
+        self.outcomes.append(
+            "calendar_update" if action == "update_event" else "calendar_delete_review"
+        )
+        if not operations or operations[0].status != "committed":
+            # A deletion waits for the user, and an update that changed nothing stored nothing.
+            return None, reply
+        return self.service.store.get_calendar_event(target.id), reply
+
+    def _change_record(
+        self, action: str, target: ProjectRecord, **fields: Any
+    ) -> tuple[ProjectRecord | None, str]:
+        operations, reply = self.service._apply_tracker_change(
+            self.user_message,
+            ConversationDecision(
+                intent="tracker_change",
+                project_changes=[ProjectChange(action=action, target_record_id=target.id, **fields)],
+            ),
+            self.context_window,
+            # The ledger's row is the candidate list: the model had to search for it.
+            RouterCandidates(events=(), saved_items=(), project_records=(target,)),
+        )
+        self.operations = (*self.operations, *operations)
+        self.replies.append(reply)
+        self.outcomes.append("tracker_change")
+        committed = [
+            operation
+            for operation in operations
+            if isinstance(operation, ProjectChangeOperation) and operation.status == "committed"
+        ]
+        if not committed:
+            return None, reply
+        return self.service.store.get_project_record(target.id), reply
 
     def create_event(self, **fields: Any) -> tuple[CalendarEvent, str]:
         """Create one calendar event through the router's validated path.
@@ -134,6 +199,7 @@ class _TurnWriter:
         )
         self.operations = (*self.operations, *operations)
         self.replies.append(reply)
+        self.outcomes.append("create_local_event")
         return (
             self.service.store.get_calendar_event(
                 _stable_id(self.user_message.id, "contextual-event")
@@ -159,6 +225,7 @@ class _TurnWriter:
         )
         self.operations = (*self.operations, *operations)
         self.replies.append(reply)
+        self.outcomes.append("tracker_change")
         committed = [
             operation
             for operation in operations

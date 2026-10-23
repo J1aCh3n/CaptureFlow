@@ -17,6 +17,7 @@ class _RecordingWriter:
         self.source_message_id = source_message_id
         self.saved: list[str] = []
         self.events: list[tuple[str, str]] = []
+        self.changed: list[tuple[str, str]] = []
 
     @property
     def wrote(self) -> bool:
@@ -94,6 +95,14 @@ class _RecordingWriter:
         self.events.append((fields["title"], fields["date"]))
         self.saved.append(fields["title"])
         return event, f"Created local calendar event: {event.title}."
+
+    def change_target(self, action, target, **fields):
+        self.changed.append((action, target.id))
+        self.saved.append(target.id)
+        if action in {"delete_event", "supersede_record"}:
+            # Prepared for the user, or held for review: no row to cite.
+            return None, f"{action} is waiting."
+        return target, f"{action} applied."
 
 
 class BoundReadToolsTests(unittest.TestCase):
@@ -727,6 +736,104 @@ class BoundReadToolsTests(unittest.TestCase):
         self.assertEqual(refused.error.category, "retryable")
         self.assertIn("date", refused.error.message)
         self.assertEqual(writer.events, [])
+
+    # The ledger vouching for a write's target
+
+    def test_a_target_the_turn_never_searched_for_is_refused(self) -> None:
+        # This is what replaces the router's pre-selected candidate lists: an id the model
+        # remembered, or read in the conversation, is not evidence that the row is there.
+        event = self._event("existing", "Design review", date(2026, 9, 20))
+        writer = _RecordingWriter(self.store, self.conversation.id, self.source.id)
+        tools = BoundReadTools.for_conversation(self.store, self.conversation.id, writer=writer)
+
+        refused = tools.invoke("update_event", {"target_id": event.id, "start_time": "11:00"})
+
+        self.assertFalse(refused.ok)
+        self.assertEqual(refused.error.category, "stale_target")
+        self.assertIn("search returned in this turn", refused.error.message)
+        self.assertEqual(writer.changed, [])
+
+    def test_a_target_a_search_returned_is_accepted(self) -> None:
+        event = self._event("searched", "Design review", date(2026, 9, 20))
+        writer = _RecordingWriter(self.store, self.conversation.id, self.source.id)
+        tools = BoundReadTools.for_conversation(self.store, self.conversation.id, writer=writer)
+        tools.invoke("search_calendar", {"start_date": "2026-09-20", "end_date": "2026-09-20"})
+
+        changed = tools.invoke("update_event", {"target_id": event.id, "start_time": "11:00"})
+
+        self.assertTrue(changed.ok)
+        self.assertEqual(writer.changed, [("update_event", event.id)])
+
+    def test_a_target_that_changed_after_the_search_is_refused(self) -> None:
+        event = self._event("moved", "Design review", date(2026, 9, 20))
+        writer = _RecordingWriter(self.store, self.conversation.id, self.source.id)
+        tools = BoundReadTools.for_conversation(self.store, self.conversation.id, writer=writer)
+        tools.invoke("search_calendar", {"start_date": "2026-09-20", "end_date": "2026-09-20"})
+        self.store.update_calendar_event(event.id, title="Design review", start_at=date(2026, 9, 21))
+
+        refused = tools.invoke("delete_event", {"target_id": event.id})
+
+        self.assertFalse(refused.ok)
+        self.assertEqual(refused.error.category, "stale_target")
+        self.assertIn("changed after a tool returned it", refused.error.message)
+        self.assertEqual(writer.changed, [])
+
+    def test_a_target_of_the_wrong_kind_is_refused(self) -> None:
+        record = self.store.save_project_record(
+            ProjectRecord(
+                id="a-task",
+                project_id=self.project.id,
+                conversation_id=self.conversation.id,
+                kind="task",
+                content="Measure latency",
+                state="active",
+                source_message_id=self.source.id,
+                source_quote=self.source.content,
+            )
+        )
+        writer = _RecordingWriter(self.store, self.conversation.id, self.source.id)
+        tools = BoundReadTools.for_conversation(self.store, self.conversation.id, writer=writer)
+        tools.invoke("search_project_records", {})
+
+        refused = tools.invoke("update_event", {"target_id": record.id, "start_time": "11:00"})
+
+        self.assertFalse(refused.ok)
+        self.assertEqual(refused.error.category, "stale_target")
+        self.assertIn("not a calendar event", refused.error.message)
+        self.assertEqual(writer.changed, [])
+
+    def test_every_target_tool_asks_the_ledger_first(self) -> None:
+        # One rule, five tools: a new one must not be able to skip it.
+        writer = _RecordingWriter(self.store, self.conversation.id, self.source.id)
+        tools = BoundReadTools.for_conversation(self.store, self.conversation.id, writer=writer)
+
+        for name, arguments in (
+            ("update_event", {"start_time": "11:00"}),
+            ("delete_event", {}),
+            ("transition_record", {"target_state": "completed"}),
+            ("set_deadline", {"due_date": "2026-09-30"}),
+            ("supersede_record", {"kind": "decision", "content": "Use Postgres"}),
+        ):
+            with self.subTest(tool=name):
+                refused = tools.invoke(name, {"target_id": "never-searched-for", **arguments})
+
+                self.assertFalse(refused.ok)
+                self.assertEqual(refused.error.category, "stale_target")
+        self.assertEqual(writer.changed, [])
+
+    def test_a_target_change_is_still_one_change_per_turn(self) -> None:
+        event = self._event("once", "Design review", date(2026, 9, 20))
+        writer = _RecordingWriter(self.store, self.conversation.id, self.source.id)
+        tools = BoundReadTools.for_conversation(self.store, self.conversation.id, writer=writer)
+        tools.invoke("search_calendar", {"start_date": "2026-09-20", "end_date": "2026-09-20"})
+
+        first = tools.invoke("update_event", {"target_id": event.id, "start_time": "11:00"})
+        second = tools.invoke("delete_event", {"target_id": event.id})
+
+        self.assertTrue(first.ok)
+        self.assertFalse(second.ok)
+        self.assertEqual(second.error.category, "conflict")
+        self.assertEqual(writer.changed, [("update_event", event.id)])
 
     def test_decision_history_exposes_replacement_and_update_time(self) -> None:
         original = self.store.save_project_record(

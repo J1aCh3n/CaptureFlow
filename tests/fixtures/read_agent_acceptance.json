@@ -4,7 +4,7 @@
     "timezone": "America/Vancouver",
     "database_seed": "read-agent acceptance seed in scripts/run_read_agent_acceptance.py",
     "model": "qwen3.8-27b",
-    "version": 6,
+    "version": 7,
     "event_write_date": "2026-09-16",
     "event_update_date": "2026-09-18",
     "evidence_regime": "Deterministic replay and unit tests carry behaviour. A live run covers a named case subset per change; repeat runs for variance only on the commit that is kept.",
@@ -24,6 +24,7 @@
     {"name": "idea_write", "input": "想到一个主意：用流式读取来降低延迟。"},
     {"name": "record_write", "input": "加一个任务：排查发布者节点的延迟，9 月 18 号前做完。"},
     {"name": "event_write", "input": "下周三下午三点到四点和导师开会。"},
-    {"name": "event_update", "input": "把架构评审改到下周五下午两点。"}
+    {"name": "event_update", "input": "把架构评审改到下周五下午两点。"},
+    {"name": "record_done", "input": "ROS 2 节点延迟那个排查已经做完了。"}
   ]
 }

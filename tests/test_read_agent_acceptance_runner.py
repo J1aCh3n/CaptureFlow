@@ -12,7 +12,7 @@ from captureflow.project_answer_service import with_stored_dates
 from captureflow.storage import CaptureStore
 from scripts.run_read_agent_acceptance import (
     ALL_CASES,
-    handed_off_an_update,
+    finished_a_record,
     answered_range,
     answered_with,
     answered_without_sources,
@@ -23,6 +23,7 @@ from scripts.run_read_agent_acceptance import (
     selected_cases,
     stored_a_record,
     stored_an_event,
+    updated_an_event,
     stored_an_item,
 )
 
@@ -408,19 +409,14 @@ class WriteCaseChecksTests(unittest.TestCase):
         )
         self.assertFalse(stored_an_event(self.store, self._turn([]), self.seed, date(2026, 9, 17)))
 
-    def test_an_update_must_be_handed_back_and_must_move_the_event(self) -> None:
-        # The one path the agent still does not own, and the one that needs a target ID.
+    def test_an_update_must_move_the_event_and_be_the_agent_s_own(self) -> None:
         # An event with no stored end, so the unit test can move it with one store call.
         target = next(event for event in self.seed["events"] if event.end_at is None)
-        moved = SimpleNamespace(event_id=target.id)
+        committed = SimpleNamespace(event_id=target.id, status="committed")
 
         self.assertFalse(
-            handed_off_an_update(
-                self.store,
-                self._turn_with_operations([moved]),
-                self.seed,
-                target.id,
-                date(2026, 9, 18),
+            updated_an_event(
+                self.store, self._completed([committed]), self.seed, target.id, date(2026, 9, 18)
             ),
             "the seeded event has not moved, so the case must not pass",
         )
@@ -431,18 +427,44 @@ class WriteCaseChecksTests(unittest.TestCase):
         )
 
         self.assertTrue(
-            handed_off_an_update(
+            updated_an_event(
+                self.store, self._completed([committed]), self.seed, target.id, date(2026, 9, 18)
+            )
+        )
+        # A deletion waiting for the user has not changed anything yet.
+        waiting = SimpleNamespace(event_id=target.id, status="review")
+        self.assertFalse(
+            updated_an_event(
+                self.store, self._completed([waiting]), self.seed, target.id, date(2026, 9, 18)
+            )
+        )
+        # A turn the agent handed back is not its own write.
+        self.assertFalse(
+            updated_an_event(
                 self.store,
-                self._turn_with_operations([moved]),
+                self._turn_with_operations([committed]),
                 self.seed,
                 target.id,
                 date(2026, 9, 18),
             )
         )
-        # A turn the agent finished itself is not a hand-off, whatever moved.
-        finished = self._turn(["create_local_event"])
-        self.assertFalse(
-            handed_off_an_update(self.store, finished, self.seed, target.id, date(2026, 9, 18))
+
+    def test_a_finished_record_must_actually_be_completed(self) -> None:
+        task = self.seed["task"]
+        committed = SimpleNamespace(status="committed")
+
+        self.assertFalse(finished_a_record(self.store, self._completed([committed]), task.id))
+        self.store.transition_project_record(task.id, "completed")
+
+        self.assertTrue(finished_a_record(self.store, self._completed([committed]), task.id))
+        self.assertFalse(finished_a_record(self.store, self._completed([]), task.id))
+
+    def _completed(self, operations):
+        """A turn the agent finished itself, carrying the operations it stored."""
+
+        turn = self._turn_with_operations(operations)
+        return SimpleNamespace(
+            **{**turn.__dict__, "agent_stop_reason": "completed"}
         )
 
     def _event_on(self, day: date) -> None:

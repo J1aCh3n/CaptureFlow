@@ -449,6 +449,113 @@ class ConversationRouterServiceTests(unittest.TestCase):
         self.assertEqual(feedback["error"]["category"], "clarification_required")
         self.assertIn("repeating schedule", feedback["error"]["message"])
 
+    def _searched_then(self, tool: str, arguments: dict, search: dict | None = None):
+        """An agent turn that searches, then changes what it found."""
+
+        return ScriptedContextualModel(
+            [],
+            agent_turns=[
+                AgentModelTurn(
+                    tool_calls=[
+                        AgentToolCall(
+                            id="search",
+                            name=search["name"] if search else "search_calendar",
+                            arguments=search["arguments"] if search else {},
+                        )
+                    ]
+                ),
+                AgentModelTurn(tool_calls=[AgentToolCall(id="change", name=tool, arguments=arguments)]),
+                AgentModelTurn(final_response=AgentFinalResponse(reply="改好了。")),
+            ],
+        )
+
+    def test_the_agent_updates_an_event_it_searched_for(self) -> None:
+        event = self._saved_event("target-review", "架构评审", datetime.fromisoformat("2026-09-15T10:00:00-07:00"))
+        model = self._searched_then("update_event", {"target_id": event.id, "date": "2026-09-18", "start_time": "14:00"})
+
+        turn = self.submit(model, "把架构评审改到下周五下午两点。", "agent-update")
+
+        updated = self.store.get_calendar_event(event.id)
+        self.assertEqual(model.calls, [])
+        self.assertEqual(turn.outcome, "calendar_update")
+        self.assertEqual(updated.start_at, datetime.fromisoformat("2026-09-18T14:00:00-07:00"))
+        self.assertEqual(
+            [operation.status for operation in turn.operations], ["committed"]
+        )
+
+    def test_a_deletion_the_agent_asks_for_still_waits_for_the_user(self) -> None:
+        # There is no checkpointer, so a deletion is a stored operation the next turn
+        # confirms, exactly as on the routed path.
+        event = self._saved_event("doomed", "发布演示", date(2026, 9, 20))
+        model = self._searched_then("delete_event", {"target_id": event.id})
+
+        turn = self.submit(model, "把发布演示删掉。", "agent-delete")
+
+        self.assertEqual([operation.status for operation in turn.operations], ["review"])
+        self.assertEqual(self.store.get_calendar_event(event.id).status, "active")
+        tool_messages = [
+            message
+            for message in model.agent_calls[2]["messages"]
+            if message["role"] == "tool"
+        ]
+        result = json.loads(tool_messages[-1]["content"])
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["items"], [])
+        self.assertIn("Confirm", result["detail"])
+
+    def test_the_agent_finishes_a_task_it_searched_for(self) -> None:
+        task = self._project_record("done-task", "task", "active", "排查延迟")
+        model = self._searched_then(
+            "transition_record",
+            {"target_id": task.id, "target_state": "completed"},
+            search={"name": "search_project_records", "arguments": {}},
+        )
+
+        turn = self.submit(model, "延迟排查做完了。", "agent-transition")
+
+        self.assertEqual(turn.outcome, "tracker_change")
+        self.assertEqual(self.store.get_project_record(task.id).state, "completed")
+
+    def test_a_deadline_the_agent_sets_is_attached_by_python(self) -> None:
+        task = self._project_record("dated-task", "task", "active", "写报告")
+        model = self._searched_then(
+            "set_deadline",
+            {"target_id": task.id, "due_date": "2026-09-18", "due_time": "17:00"},
+            search={"name": "search_project_records", "arguments": {}},
+        )
+
+        self.submit(model, "报告周五下午五点前交。", "agent-deadline")
+
+        self.assertEqual(
+            self.store.get_project_record(task.id).due_at,
+            datetime.fromisoformat("2026-09-18T17:00:00-07:00"),
+        )
+
+    def test_a_target_the_agent_did_not_search_for_is_refused_before_any_write(self) -> None:
+        event = self._saved_event("unsearched", "代码冻结", date(2026, 9, 11))
+        model = ScriptedContextualModel(
+            [],
+            agent_turns=[
+                AgentModelTurn(
+                    tool_calls=[
+                        AgentToolCall(
+                            id="change",
+                            name="delete_event",
+                            arguments={"target_id": event.id},
+                        )
+                    ]
+                ),
+                AgentModelTurn(final_response=AgentFinalResponse(reply="我需要先找到它。")),
+            ],
+        )
+
+        turn = self.submit(model, "把代码冻结删掉。", "agent-unsearched")
+
+        self.assertEqual(turn.operations, ())
+        self.assertEqual(self.store.get_calendar_event(event.id).status, "active")
+        feedback = json.loads(model.agent_calls[1]["messages"][-1]["content"])
+        self.assertEqual(feedback["error"]["category"], "stale_target")
+
     def test_a_write_is_reported_even_when_the_turn_runs_out_of_budget_after_it(self) -> None:
         # The note is in SQLite by then, so a reply that did not mention it would be false.
         save = AgentModelTurn(
