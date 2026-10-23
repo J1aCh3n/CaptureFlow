@@ -73,15 +73,32 @@ class _TurnWriter:
     keeps a prepared operation's stable ID unique and a crash in the middle recoverable.
     """
 
-    def __init__(self, service: "ConversationRouterService", user_message: Message) -> None:
+    def __init__(
+        self,
+        service: "ConversationRouterService",
+        user_message: Message,
+        context_window: ContextWindow,
+        candidates: RouterCandidates,
+    ) -> None:
         self.service = service
         self.user_message = user_message
+        self.context_window = context_window
+        self.candidates = candidates
         self.operations: tuple[RouterOperation, ...] = ()
         self.replies: list[str] = []
 
     @property
     def wrote(self) -> bool:
         return bool(self.operations)
+
+    @property
+    def outcome(self) -> str | None:
+        """What the turn did, in the same vocabulary a routed write reports."""
+
+        if not self.operations:
+            return None
+        first = self.operations[0]
+        return first.tool_name if isinstance(first, ToolOperation) else "tracker_change"
 
     def save_item(self, kind: str, content: str) -> SavedItem:
         operations, reply = self.service._save_item(
@@ -95,6 +112,38 @@ class _TurnWriter:
         self.operations = (*self.operations, *operations)
         self.replies.append(reply)
         return self.service.store.get_saved_item(_stable_id(self.user_message.id, f"contextual-{kind}"))
+
+    def create_record(self, **fields: Any) -> tuple[ProjectRecord | None, str]:
+        """Create one tracker record through the router's validated path.
+
+        Returns the stored row, or None when the change is held for review, which is what
+        happens to a second decision or constraint.
+        """
+
+        operations, reply = self.service._apply_tracker_change(
+            self.user_message,
+            ConversationDecision(
+                intent="tracker_change",
+                project_changes=[ProjectChange(action="create_record", **fields)],
+            ),
+            self.context_window,
+            self.candidates,
+        )
+        self.operations = (*self.operations, *operations)
+        self.replies.append(reply)
+        committed = [
+            operation
+            for operation in operations
+            if isinstance(operation, ProjectChangeOperation) and operation.status == "committed"
+        ]
+        if not committed:
+            return None, reply
+        return (
+            self.service.store.get_project_record(
+                str(uuid5(NAMESPACE_URL, f"captureflow:project-change-record:{committed[0].id}"))
+            ),
+            reply,
+        )
 
 
 class RouterState(TypedDict, total=False):
@@ -304,7 +353,9 @@ class ConversationRouterService:
     def _agent_front(self, state: RouterState) -> RouterState:
         """Let the agent take the turn; a write it hands back continues to the router."""
 
-        writer = _TurnWriter(self, state["user_message"])
+        writer = _TurnWriter(
+            self, state["user_message"], state["context_window"], state["candidates"]
+        )
         tools = BoundReadTools.for_conversation(self.store, state["conversation_id"], writer=writer)
         prompt = (
             "You are CaptureFlow's local information agent. Use the available search tools "
@@ -448,7 +499,7 @@ class ConversationRouterService:
             state["context_window"],
             state["candidates"],
             operations,
-            outcome=outcome if not operations else writer.operations[0].tool_name,
+            outcome=outcome if writer is None or writer.outcome is None else writer.outcome,
             model_calls=usage.model_calls,
             model_seconds=state.get("model_seconds", 0.0) + usage.model_seconds,
             local_seconds=usage.tool_seconds,

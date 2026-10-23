@@ -100,19 +100,50 @@ class SearchSavedItemsArgs(_KeywordArguments):
     )
 
 
-class SaveNoteArgs(_ToolArguments):
+class SaveItemArgs(_ToolArguments):
     content: str = Field(
         min_length=1,
         max_length=4_000,
-        description="The note to store, in the user's own words. Keep what the message says; "
+        description="The text to store, in the user's own words. Keep what the message says; "
         "do not add anything it does not.",
     )
 
     @field_validator("content")
     @classmethod
-    def note_content_is_not_whitespace(cls, value: str) -> str:
+    def saved_content_is_not_whitespace(cls, value: str) -> str:
         if not value.strip():
-            raise ValueError("a note must not be blank")
+            raise ValueError("stored text must not be blank")
+        return value
+
+
+class CreateRecordArgs(_ToolArguments):
+    """The rules a tracker record follows, as its parameters rather than as prose."""
+
+    kind: Literal["task", "milestone", "decision", "constraint", "open_question", "blocker"] = Field(
+        description="What the message states. A deadline belongs to a task; a decision or "
+        "constraint that replaces an earlier one is not created here."
+    )
+    content: str = Field(min_length=1, max_length=4_000, description="The record's text.")
+    rationale: str | None = Field(
+        default=None, max_length=1_000, description="Why, when the message gives a reason."
+    )
+    due_date: str | None = Field(
+        default=None,
+        pattern=r"^\d{4}-\d{2}-\d{2}$",
+        description="A deadline the message states, as YYYY-MM-DD. Resolve wording such as "
+        "下周一 from reference_date and the supplied calendar; omit it when the message states none.",
+    )
+    due_time: str | None = Field(
+        default=None,
+        pattern=r"^([01]\d|2[0-3]):[0-5]\d$",
+        description="The deadline's clock time, 24-hour HH:MM, only when the message states one.",
+    )
+
+    @field_validator("content")
+    @classmethod
+    def record_content_is_not_whitespace(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("a record must not be blank")
         return value
 
 
@@ -123,6 +154,8 @@ class TurnWriter(Protocol):
     def wrote(self) -> bool: ...
 
     def save_item(self, kind: str, content: str) -> SavedItem: ...
+
+    def create_record(self, **fields: Any) -> tuple[ProjectRecord | None, str]: ...
 
 
 class ReadToolError(BaseModel):
@@ -143,6 +176,9 @@ class ReadToolResult(BaseModel):
     # them matched a keyword. Without them an empty page cannot be told apart from an empty scope.
     total: int | None = None
     keyword_matches: int | None = None
+    # What a write did beyond returning its row, such as a deadline that was not kept or a
+    # change held for review.
+    detail: str | None = None
     error: ReadToolError | None = None
 
     @model_validator(mode="after")
@@ -220,15 +256,30 @@ class BoundReadTools:
             ),
         }
         if self.writer is not None:
-            definitions["save_note"] = ReadToolDefinition(
-                name="save_note",
-                description=(
-                    "Store a note the message asks you to keep. CaptureFlow writes it, checks it and "
-                    "returns the stored row, which you may cite. One stored change per turn: a second "
-                    "write is refused."
-                ),
-                arguments_model=SaveNoteArgs,
-            )
+            # One stored change per turn, across every write tool: the turn is what a
+            # prepared operation's stable ID is derived from.
+            for name, what in (("save_note", "note"), ("save_idea", "idea")):
+                definitions[name] = ReadToolDefinition(
+                    name=name,
+                    description=(
+                        f"Store {'a' if what == 'note' else 'an'} {what} the message asks you to keep. "
+                        "CaptureFlow writes it, checks it and returns the stored row, which you may "
+                        "cite. One stored change per turn: a second write is refused."
+                    ),
+                    arguments_model=SaveItemArgs,
+                )
+            if self.project is not None:
+                definitions["create_record"] = ReadToolDefinition(
+                    name="create_record",
+                    description=(
+                        "Create a tracker record in the current project for work, a milestone, a "
+                        "decision, a constraint, an open question or a blocker the message states. "
+                        "CaptureFlow checks it, stores it and returns the row, which you may cite. "
+                        "Finishing or replacing a record that already exists is not done here. One "
+                        "stored change per turn: a second write is refused."
+                    ),
+                    arguments_model=CreateRecordArgs,
+                )
         if self.project is not None:
             definitions["search_project_records"] = ReadToolDefinition(
                 name="search_project_records",
@@ -329,8 +380,10 @@ class BoundReadTools:
             return self._search_calendar(parsed)
         if name == "search_project_records":
             return self._search_project_records(parsed)
-        if name == "save_note":
-            return self._save_note(parsed)
+        if name in {"save_note", "save_idea"}:
+            return self._save_item(name.removeprefix("save_"), parsed)
+        if name == "create_record":
+            return self._create_record(parsed)
         if name == "search_saved_items":
             return self._search_saved_items(parsed)
         raise AssertionError(f"unhandled read tool: {name}")
@@ -403,19 +456,52 @@ class BoundReadTools:
             keyword_matches=keyword_matches,
         )
 
-    def _save_note(self, arguments: _ToolArguments) -> ReadToolResult:
-        if not isinstance(arguments, SaveNoteArgs):
-            raise TypeError("save_note received unexpected arguments")
+    def _save_item(self, kind: str, arguments: _ToolArguments) -> ReadToolResult:
+        if not isinstance(arguments, SaveItemArgs):
+            raise TypeError("a save tool received unexpected arguments")
+        already = self._already_wrote()
+        if already is not None:
+            return already
         assert self.writer is not None
-        if self.writer.wrote:
-            # One stored change per turn: it is what keeps a prepared operation's stable ID
-            # unique, and so what makes a crash in the middle of a turn recoverable.
-            return _error("conflict", "This turn has already stored a change; nothing was written.")
-        item = self.writer.save_item("note", arguments.content)
-        scope_kind: ScopeKind = "project" if self.project is not None else "workspace"
-        scope_id = self.project.id if self.project is not None else self.conversation.workspace_id
+        item = self.writer.save_item(kind, arguments.content)
+        scope_kind, scope_id = self._write_scope()
         self._observe([item], "saved_item", scope_kind, scope_id)
         return ReadToolResult(ok=True, scope=scope_kind, items=[_saved_item(item)], total=1)
+
+    def _create_record(self, arguments: _ToolArguments) -> ReadToolResult:
+        if not isinstance(arguments, CreateRecordArgs):
+            raise TypeError("create_record received unexpected arguments")
+        if self.project is None:
+            return _error("policy_denied", "No project is available in the current scope.")
+        already = self._already_wrote()
+        if already is not None:
+            return already
+        assert self.writer is not None
+        try:
+            record, note = self.writer.create_record(**arguments.model_dump())
+        except ValueError as error:
+            # A rule refusing the change is the model's to read and react to, not a failed turn.
+            return _error("policy_denied", f"The change was refused: {error}")
+        if record is None:
+            # Stored, but awaiting review rather than applied, so there is no row to cite.
+            return ReadToolResult(ok=True, scope="project", items=[], total=0, detail=note)
+        self._observe([record], "project_record", "project", self.project.id)
+        return ReadToolResult(
+            ok=True, scope="project", items=[_project_record_item(record)], total=1, detail=note
+        )
+
+    def _already_wrote(self) -> ReadToolResult | None:
+        """One stored change per turn: it is what keeps a prepared operation's stable ID
+        unique, and so what makes a crash in the middle of a turn recoverable."""
+
+        if self.writer is not None and self.writer.wrote:
+            return _error("conflict", "This turn has already stored a change; nothing was written.")
+        return None
+
+    def _write_scope(self) -> tuple[ScopeKind, str]:
+        if self.project is not None:
+            return "project", self.project.id
+        return "workspace", self.conversation.workspace_id
 
     def _search_saved_items(self, arguments: _ToolArguments) -> ReadToolResult:
         if not isinstance(arguments, SearchSavedItemsArgs):

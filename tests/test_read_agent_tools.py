@@ -25,7 +25,7 @@ class _RecordingWriter:
         source = self.store.get_message(self.source_message_id)
         item = self.store.save_saved_item(
             SavedItem(
-                id=f"written-{len(self.saved)}",
+                id=f"written-{kind}-{len(self.saved)}",
                 conversation_id=self.conversation_id,
                 kind=kind,
                 content=content,
@@ -35,6 +35,29 @@ class _RecordingWriter:
         )
         self.saved.append(content)
         return item
+
+    def create_record(self, **fields) -> tuple[ProjectRecord | None, str]:
+        source = self.store.get_message(self.source_message_id)
+        # The rule the real path applies: an identical active record is refused.
+        existing = self.store.list_project_records("current-project", states=("active",))
+        if any(
+            row.kind == fields["kind"] and row.content == fields["content"] for row in existing
+        ):
+            raise ValueError("an identical active project record already exists")
+        record = self.store.save_project_record(
+            ProjectRecord(
+                id=f"written-record-{len(self.saved)}",
+                project_id="current-project",
+                conversation_id=self.conversation_id,
+                kind=fields["kind"],
+                content=fields["content"],
+                state="active",
+                source_message_id=source.id,
+                source_quote=source.content,
+            )
+        )
+        self.saved.append(fields["content"])
+        return record, "Tracker update applied."
 
 
 class BoundReadToolsTests(unittest.TestCase):
@@ -512,6 +535,102 @@ class BoundReadToolsTests(unittest.TestCase):
         self.assertEqual(second.error.category, "conflict")
         self.assertEqual(writer.saved, ["First note."])
         self.assertTrue(tools.wrote_this_turn)
+
+    def test_an_idea_is_saved_by_its_own_tool_and_kept_apart_from_notes(self) -> None:
+        writer = _RecordingWriter(self.store, self.conversation.id, self.source.id)
+        tools = BoundReadTools.for_conversation(self.store, self.conversation.id, writer=writer)
+
+        result = tools.invoke("save_idea", {"content": "Try a streaming reader."})
+
+        self.assertTrue(result.ok)
+        ideas = self.store.list_saved_items(workspace_id=self.conversation.workspace_id, kinds=("idea",))
+        self.assertEqual([item.content for item in ideas], ["Try a streaming reader."])
+        self.assertEqual(result.items[0]["kind"], "idea")
+        self.assertEqual(tools.resolve_observed([ideas[0].id])[0].id, ideas[0].id)
+
+    def test_one_change_per_turn_spans_every_write_tool(self) -> None:
+        # The rule is about the turn, not about one tool: a note then a record would be two
+        # stored changes, which the stable IDs cannot represent.
+        writer = _RecordingWriter(self.store, self.conversation.id, self.source.id)
+        tools = BoundReadTools.for_conversation(self.store, self.conversation.id, writer=writer)
+
+        first = tools.invoke("save_note", {"content": "A note."})
+        second = tools.invoke("create_record", {"kind": "task", "content": "A task."})
+        third = tools.invoke("save_idea", {"content": "An idea."})
+
+        self.assertTrue(first.ok)
+        for refused in (second, third):
+            with self.subTest(tool=refused):
+                self.assertFalse(refused.ok)
+                self.assertEqual(refused.error.category, "conflict")
+        self.assertEqual(writer.saved, ["A note."])
+
+    def test_a_tracker_record_needs_a_project(self) -> None:
+        conversation = self.store.save_conversation(Conversation(id="loose", title="Loose"))
+        writer = _RecordingWriter(self.store, conversation.id, self.source.id)
+        tools = BoundReadTools.for_conversation(self.store, conversation.id, writer=writer)
+
+        offered = {definition["function"]["name"] for definition in tools.definitions_for_model()}
+        refused = tools.invoke("create_record", {"kind": "task", "content": "A task."})
+
+        self.assertNotIn("create_record", offered)
+        self.assertIn("save_note", offered)
+        self.assertFalse(refused.ok)
+        self.assertEqual(refused.error.category, "policy_denied")
+        self.assertEqual(writer.saved, [])
+
+    def test_a_created_record_comes_back_so_the_reply_can_cite_it(self) -> None:
+        writer = _RecordingWriter(self.store, self.conversation.id, self.source.id)
+        tools = BoundReadTools.for_conversation(self.store, self.conversation.id, writer=writer)
+
+        result = tools.invoke(
+            "create_record", {"kind": "task", "content": "Measure publisher latency."}
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.items[0]["kind"], "task")
+        self.assertEqual(tools.resolve_observed([result.items[0]["id"]])[0].content, "Measure publisher latency.")
+
+    def test_a_rule_that_refuses_a_record_is_reported_rather_than_raised(self) -> None:
+        writer = _RecordingWriter(self.store, self.conversation.id, self.source.id)
+        tools = BoundReadTools.for_conversation(self.store, self.conversation.id, writer=writer)
+
+        self.store.save_project_record(
+            ProjectRecord(
+                id="already-there",
+                project_id=self.project.id,
+                conversation_id=self.conversation.id,
+                kind="task",
+                content="Measure latency.",
+                state="active",
+                source_message_id=self.source.id,
+                source_quote=self.source.content,
+            )
+        )
+
+        refused = tools.invoke("create_record", {"kind": "task", "content": "Measure latency."})
+
+        self.assertFalse(refused.ok)
+        self.assertEqual(refused.error.category, "policy_denied")
+        self.assertIn("already exists", refused.error.message)
+
+    def test_a_record_the_schema_refuses_writes_nothing(self) -> None:
+        writer = _RecordingWriter(self.store, self.conversation.id, self.source.id)
+        tools = BoundReadTools.for_conversation(self.store, self.conversation.id, writer=writer)
+
+        for arguments, reason in (
+            ({"kind": "task"}, "content"),
+            ({"kind": "chore", "content": "x"}, "kind"),
+            ({"kind": "task", "content": "x", "due_date": "next Monday"}, "due_date"),
+            ({"kind": "task", "content": "x", "due_time": "3pm"}, "due_time"),
+        ):
+            with self.subTest(arguments=sorted(arguments)):
+                refused = tools.invoke("create_record", arguments)
+
+                self.assertFalse(refused.ok)
+                self.assertEqual(refused.error.category, "retryable")
+                self.assertIn(reason, refused.error.message)
+                self.assertEqual(writer.saved, [])
 
     def test_decision_history_exposes_replacement_and_update_time(self) -> None:
         original = self.store.save_project_record(

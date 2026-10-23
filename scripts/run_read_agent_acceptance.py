@@ -40,7 +40,7 @@ MIN_PASS_RATE = 0.8
 # One control flow: the agent takes the turn and hands a write back.
 ANSWER_MODE = "agent"
 # The only cases whose turn is expected to store a change.
-WRITE_CASES = frozenset({"note_write", "event_write"})
+WRITE_CASES = frozenset({"note_write", "idea_write", "record_write", "event_write"})
 ALL_CASES = (
     "meeting_question",
     "cross_conversation_local_retrieval",
@@ -51,6 +51,8 @@ ALL_CASES = (
     "stored_instruction",
     "answer_replay",
     "note_write",
+    "idea_write",
+    "record_write",
     "event_write",
 )
 # A case that reads an earlier case's submit cannot stand on its own: answer_replay
@@ -251,7 +253,13 @@ def run_fixture(
         )
     if "note_write" in cases:
         noted = submit("note_write", main_id, "read-agent-note-write")
-        checked("note_write", lambda: stored_a_note(store, noted, seed, "延迟排查"))
+        checked("note_write", lambda: stored_an_item(store, noted, seed, "note", "延迟排查"))
+    if "idea_write" in cases:
+        mused = submit("idea_write", main_id, "read-agent-idea-write")
+        checked("idea_write", lambda: stored_an_item(store, mused, seed, "idea", "流式"))
+    if "record_write" in cases:
+        tracked = submit("record_write", main_id, "read-agent-record-write")
+        checked("record_write", lambda: stored_a_record(store, tracked, seed, "task", "发布者"))
     if "event_write" in cases:
         scheduled = submit("event_write", main_id, "read-agent-event-write")
         checked(
@@ -417,6 +425,7 @@ def seed_database(store: CaptureStore) -> dict:
         "later_conversation": later,
         "meeting": meeting,
         "events": [*events, other_event],
+        "project": project,
         "task": task,
         "note": note,
         # Content the current project must never show; the other project's event may still
@@ -488,26 +497,54 @@ def answered_range(store: CaptureStore, turn, events: list[CalendarEvent], first
     return all(event.start_at.isoformat() in turn.assistant_message.content for event in inside)
 
 
-def stored_a_note(store: CaptureStore, turn, seed: dict, phrase: str) -> bool:
-    """The agent's own write: one note stored in this conversation, quoting the message."""
+def stored_an_item(store: CaptureStore, turn, seed: dict, kind: str, phrase: str) -> bool:
+    """The agent's own write: one note or idea stored in this turn, quoting the message."""
+
+    # A handed-back write stores a different kind of operation, which has no tool name:
+    # that is a wrong answer for this case, not something to crash the run over.
+    if not _wrote_exactly(turn, f"save_{kind}"):
+        return False
+    seeded = {row.id for row in seed["other_project_rows"]} | {seed["note"].id}
+    items = [
+        item
+        for item in store.list_saved_items(workspace_id="default", kinds=(kind,))
+        if item.id not in seeded
+    ]
+    return len(items) == 1 and phrase in items[0].content and _quotes_the_turn(items[0], turn)
+
+
+def stored_a_record(store: CaptureStore, turn, seed: dict, kind: str, phrase: str) -> bool:
+    """The agent's own tracker write, through the router's validated path."""
 
     if turn is None or turn.failure_reason is not None:
         return False
-    # A handed-back write stores a different kind of operation, which has no tool name:
-    # that is a wrong answer for this case, not something to crash the run over.
-    if [getattr(operation, "tool_name", None) for operation in turn.operations] != ["save_note"]:
+    statuses = [getattr(operation, "status", None) for operation in turn.operations]
+    if statuses != ["committed"]:
         return False
-    notes = [
-        item
-        for item in store.list_saved_items(workspace_id="default", kinds=("note",))
-        if item.id not in {row.id for row in seed["other_project_rows"]} and item.id != seed["note"].id
+    seeded = {record.id for record in (seed["task"], *seed["other_project_rows"]) if hasattr(record, "state")}
+    records = [
+        record
+        for record in store.list_project_records(seed["project"].id, states=("active",))
+        if record.id not in seeded
     ]
     return (
-        len(notes) == 1
-        and phrase in notes[0].content
-        and notes[0].source_message_id == turn.user_message.id
-        and notes[0].source_quote == turn.user_message.content
+        len(records) == 1
+        and records[0].kind == kind
+        and phrase in records[0].content
+        and _quotes_the_turn(records[0], turn)
     )
+
+
+def _wrote_exactly(turn, tool_name: str) -> bool:
+    if turn is None or turn.failure_reason is not None:
+        return False
+    return [getattr(operation, "tool_name", None) for operation in turn.operations] == [tool_name]
+
+
+def _quotes_the_turn(row, turn) -> bool:
+    """A stored row keeps the router's grounding whoever asked for it."""
+
+    return row.source_message_id == turn.user_message.id and row.source_quote == turn.user_message.content
 
 
 def handed_off_an_event(store: CaptureStore, turn, seed: dict, on: date) -> bool:

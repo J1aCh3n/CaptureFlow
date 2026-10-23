@@ -298,6 +298,98 @@ class ConversationRouterServiceTests(unittest.TestCase):
         self.assertEqual(item.source_quote, "记一下：延迟排查从周一开始。")
         self.assertIn("Saved your note.", turn.assistant_message.content)
 
+    def test_the_agent_creates_a_tracker_record_through_the_validated_path(self) -> None:
+        model = ScriptedContextualModel(
+            [],
+            agent_turns=[
+                AgentModelTurn(
+                    tool_calls=[
+                        AgentToolCall(
+                            id="record",
+                            name="create_record",
+                            arguments={
+                                "kind": "task",
+                                "content": "排查发布者延迟",
+                                "due_date": "2026-09-18",
+                            },
+                        )
+                    ]
+                ),
+                AgentModelTurn(final_response=AgentFinalResponse(reply="记下了这个任务。")),
+            ],
+        )
+
+        turn = self.submit(model, "加一个任务：排查发布者延迟，9 月 18 号前。", "agent-record")
+
+        record = self.store.list_project_records(self.project.id, states=("active",))[0]
+        self.assertEqual(model.calls, [])
+        self.assertEqual(turn.outcome, "tracker_change")
+        self.assertEqual(record.content, "排查发布者延迟")
+        self.assertEqual(record.kind, "task")
+        # Python attaches the deadline; a date with no clock time stays a date, as it does
+        # on the routed path.
+        self.assertEqual(record.due_at.isoformat(), "2026-09-18")
+        self.assertEqual(record.source_message_id, "agent-record")
+
+    def test_a_repeating_deadline_is_refused_by_the_same_rule_as_the_router(self) -> None:
+        # The agent cannot state one: the parameter does not exist, so the rule is the
+        # schema rather than a sentence.
+        offered = None
+        model = ScriptedContextualModel(
+            [],
+            agent_turns=[
+                AgentModelTurn(
+                    tool_calls=[
+                        AgentToolCall(
+                            id="record",
+                            name="create_record",
+                            arguments={"kind": "task", "content": "每周复盘", "recurring": True},
+                        )
+                    ]
+                ),
+                AgentModelTurn(final_response=AgentFinalResponse(reply="我没有存重复的截止日期。")),
+            ],
+        )
+
+        turn = self.submit(model, "每周一复盘。", "agent-recurring")
+
+        offered = {tool["function"]["name"] for tool in model.agent_calls[0]["tools"]}
+        self.assertIn("create_record", offered)
+        self.assertEqual(self.store.list_project_records(self.project.id), [])
+        self.assertEqual(turn.operations, ())
+        feedback = model.agent_calls[1]["messages"][-1]["content"]
+        self.assertIn("recurring", feedback)
+
+    def test_a_second_decision_is_held_for_review_and_cannot_be_cited(self) -> None:
+        self._project_record("first-decision", "decision", "active", "用 SQLite 存储")
+        model = ScriptedContextualModel(
+            [],
+            agent_turns=[
+                AgentModelTurn(
+                    tool_calls=[
+                        AgentToolCall(
+                            id="record",
+                            name="create_record",
+                            arguments={"kind": "decision", "content": "改用 Postgres"},
+                        )
+                    ]
+                ),
+                AgentModelTurn(final_response=AgentFinalResponse(reply="这条决定等待复核。")),
+            ],
+        )
+
+        turn = self.submit(model, "我们改用 Postgres。", "agent-decision")
+
+        self.assertEqual([operation.status for operation in turn.operations], ["review"])
+        self.assertEqual(
+            [record.content for record in self.store.list_project_records(self.project.id, states=("active",))],
+            ["用 SQLite 存储"],
+        )
+        result = json.loads(model.agent_calls[1]["messages"][-1]["content"])
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["items"], [])
+        self.assertIn("review", result["detail"])
+
     def test_a_write_is_reported_even_when_the_turn_runs_out_of_budget_after_it(self) -> None:
         # The note is in SQLite by then, so a reply that did not mention it would be false.
         save = AgentModelTurn(

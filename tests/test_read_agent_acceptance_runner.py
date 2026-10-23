@@ -21,7 +21,8 @@ from scripts.run_read_agent_acceptance import (
     safety_violations,
     seed_database,
     selected_cases,
-    stored_a_note,
+    stored_a_record,
+    stored_an_item,
 )
 
 
@@ -333,8 +334,8 @@ class WriteCaseChecksTests(unittest.TestCase):
         # is paid for turn by turn, so this must read as a wrong answer, not an exception.
         record = SimpleNamespace(record_id="r", action="create_record")
 
-        verdict = stored_a_note(
-            self.store, self._turn_with_operations([record]), self.seed, "延迟排查"
+        verdict = stored_an_item(
+            self.store, self._turn_with_operations([record]), self.seed, "note", "延迟排查"
         )
 
         self.assertFalse(verdict)
@@ -362,16 +363,16 @@ class WriteCaseChecksTests(unittest.TestCase):
     def test_a_stored_note_must_quote_the_message_it_came_from(self) -> None:
         self._note("延迟排查从下周一开始。")
 
-        self.assertTrue(stored_a_note(self.store, self._turn(["save_note"]), self.seed, "延迟排查"))
+        self.assertTrue(stored_an_item(self.store, self._turn(["save_note"]), self.seed, "note", "延迟排查"))
 
     def test_a_turn_that_wrote_nothing_does_not_pass_the_note_case(self) -> None:
         # The case must not pass just because the fixture already holds a note.
-        self.assertFalse(stored_a_note(self.store, self._turn([]), self.seed, "延迟排查"))
+        self.assertFalse(stored_an_item(self.store, self._turn([]), self.seed, "note", "延迟排查"))
 
     def test_a_note_about_something_else_does_not_pass(self) -> None:
         self._note("完全不相关的内容。")
 
-        self.assertFalse(stored_a_note(self.store, self._turn(["save_note"]), self.seed, "延迟排查"))
+        self.assertFalse(stored_an_item(self.store, self._turn(["save_note"]), self.seed, "note", "延迟排查"))
 
     def test_a_note_not_quoting_the_turns_message_does_not_pass(self) -> None:
         other = self.store.save_message(
@@ -384,7 +385,7 @@ class WriteCaseChecksTests(unittest.TestCase):
         )
         self._note("延迟排查从下周一开始。", source=other)
 
-        self.assertFalse(stored_a_note(self.store, self._turn(["save_note"]), self.seed, "延迟排查"))
+        self.assertFalse(stored_an_item(self.store, self._turn(["save_note"]), self.seed, "note", "延迟排查"))
 
     def test_an_event_must_be_created_by_a_hand_off_and_not_by_the_agent(self) -> None:
         self._event_on(date(2026, 9, 16))
