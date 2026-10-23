@@ -119,7 +119,6 @@ class ReplayedAcceptanceTests(unittest.TestCase):
             model,
             date.fromisoformat(self.fixture["protocol"]["reference_date"]),
             self.fixture["protocol"]["timezone"],
-            answer_mode="agent",
         )
         inputs = {case["name"]: case["input"] for case in self.fixture["cases"]}
         conversations = {
@@ -167,7 +166,6 @@ class ReplayedAcceptanceTests(unittest.TestCase):
             ReplayModel(self.recording),
             date.fromisoformat(self.fixture["protocol"]["reference_date"]),
             self.fixture["protocol"]["timezone"],
-            answer_mode="agent",
         )
         inputs = {case["name"]: case["input"] for case in self.fixture["cases"]}
         conversations = {"main": seed["main_conversation"].id, "later": seed["later_conversation"].id}

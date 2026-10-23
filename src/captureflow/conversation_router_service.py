@@ -16,14 +16,13 @@ from .context_service import ContextWindow, RouterCandidates, select_context_win
 from .credentials import contains_credential_disclosure
 from .date_tool import calendar_reference
 from .llm import ContextualConversationModel, InvalidStructuredOutput, ModelError, describe_validation_error
-from .local_context_service import LocalContextService, answer_source_references
+from .local_context_service import answer_source_references
 from .models import (
     CalendarEvent,
     CalendarEventUpdateOperation,
     ContextualAction,
     ConversationDecision,
     EvidenceReference,
-    LocalContextSourceRef,
     Message,
     ProjectChange,
     ProjectChangeOperation,
@@ -32,7 +31,7 @@ from .models import (
     ToolOperation,
     utc_now,
 )
-from .project_answer_service import answer_project_question, build_project_snapshot, with_stored_dates
+from .project_answer_service import with_stored_dates
 from .project_service import apply_validated_changes
 from .read_agent import ReadAgentLoop, ReadAgentUsage
 from .read_agent_tools import BoundReadTools
@@ -43,9 +42,7 @@ RouterOperation = ToolOperation | CalendarEventUpdateOperation | ProjectChangeOp
 
 _SAVED_ITEM_WRITES = {"save_idea", "save_note"}
 _CALENDAR_WRITES = {"calendar_create", "calendar_update", "calendar_delete"}
-_NO_PROJECT_REPLY = (
-    "This conversation is not assigned to a project, so I cannot answer a question about project progress."
-)
+_ANSWER_INTENTS = {"local_answer", "project_answer"}
 # A stored event keeps at most this many source messages.
 MAX_EVENT_SOURCES = 3
 
@@ -98,16 +95,12 @@ class ConversationRouterService:
         reference_date: date,
         timezone: str = "America/Vancouver",
         reference_time: time | None = None,
-        answer_mode: Literal["workflow", "agent"] = "workflow",
     ) -> None:
-        if answer_mode not in {"workflow", "agent"}:
-            raise ValueError("answer_mode must be workflow or agent")
         self.store = store
         self.model = model
         self.reference_date = reference_date
         self.timezone = timezone
         self.reference_time = reference_time
-        self.answer_mode = answer_mode
         self.graph = self._build_graph()
 
     def submit(
@@ -134,32 +127,22 @@ class ConversationRouterService:
         graph.add_node("decide", self._decide)
         graph.add_node("calendar_policy", self._guarded(self._calendar_policy))
         graph.add_node("clarify", self._guarded(self._clarify))
-        graph.add_node("local_answer", self._guarded(self._local_answer))
-        graph.add_node("project_answer", self._guarded(self._project_answer))
         graph.add_node("execute", self._execute_decision)
+        # The node guards itself: it runs before any decision exists, so _guarded's failure
+        # reply cannot read one.
+        graph.add_node("agent", self._agent_front)
 
         graph.add_edge(START, "load_turn")
         graph.add_conditional_edges("load_turn", _reload_or_resume, ["reload", "resume"])
         graph.add_edge("reload", END)
         graph.add_conditional_edges("resume", _unless_finished("guard_credentials"), [END, "guard_credentials"])
-        if self.answer_mode == "agent":
-            # The agent decides the turn, and only a write it hands back reaches the router's
-            # one-shot decision. The write path below is unchanged. The node guards itself:
-            # it runs before any decision exists, so _guarded's failure reply cannot read one.
-            graph.add_node("agent", self._agent_front)
-            graph.add_conditional_edges(
-                "guard_credentials", _unless_finished("agent"), [END, "agent"]
-            )
-            graph.add_conditional_edges("agent", _unless_finished("decide"), [END, "decide"])
-        else:
-            graph.add_conditional_edges("guard_credentials", _unless_finished("decide"), [END, "decide"])
+        graph.add_conditional_edges("guard_credentials", _unless_finished("agent"), [END, "agent"])
+        graph.add_conditional_edges("agent", _unless_finished("decide"), [END, "decide"])
         graph.add_conditional_edges(
-            "decide",
-            _dispatch,
-            [END, "calendar_policy", "clarify", "local_answer", "project_answer", "execute"],
+            "decide", _dispatch, [END, "calendar_policy", "clarify", "execute"]
         )
         graph.add_conditional_edges("calendar_policy", _unless_finished("execute"), [END, "execute"])
-        for node in ("clarify", "local_answer", "project_answer", "execute"):
+        for node in ("clarify", "execute"):
             graph.add_edge(node, END)
         return graph.compile()
 
@@ -285,25 +268,6 @@ class ConversationRouterService:
     def _clarify(self, state: RouterState) -> ConversationRouterTurn:
         assistant = self._assistant_message(state["user_message"], state["decision"].reply or "")
         return self._turn_without_writes(state, assistant, "clarification_created")
-
-    def _local_answer(self, state: RouterState) -> ConversationRouterTurn:
-        local_turn = LocalContextService(self.store, self.reference_date).submit(
-            state["conversation_id"],
-            state["content"],
-            state["user_message"].id,
-            selected=self._named_candidates(state["decision"], state["candidates"]),
-        )
-        return self._turn_without_writes(state, local_turn.assistant_message, local_turn.outcome)
-
-    def _project_answer(self, state: RouterState) -> ConversationRouterTurn:
-        return self._answer_project(
-            state["user_message"],
-            state["decision"],
-            state["context_window"],
-            state["candidates"],
-            state["model_seconds"],
-            self._spent(state, state["model_seconds"]),
-        )
 
     def _agent_front(self, state: RouterState) -> RouterState:
         """Let the agent take the turn; a write it hands back continues to the router."""
@@ -534,95 +498,6 @@ class ConversationRouterService:
             local_seconds=perf_counter() - state["local_started"],
             outcome="write_or_dispatch_failure",
             failure_reason=_failure_reason(error),
-        )
-
-    @staticmethod
-    def _named_candidates(
-        decision: ConversationDecision, candidates: RouterCandidates
-    ) -> list[CalendarEvent | SavedItem | ProjectRecord]:
-        """The stored items a local question is about, in the order the model named them."""
-
-        by_id = {
-            item.id: item
-            for item in (*candidates.events, *candidates.saved_items, *candidates.project_records)
-        }
-        return [by_id[source_id] for source_id in decision.source_ids if source_id in by_id]
-
-    def _answer_project(
-        self,
-        user_message: Message,
-        decision: ConversationDecision,
-        context_window: ContextWindow,
-        candidates: RouterCandidates,
-        routing_seconds: float,
-        before: dict[str, Any] | None = None,
-    ) -> ConversationRouterTurn:
-        """Answer a question about the whole project with a second call over its snapshot."""
-
-        # A hand-off's agent calls come first, so counts are relative to what was spent.
-        before = {"model_calls": 1, "model_seconds": routing_seconds} if before is None else before
-        spent_calls = before["model_calls"]
-        spent_seconds = before["model_seconds"]
-        carried = {key: before[key] for key in ("tool_calls", "agent_stop_reason") if key in before}
-
-        project = self.store.get_conversation_project(user_message.conversation_id)
-        if project is None:
-            return self._reply(
-                user_message,
-                _NO_PROJECT_REPLY,
-                decision,
-                context_window,
-                candidates,
-                (),
-                model_calls=spent_calls,
-                model_seconds=spent_seconds,
-                outcome="project_answer_unavailable",
-                **carried,
-            )
-        snapshot_started = perf_counter()
-        snapshot = build_project_snapshot(self.store, project, self.reference_date)
-        snapshot_seconds = perf_counter() - snapshot_started
-        answer_started = perf_counter()
-        try:
-            result = answer_project_question(
-                self.model, snapshot, user_message, context_window.for_router(), self.reference_date
-            )
-        except (InvalidStructuredOutput, ModelError, ValidationError, ValueError) as error:
-            return self._reply(
-                user_message,
-                "I could not answer from the stored project records, so nothing was changed.",
-                decision,
-                context_window,
-                candidates,
-                (),
-                model_calls=spent_calls + 1,
-                model_seconds=spent_seconds + perf_counter() - answer_started,
-                local_seconds=snapshot_seconds,
-                outcome="model_or_validation_failure",
-                failure_reason=_failure_reason(error),
-                **carried,
-            )
-        answer_seconds = perf_counter() - answer_started
-        assistant = self._assistant_message(user_message, result.reply)
-        if result.records:
-            self.store.save_project_answer_sources(assistant.id, [record.id for record in result.records])
-        if result.events:
-            self.store.save_local_context_answer_sources(
-                assistant.id,
-                [LocalContextSourceRef(source_type="calendar_event", source_id=event.id) for event in result.events],
-            )
-        return ConversationRouterTurn(
-            user_message,
-            assistant,
-            decision,
-            context_window,
-            candidates,
-            (),
-            outcome="project_answer",
-            model_calls=spent_calls + 1,
-            model_seconds=spent_seconds + answer_seconds,
-            local_seconds=snapshot_seconds,
-            **carried,
         )
 
     def _execute(
@@ -1093,6 +968,10 @@ class ConversationRouterService:
     def _validate_decision(decision: ConversationDecision, candidates: RouterCandidates) -> None:
         """Every ID a decision writes to or cites must be one the router supplied."""
 
+        if decision.intent in _ANSWER_INTENTS:
+            # The router is only reached by a handed-back write now, and the agent answers
+            # questions itself. The intents remain in the schema until it is retired.
+            raise ValueError("the router no longer answers questions")
         event_ids = {event.id for event in candidates.events}
         item_ids = {item.id for item in candidates.saved_items}
         record_ids = {record.id for record in candidates.project_records}

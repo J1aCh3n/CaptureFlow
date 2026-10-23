@@ -18,10 +18,25 @@ from captureflow.models import (
 )
 from captureflow.storage import CaptureStore
 from captureflow.time_config import configured_reference_date
-from captureflow.read_agent import AgentFinalResponse, AgentModelTurn, AgentToolCall
+from captureflow.read_agent import HAND_OFF_TOOL, AgentFinalResponse, AgentModelTurn, AgentToolCall
 
 
-class _CalendarRoutingUiModel:
+class _HandsOffWrites:
+    """The agent takes every turn now, so a write fake has to hand the write back first."""
+
+    def next_read_agent_turn(self, **_: object) -> AgentModelTurn:
+        return AgentModelTurn(
+            tool_calls=[
+                AgentToolCall(
+                    id="ui-hand-off",
+                    name=HAND_OFF_TOOL,
+                    arguments={"request": "Apply the change the message asks for."},
+                )
+            ]
+        )
+
+
+class _CalendarRoutingUiModel(_HandsOffWrites):
     """A deterministic Phase 6 seam: AppTest never reaches an external model."""
 
     def propose_conversation_decision(
@@ -56,18 +71,25 @@ class _CalendarRoutingUiModel:
 
 
 class _LocalAnswerUiModel:
-    def propose_conversation_decision(
-        self,
-        *,
-        candidate_events: list[str],
-        candidate_saved_items: list[str],
-        **_: object,
-    ) -> dict:
-        return {
-            "intent": "local_answer",
-            "reply": "Use the selected local records.",
-            "source_ids": [_candidate_id(line) for line in [*candidate_events, *candidate_saved_items]],
-        }
+    """Searches, then cites what it found: the agent's path to a local answer."""
+
+    def __init__(self, reply: str, source_ids: list[str]) -> None:
+        self.reply = reply
+        self.source_ids = source_ids
+        self.agent_calls = 0
+
+    def next_read_agent_turn(self, **_: object) -> AgentModelTurn:
+        self.agent_calls += 1
+        if self.agent_calls == 1:
+            return AgentModelTurn(
+                tool_calls=[
+                    AgentToolCall(id="ui-events", name="search_calendar", arguments={}),
+                    AgentToolCall(id="ui-notes", name="search_saved_items", arguments={}),
+                ]
+            )
+        return AgentModelTurn(
+            final_response=AgentFinalResponse(reply=self.reply, source_ids=self.source_ids)
+        )
 
 
 class _AgentLocalAnswerUiModel:
@@ -102,7 +124,7 @@ class _AgentLocalAnswerUiModel:
         )
 
 
-class _CalendarDeleteUiModel:
+class _CalendarDeleteUiModel(_HandsOffWrites):
     def propose_conversation_decision(self, *, candidate_events: list[str], **_: object) -> dict:
         return {
             "intent": "calendar_delete",
@@ -130,7 +152,6 @@ class UiTests(unittest.TestCase):
                 "CAPTUREFLOW_MODEL",
                 "CAPTUREFLOW_BASE_URL",
                 "CAPTUREFLOW_TIMEZONE",
-                "CAPTUREFLOW_ANSWER_MODE",
             )
         }
         os.environ["CAPTUREFLOW_DATABASE_PATH"] = str(
@@ -364,10 +385,9 @@ class UiTests(unittest.TestCase):
         self.assertTrue(any("Model calls: 0" in caption.value for caption in app.caption))
         self.assertTrue(any("Session-only timing" in caption.value for caption in app.caption))
 
-    def test_agent_answer_mode_runs_the_read_loop_and_reports_its_budget(self) -> None:
+    def test_a_chat_answer_runs_the_read_loop_and_reports_its_budget(self) -> None:
         os.environ["CAPTUREFLOW_API_KEY"] = "ui-test-key"
         os.environ["CAPTUREFLOW_MODEL"] = "ui-test-model"
-        os.environ["CAPTUREFLOW_ANSWER_MODE"] = "agent"
         app = AppTest.from_file("app.py").run()
         store = CaptureStore(os.environ["CAPTUREFLOW_DATABASE_PATH"])
         store.initialize()
@@ -405,7 +425,7 @@ class UiTests(unittest.TestCase):
         self.assertEqual(app.exception, [])
         self.assertTrue(any("Agent review" in markdown.value for markdown in app.markdown))
         self.assertTrue(any("The agent review is scheduled." in markdown.value for markdown in app.markdown))
-        self.assertTrue(any("Mode: contextual_router_agent" in caption.value for caption in app.caption))
+        self.assertTrue(any("Mode: contextual_agent" in caption.value for caption in app.caption))
         # The router no longer classifies first, so the turn is the agent's two calls.
         self.assertTrue(any("Model calls: 2" in caption.value for caption in app.caption))
         self.assertTrue(any("Agent tools: 1 · Stop: completed" in caption.value for caption in app.caption))
@@ -779,7 +799,7 @@ class UiTests(unittest.TestCase):
 
         with patch(
             "captureflow.ui.OpenAICompatibleModel",
-            return_value=_LocalAnswerUiModel(),
+            return_value=_LocalAnswerUiModel("Use the stored local records.", [event.id, note.id]),
         ):
             app.run()
             next(
@@ -789,7 +809,8 @@ class UiTests(unittest.TestCase):
 
         answer = store.get_assistant_reply(store.list_messages(later_conversation.id)[0].id)
         self.assertIsNotNone(answer)
-        self.assertIn(note.content, answer.content)
+        self.assertIn("Use the stored local records.", answer.content)
+        self.assertIn(event.start_at.isoformat(), answer.content)
         self.assertEqual(
             {source.reference.source_id for source in store.list_local_context_answer_sources(answer.id)},
             {event.id, note.id},

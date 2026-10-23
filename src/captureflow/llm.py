@@ -8,7 +8,7 @@ from typing import Any, Protocol, TypeVar
 from openai import OpenAI
 from pydantic import BaseModel, ValidationError
 
-from .models import ConversationDecision, ProjectAnswer
+from .models import ConversationDecision
 from .read_agent import RESPOND_TOOL, AgentFinalResponse, AgentModelTurn, AgentToolCall
 
 
@@ -35,14 +35,6 @@ class ContextualConversationModel(Protocol):
         calendar: list[dict[str, str]] | None = None,
         reference_time: str | None = None,
     ) -> ConversationDecision: ...
-
-    def answer_project_question(
-        self,
-        question: dict[str, str],
-        recent_messages: list[dict[str, str]],
-        project_snapshot: dict,
-        reference_date: str,
-    ) -> ProjectAnswer: ...
 
     def next_read_agent_turn(
         self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
@@ -105,10 +97,11 @@ class OpenAICompatibleModel:
         return self._complete(
             ConversationDecision,
             system=(
-                "You are CaptureFlow's contextual conversation router. Return JSON only. You do not execute "
-                "tools or write SQLite. Choose exactly one intent from current_message, recent_messages, the "
-                "candidate lists, reference_date, reference_time, timezone, and calendar. This is not a general "
-                "chatbot. "
+                "You are CaptureFlow's write decider. Return JSON only. You do not execute tools or write "
+                "SQLite. CaptureFlow has already searched the stored data and judged that current_message "
+                "asks to create, change or delete something; choose exactly one intent that carries out that "
+                "change, from current_message, recent_messages, the candidate lists, reference_date, "
+                "reference_time, timezone, and calendar. "
                 "What you see: recent_messages is the recent conversation. An older long message appears only "
                 "as a reference with its ID and first characters; do not assume what the rest says. Each "
                 "candidate is one line starting with its ID: candidate_events are Calendar events (ID, title, "
@@ -183,14 +176,9 @@ class OpenAICompatibleModel:
                 "One turn commits one local action or up to three tracker changes. When current_message clearly "
                 "states a second, different item as well, commit one and ask about the other in one short "
                 "follow_up_question; never invent a second item or split one item into two. "
-                "Neither answer intent proposes a write, and CaptureFlow writes both answers itself. "
-                "local_answer is a question about one or a few specific stored items: a Calendar event, an "
-                "idea or note, or a single project record such as one task's deadline. Put the IDs of the "
-                "candidates the question is about in source_ids, or leave source_ids empty when none of them is "
-                "it. project_answer is a question about the project as a whole: progress, outstanding work, "
-                "blockers, deadlines across tasks, or why a decision changed; CaptureFlow gathers the project's "
-                "records for it, so source_ids and reply are not needed. Save only an explicit idea or note with "
-                "save_idea or save_note. Use reply_only for unsupported conversation. "
+                "Save only an explicit idea or note with save_idea or save_note. When the message asks for "
+                "no change at all, use reply_only. Never use local_answer or project_answer: CaptureFlow has "
+                "already searched and answered before reaching you. "
                 "Never invent a candidate ID, message ID, date, time, task, meeting, project fact, or external "
                 "information."
             ),
@@ -206,38 +194,6 @@ class OpenAICompatibleModel:
                 "timezone": timezone,
                 "context_truncated": context_truncated,
                 "calendar": calendar or [],
-            },
-        )
-
-    def answer_project_question(
-        self,
-        question: dict[str, str],
-        recent_messages: list[dict[str, str]],
-        project_snapshot: dict,
-        reference_date: str,
-    ) -> ProjectAnswer:
-        """Write a project-level answer from the supplied snapshot; Python checks its citations."""
-
-        return self._complete(
-            ProjectAnswer,
-            system=(
-                "You are CaptureFlow's project answer writer. Return JSON only. Answer the question about "
-                "the project using only project_snapshot and recent_messages. The snapshot lists open records, "
-                "recently completed or resolved records, and superseded decisions and constraints with their "
-                "rationale and the record that replaced each, plus upcoming project Calendar events. For "
-                "progress or outstanding work, use open and recently closed records. For why something "
-                "changed, use the superseded record, its rationale, and the record that replaced it. Do not "
-                "write dates or clock times in reply: CaptureFlow renders them from the stored records you "
-                "cite. List in source_ids every record or event ID the reply relies on, copied exactly from "
-                "the snapshot, at most six. If the snapshot does not contain the answer, say so plainly and "
-                "leave source_ids empty. Never invent a record, decision, reason, deadline, or ID. Reply in "
-                "the language of the question."
-            ),
-            payload={
-                "question": question,
-                "recent_messages": recent_messages,
-                "project_snapshot": project_snapshot,
-                "reference_date": reference_date,
             },
         )
 

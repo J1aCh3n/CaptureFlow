@@ -123,7 +123,7 @@ class ModelReplayTests(unittest.TestCase):
         return store
 
     def _run(self, store: CaptureStore, model) -> list:
-        router = ConversationRouterService(store, model, REFERENCE, answer_mode="agent")
+        router = ConversationRouterService(store, model, REFERENCE)
         return [
             router.submit("replay-chat", "What is scheduled on September 18?", "replay-read"),
             router.submit("replay-chat", "Note that latency work starts after the review.", "replay-write"),

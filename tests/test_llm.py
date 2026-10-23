@@ -155,13 +155,11 @@ class OpenAICompatibleModelTests(unittest.TestCase):
         self.assertEqual(completions.kwargs["extra_body"], {"enable_thinking": False})
         self.assertEqual(turn.final_response.source_ids, ["event-1"])
 
-    def test_workflow_requests_are_unchanged_by_the_read_agent(self) -> None:
-        # SHA-256 of both system prompts at 43d5701, before the read agent existed. Agent mode
-        # must never change what workflow mode sends, so a new sentence belongs elsewhere.
-        pinned = {
-            "router": "8f15db33c987abe504b1dee5e4a3b8a566de3c9b531479fdd34a805f74306fd3",
-            "project_answer": "c981c32dff8862048ab21e6880ba34c5943ab88b98b0005f109f21f47e26b50c",
-        }
+    def test_the_write_prompt_is_pinned_so_a_change_to_it_is_deliberate(self) -> None:
+        # The router decides only writes now, so the prompt is pinned rather than frozen
+        # against an older one: changing it changes every recorded request, which means the
+        # replay fixtures must be re-recorded. 6,961 characters at 2e0f1e3.
+        pinned = "520a3d577877ccf926299d0099bb58ce09fbf5ddee45457c7c946a329df5a40b"
         settings = ModelSettings(
             api_key="test-key",
             model="qwen3.8-flash",
@@ -180,23 +178,14 @@ class OpenAICompatibleModelTests(unittest.TestCase):
             reference_date="2026-09-14",
             timezone="America/Vancouver",
         )
-        project_completions = RecordingCompletions('{"reply":"Nothing is stored.","source_ids":[]}')
-        project = OpenAICompatibleModel.__new__(OpenAICompatibleModel)
-        project.settings = settings
-        project.client = SimpleNamespace(chat=SimpleNamespace(completions=project_completions))
-        project.answer_project_question(
-            question={"message_id": "message-1", "content": "What is left?"},
-            recent_messages=[],
-            project_snapshot={},
-            reference_date="2026-09-14",
-        )
 
-        for name, completions in (("router", router_completions), ("project_answer", project_completions)):
-            with self.subTest(request=name):
-                system = completions.kwargs["messages"][0]["content"]
-                self.assertEqual(hashlib.sha256(system.encode("utf-8")).hexdigest(), pinned[name])
-                # Thinking is disabled and tools are sent only on agent requests.
-                self.assertEqual(sorted(completions.kwargs), ["messages", "model", "response_format", "timeout"])
+        system = router_completions.kwargs["messages"][0]["content"]
+
+        self.assertEqual(hashlib.sha256(system.encode("utf-8")).hexdigest(), pinned)
+        # Thinking is disabled and tools are sent only on agent requests.
+        self.assertEqual(
+            sorted(router_completions.kwargs), ["messages", "model", "response_format", "timeout"]
+        )
 
     def test_request_omits_temperature_for_reasoning_model_compatibility(self) -> None:
         completions = RecordingCompletions()

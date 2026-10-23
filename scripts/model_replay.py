@@ -28,16 +28,14 @@ from pydantic import BaseModel
 
 from captureflow.llm import InvalidStructuredOutput, ModelError
 from captureflow.models import ConversationDecision
-from captureflow.project_answer_service import ProjectAnswer
 from captureflow.read_agent import AgentModelTurn
 
 
 RECORDING_VERSION = 1
 
-# The three calls a turn can make, with the schema each answer is read back as.
+# The two calls a turn can make, with the schema each answer is read back as.
 RESPONSE_SCHEMAS: dict[str, type[BaseModel]] = {
     "propose_conversation_decision": ConversationDecision,
-    "answer_project_question": ProjectAnswer,
     "next_read_agent_turn": AgentModelTurn,
 }
 
@@ -67,9 +65,6 @@ class RecordingModel:
 
     def propose_conversation_decision(self, **kwargs) -> ConversationDecision:
         return self._call("propose_conversation_decision", kwargs)
-
-    def answer_project_question(self, **kwargs) -> ProjectAnswer:
-        return self._call("answer_project_question", kwargs)
 
     def next_read_agent_turn(self, **kwargs) -> AgentModelTurn:
         return self._call("next_read_agent_turn", kwargs)
@@ -110,9 +105,6 @@ class ReplayModel:
 
     def propose_conversation_decision(self, **kwargs) -> ConversationDecision:
         return self._next("propose_conversation_decision", kwargs)
-
-    def answer_project_question(self, **kwargs) -> ProjectAnswer:
-        return self._next("answer_project_question", kwargs)
 
     def next_read_agent_turn(self, **kwargs) -> AgentModelTurn:
         return self._next("next_read_agent_turn", kwargs)

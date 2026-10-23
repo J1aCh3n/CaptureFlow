@@ -22,24 +22,31 @@ from captureflow.read_agent import HAND_OFF_TOOL, AgentFinalResponse, AgentModel
 
 
 class ScriptedContextualModel:
-    def __init__(self, decisions, project_answers=(), agent_turns=()):
+    def __init__(self, decisions, agent_turns=None):
         self.decisions = list(decisions)
-        self.project_answers = list(project_answers)
-        self.agent_turns = list(agent_turns)
+        # A write test scripts only the router's decision. The agent runs first in every
+        # turn, so with nothing scripted it hands the write straight back, which is what a
+        # write turn looks like.
+        self.agent_turns = None if agent_turns is None else list(agent_turns)
         self.calls = []
-        self.project_answer_calls = []
         self.agent_calls = []
 
     def propose_conversation_decision(self, **kwargs):
         self.calls.append(kwargs)
         return self.decisions.pop(0)
 
-    def answer_project_question(self, **kwargs):
-        self.project_answer_calls.append(kwargs)
-        return self.project_answers.pop(0)
-
     def next_read_agent_turn(self, **kwargs):
         self.agent_calls.append(kwargs)
+        if self.agent_turns is None:
+            return AgentModelTurn(
+                tool_calls=[
+                    AgentToolCall(
+                        id=f"hand-off-{len(self.agent_calls)}",
+                        name=HAND_OFF_TOOL,
+                        arguments={"request": "Apply the change the message asks for."},
+                    )
+                ]
+            )
         turn = self.agent_turns.pop(0)
         if isinstance(turn, Exception):
             raise turn
@@ -141,7 +148,7 @@ class ConversationRouterServiceTests(unittest.TestCase):
             ],
         )
 
-        turn = self.submit(model, "What is scheduled on September 18?", "front-read", answer_mode="agent")
+        turn = self.submit(model, "What is scheduled on September 18?", "front-read")
 
         self.assertEqual(model.calls, [])
         self.assertIsNone(turn.decision)
@@ -172,9 +179,7 @@ class ConversationRouterServiceTests(unittest.TestCase):
             ],
         )
 
-        handed = self.submit(
-            agent_model, "Note that latency work starts Monday.", "front-write", answer_mode="agent"
-        )
+        handed = self.submit(agent_model, "Note that latency work starts Monday.", "front-write")
 
         self.assertEqual(len(agent_model.calls), 1)
         self.assertEqual(handed.decision.intent, "save_note")
@@ -205,7 +210,6 @@ class ConversationRouterServiceTests(unittest.TestCase):
                 ],
             ),
             date(2026, 9, 9),
-            answer_mode="agent",
         ).submit(other.id, "Note that latency work starts Monday.", "same-write-agent")
 
         self.assertEqual(
@@ -232,7 +236,7 @@ class ConversationRouterServiceTests(unittest.TestCase):
             ),
         ]
         model = ScriptedContextualModel([], agent_turns=turns)
-        router = ConversationRouterService(self.store, model, date(2026, 9, 9), answer_mode="agent")
+        router = ConversationRouterService(self.store, model, date(2026, 9, 9))
 
         first = router.submit(self.conversation.id, "What is on September 18?", "replay-read")
         again = router.submit(self.conversation.id, "What is on September 18?", "replay-read")
@@ -255,7 +259,7 @@ class ConversationRouterServiceTests(unittest.TestCase):
         )
 
         turn = self.submit(
-            model, "这个项目有什么待办？", "no-project-read", conversation_id=unassigned.id, answer_mode="agent"
+            model, "这个项目有什么待办？", "no-project-read", conversation_id=unassigned.id
         )
 
         self.assertEqual(turn.outcome, "agent_answer")
@@ -295,7 +299,6 @@ class ConversationRouterServiceTests(unittest.TestCase):
             model,
             "What is scheduled on September 18?",
             "agent-local-turn",
-            answer_mode="agent",
             reference_time=time(9, 30),
         )
 
@@ -333,7 +336,7 @@ class ConversationRouterServiceTests(unittest.TestCase):
             ],
         )
 
-        turn = self.submit(model, "What is stored for Review 24?", "paged-answer", answer_mode="agent")
+        turn = self.submit(model, "What is stored for Review 24?", "paged-answer")
 
         self.assertIsNone(turn.failure_reason)
         self.assertIn(events[-1].title, turn.assistant_message.content)
@@ -375,7 +378,6 @@ class ConversationRouterServiceTests(unittest.TestCase):
             model,
             "What remains for this project?",
             "agent-project-turn",
-            answer_mode="agent",
         )
 
         self.assertEqual(turn.outcome, "agent_answer")
@@ -405,7 +407,7 @@ class ConversationRouterServiceTests(unittest.TestCase):
             ],
         )
 
-        turn = self.submit(model, "What remains for the reviews?", "many-sources", answer_mode="agent")
+        turn = self.submit(model, "What remains for the reviews?", "many-sources")
 
         self.assertIsNone(turn.failure_reason)
         self.assertEqual({row.id for row in self.store.list_project_answer_sources(turn.assistant_message.id)},
@@ -422,7 +424,7 @@ class ConversationRouterServiceTests(unittest.TestCase):
                     agent_turns=[AgentModelTurn(final_response=AgentFinalResponse(reply=reply))],
                 )
 
-                turn = self.submit(model, "What about that meeting?", f"unsourced-{index}", answer_mode="agent")
+                turn = self.submit(model, "What about that meeting?", f"unsourced-{index}")
 
                 self.assertIsNone(turn.failure_reason)
                 self.assertEqual(turn.assistant_message.content, reply)
@@ -453,7 +455,7 @@ class ConversationRouterServiceTests(unittest.TestCase):
             ],
         )
 
-        turn = self.submit(model, "我下周有什么安排？", "week-question", answer_mode="agent")
+        turn = self.submit(model, "我下周有什么安排？", "week-question")
 
         content = turn.assistant_message.content
         positions = [content.index(event.start_at.isoformat()) for event in (all_day, earlier, later)]
@@ -481,7 +483,7 @@ class ConversationRouterServiceTests(unittest.TestCase):
             ],
         )
 
-        turn = self.submit(model, "What is on September 18?", "agent-failure-turn", answer_mode="agent")
+        turn = self.submit(model, "What is on September 18?", "agent-failure-turn")
 
         self.assertEqual(turn.outcome, "agent_model_failure")
         self.assertEqual(turn.model_calls, 2)
@@ -509,7 +511,7 @@ class ConversationRouterServiceTests(unittest.TestCase):
             raise ValueError("simulated source write failure")
 
         self.store._insert_project_answer_sources = fail_inside_the_transaction
-        turn = self.submit(model, "What remains?", "unsaved-sources-turn", answer_mode="agent")
+        turn = self.submit(model, "What remains?", "unsaved-sources-turn")
         del self.store._insert_project_answer_sources
 
         replies = [
@@ -549,7 +551,7 @@ class ConversationRouterServiceTests(unittest.TestCase):
 
         event = self.store.list_calendar_events()[0]
         self.assertEqual(turn.outcome, "calendar_create")
-        self.assertEqual(turn.model_calls, 1)
+        self.assertEqual(turn.model_calls, 2)  # the hand-off and the decision
         self.assertEqual(event.title, "算法优化与代码审查")
         self.assertEqual(event.start_at, datetime.fromisoformat("2026-09-10T16:00:00-07:00"))
         self.assertEqual(event.end_at, datetime.fromisoformat("2026-09-10T17:00:00-07:00"))
@@ -1037,7 +1039,7 @@ class ConversationRouterServiceTests(unittest.TestCase):
         updated = self.store.get_calendar_event(event.id)
         operation = self.store.list_calendar_event_update_operations("correction-turn")[0]
         self.assertEqual(turn.outcome, "calendar_update")
-        self.assertEqual(turn.model_calls, 1)
+        self.assertEqual(turn.model_calls, 2)  # the hand-off and the decision
         self.assertEqual(updated.start_at, datetime.fromisoformat("2026-09-10T14:00:00-07:00"))
         self.assertEqual(updated.end_at, datetime.fromisoformat("2026-09-10T15:00:00-07:00"))
         self.assertEqual(
@@ -1534,7 +1536,7 @@ class ConversationRouterServiceTests(unittest.TestCase):
         record = self.store.list_project_records(self.project.id)[0]
 
         self.assertEqual(turn.outcome, "tracker_change")
-        self.assertEqual(turn.model_calls, 1)
+        self.assertEqual(turn.model_calls, 2)  # the hand-off and the decision
         self.assertEqual(record.content, content)
         self.assertEqual(record.source_message_id, "tracker-turn")
 
@@ -1764,135 +1766,6 @@ class ConversationRouterServiceTests(unittest.TestCase):
         self.assertEqual(self.store.undo_project_change_operation(operation.id).status, "undone")
         self.assertIsNone(self.store.get_project_record(record.id).due_at)
 
-    # Answers
-
-    def test_local_answer_renders_the_items_the_model_named(self) -> None:
-        task = self._project_record(
-            "ros-delay-task",
-            "task",
-            "active",
-            "排查 ROS 2 节点延迟。",
-            due_at=datetime.fromisoformat("2026-09-12T18:00:00-07:00"),
-        )
-        model = ScriptedContextualModel([{"intent": "local_answer", "reply": "周五截止。", "source_ids": [task.id]}])
-
-        turn = self.submit(model, "排查延迟那个任务什么时候截止？", "task-deadline-question")
-
-        self.assertEqual(turn.outcome, "grounded_local_context")
-        self.assertIn("2026-09-12T18:00:00-07:00", turn.assistant_message.content)
-        self.assertNotIn("周五截止", turn.assistant_message.content)
-        self.assertEqual(
-            [record.id for record in self.store.list_project_answer_sources(turn.assistant_message.id)], [task.id]
-        )
-
-    def test_local_answer_without_named_items_falls_back_to_the_lookup(self) -> None:
-        event = self._saved_event(
-            "review-meeting",
-            "算法优化与代码审查会议",
-            datetime.fromisoformat("2026-09-10T14:00:00-07:00"),
-            end_at=datetime.fromisoformat("2026-09-10T15:00:00-07:00"),
-        )
-        model = ScriptedContextualModel([{"intent": "local_answer", "source_ids": []}])
-
-        turn = self.submit(model, "我明天有什么安排？", "fallback-lookup-question")
-
-        self.assertEqual(turn.outcome, "grounded_local_context")
-        self.assertIn(event.start_at.isoformat(), turn.assistant_message.content)
-        self.assertEqual(
-            [source.reference.source_id for source in self.store.list_local_context_answer_sources(turn.assistant_message.id)],
-            [event.id],
-        )
-
-    def test_project_answer_is_written_from_the_project_snapshot(self) -> None:
-        task = self._project_record(
-            "ros-delay-task",
-            "task",
-            "active",
-            "排查 ROS 2 节点延迟。",
-            due_at=datetime.fromisoformat("2026-09-12T18:00:00-07:00"),
-        )
-        self._project_record("setup-task", "task", "completed", "搭建仿真环境。")
-        old = self._project_record("storage-sqlite", "decision", "active", "使用 SQLite 存储。")
-        new = self._project_record(
-            "storage-postgres",
-            "decision",
-            "active",
-            "改用 PostgreSQL。",
-            rationale="需要多人协作。",
-            supersedes_record_id=old.id,
-        )
-        self.store.transition_project_record(old.id, "superseded")
-        model = ScriptedContextualModel(
-            [{"intent": "project_answer"}],
-            [
-                {
-                    "reply": "还剩排查节点延迟一项；存储已从 SQLite 换成 PostgreSQL，因为需要多人协作。",
-                    "source_ids": [task.id, new.id, task.id],
-                }
-            ],
-        )
-
-        turn = self.submit(model, "项目现在进展如何，为什么换了存储？", "project-progress-question")
-
-        self.assertEqual(turn.outcome, "project_answer")
-        self.assertEqual(turn.model_calls, 2)
-        snapshot = model.project_answer_calls[0]["project_snapshot"]
-        self.assertEqual({record["id"] for record in snapshot["open_records"]}, {new.id, task.id})
-        self.assertEqual([record["id"] for record in snapshot["closed_records"]], ["setup-task"])
-        self.assertEqual(snapshot["superseded_records"][0]["superseded_by_record_id"], new.id)
-        self.assertIn("Stored dates:", turn.assistant_message.content)
-        self.assertIn("2026-09-12T18:00:00-07:00", turn.assistant_message.content)
-        self.assertEqual(
-            [record.id for record in self.store.list_project_answer_sources(turn.assistant_message.id)],
-            [task.id, new.id],
-        )
-
-    def test_a_project_answer_citing_outside_the_snapshot_changes_nothing(self) -> None:
-        self._project_record("ros-delay-task", "task", "active", "排查 ROS 2 节点延迟。")
-        model = ScriptedContextualModel(
-            [{"intent": "project_answer"}],
-            [{"reply": "当前有三项任务。", "source_ids": ["invented-record"]}],
-        )
-
-        turn = self.submit(model, "项目还有什么没做？", "invented-source-question")
-
-        self.assertEqual(turn.outcome, "model_or_validation_failure")
-        self.assertEqual(turn.model_calls, 2)
-        self.assertIn("outside the project snapshot", turn.failure_reason)
-
-    def test_a_project_question_without_a_project_makes_no_second_call(self) -> None:
-        unassigned = self.store.save_conversation(Conversation(id="unassigned-chat", title="Loose"))
-        model = ScriptedContextualModel([{"intent": "project_answer"}])
-
-        turn = self.submit(model, "项目进展如何？", "unassigned-project-question", conversation_id=unassigned.id)
-
-        self.assertEqual(turn.outcome, "project_answer_unavailable")
-        self.assertEqual(turn.model_calls, 1)
-        self.assertEqual(model.project_answer_calls, [])
-
-    # Failures around a decision
-
-    def test_a_write_the_local_rules_refuse_is_a_dispatch_failure(self) -> None:
-        unassigned = self.store.save_conversation(Conversation(id="unassigned-tracker-chat", title="Loose"))
-        content = "排查 ROS 2 节点延迟。"
-        model = ScriptedContextualModel(
-            [
-                {
-                    "intent": "tracker_change",
-                    "project_changes": [{"action": "create_record", "kind": "task", "content": content, "source_quote": content}],
-                }
-            ]
-        )
-
-        turn = self.submit(model, content, "unassigned-tracker-turn", conversation_id=unassigned.id)
-
-        self.assertEqual(turn.outcome, "write_or_dispatch_failure")
-        self.assertEqual(turn.model_calls, 1)
-        self.assertEqual(turn.operations, ())
-        self.assertEqual(turn.decision.intent, "tracker_change")
-        self.assertIn("assign a project", turn.failure_reason)
-        self.assertEqual(self.store.list_project_records(self.project.id), [])
-
     def test_a_reused_message_id_with_different_content_raises_before_the_model(self) -> None:
         model = ScriptedContextualModel([{"intent": "reply_only", "reply": "好的。"}])
         self.submit(model, "第一条消息。", "reused-message-id")
@@ -1917,8 +1790,7 @@ class ConversationRouterServiceTests(unittest.TestCase):
                 "decide",
                 "calendar_policy",
                 "clarify",
-                "local_answer",
-                "project_answer",
+                "agent",
                 "execute",
             },
         )
@@ -1933,18 +1805,16 @@ class ConversationRouterServiceTests(unittest.TestCase):
                 ("resume", "__end__"),
                 ("resume", "guard_credentials"),
                 ("guard_credentials", "__end__"),
-                ("guard_credentials", "decide"),
+                ("guard_credentials", "agent"),
+                ("agent", "__end__"),
+                ("agent", "decide"),
                 ("decide", "__end__"),
                 ("decide", "calendar_policy"),
                 ("decide", "clarify"),
-                ("decide", "local_answer"),
-                ("decide", "project_answer"),
                 ("decide", "execute"),
                 ("calendar_policy", "__end__"),
                 ("calendar_policy", "execute"),
                 ("clarify", "__end__"),
-                ("local_answer", "__end__"),
-                ("project_answer", "__end__"),
                 ("execute", "__end__"),
             },
         )

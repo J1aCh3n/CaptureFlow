@@ -164,13 +164,6 @@ def database_path() -> Path:
     return Path(os.getenv("CAPTUREFLOW_DATABASE_PATH", "data/captureflow.sqlite3"))
 
 
-def configured_answer_mode() -> str:
-    mode = os.getenv("CAPTUREFLOW_ANSWER_MODE", "workflow").strip().casefold()
-    if mode not in {"workflow", "agent"}:
-        raise ValueError("CAPTUREFLOW_ANSWER_MODE must be workflow or agent.")
-    return mode
-
-
 @st.cache_resource
 def get_store(path: str) -> CaptureStore:
     store = CaptureStore(path)
@@ -783,19 +776,17 @@ def render_chat_input(
             try:
                 settings = ModelSettings.from_environment()
                 now = configured_reference_now(timezone)
-                answer_mode = configured_answer_mode()
                 turn = ConversationRouterService(
                     store,
                     OpenAICompatibleModel(settings),
                     now.date(),
                     timezone,
                     reference_time=now.time(),
-                    answer_mode=answer_mode,
                 ).submit(conversation_id, prompt)
                 if diagnostics_enabled:
                     _remember_turn_diagnostics(
                         turn.user_message.id,
-                        mode=f"contextual_router_{answer_mode}",
+                        mode="contextual_agent",
                         intent=None if turn.decision is None else turn.decision.intent,
                         bounded_context_messages=len(turn.context_window.messages),
                         context_truncated=turn.context_window.truncated,
