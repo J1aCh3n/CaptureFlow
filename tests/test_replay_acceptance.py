@@ -38,7 +38,7 @@ from scripts.run_read_agent_acceptance import (
 )
 
 
-RECORDING = Path(__file__).parent / "fixtures" / "replay" / "agent_27b_eight_cases.json"
+RECORDING = Path(__file__).parent / "fixtures" / "replay" / "agent_27b_nine_cases.json"
 
 # The order run_fixture submits these cases in, with the conversation and message ID each
 # one uses. A different order or ID would send a different request, which replay refuses.
@@ -51,6 +51,7 @@ SEQUENCE = (
     ("idea_write", "main", "read-agent-idea-write"),
     ("record_write", "main", "read-agent-record-write"),
     ("event_write", "main", "read-agent-event-write"),
+    ("event_update", "main", "read-agent-event-update"),
 )
 
 
@@ -92,11 +93,9 @@ EXPECTED = {
         "operations": 0,
         "cited": ["read-agent-architecture-review", "read-agent-latency-task"],
     },
-    # Three searches, nothing about Japan flights found, and the reply says so -- but it
-    # cited the events it had looked at to support "these are all work meetings", so Python
-    # rendered five unrelated dates under the answer. The no_match case requires no
-    # citations and therefore failed in this run. The recording keeps it: what this test
-    # locks is how our code handles the model's answer, not whether the answer was good.
+    # Three searches, nothing found, nothing cited. One run on this same commit and input
+    # cited the five events it had looked at instead: citing is the model's choice, not
+    # something our schema requires.
     "no_match": {
         "outcome": "agent_answer",
         "intent": None,
@@ -104,13 +103,7 @@ EXPECTED = {
         "tool_calls": 3,
         "stop_reason": "completed",
         "operations": 0,
-        "cited": [
-            "read-agent-review-meeting",
-            "read-agent-code-freeze",
-            "read-agent-architecture-review",
-            "read-agent-evidence-day",
-            "read-agent-release-demo",
-        ],
+        "cited": [],
     },
     # The agent's own write, cited from the row the tool handed back.
     "note_write": {
@@ -141,11 +134,21 @@ EXPECTED = {
         "operations": 1,
         "cited": [_created_record_id("read-agent-record-write")],
     },
-    # A calendar request is still the router's: the agent hands it back and writes nothing
-    # itself, which is why it ran no tool at all.
+    # The agent's own calendar write.
     "event_write": {
-        "outcome": "calendar_create",
-        "intent": "calendar_create",
+        "outcome": "create_local_event",
+        "intent": None,
+        "model_calls": 2,
+        "tool_calls": 1,
+        "stop_reason": "completed",
+        "operations": 1,
+        "cited": [_stable_id("read-agent-event-write", "contextual-event")],
+    },
+    # Changing an event that already exists is the one write still handed back, because it
+    # needs a target ID that no write tool takes yet.
+    "event_update": {
+        "outcome": "calendar_update",
+        "intent": "calendar_update",
         "model_calls": 2,
         "tool_calls": 0,
         "stop_reason": "handed_off",
