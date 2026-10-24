@@ -441,20 +441,6 @@ class ProjectChangeOperation(BaseModel):
         return self
 
 
-ConversationIntent = Literal[
-    "calendar_create",
-    "calendar_update",
-    "calendar_delete",
-    "save_idea",
-    "save_note",
-    "tracker_change",
-    "local_answer",
-    "project_answer",
-    "clarify",
-    "reply_only",
-]
-
-
 class EvidenceReference(BaseModel):
     """One stored source of a Calendar event: a user message and the quote kept from it."""
 
@@ -573,98 +559,6 @@ class ContextualAction(BaseModel):
                 self.duration_minutes,
             )
         )
-
-
-_WRITE_INTENTS = {
-    "calendar_create",
-    "calendar_update",
-    "calendar_delete",
-    "save_idea",
-    "save_note",
-    "tracker_change",
-}
-
-
-class ConversationDecision(BaseModel):
-    """The one decision a model makes per chat turn; it does not write storage itself."""
-
-    # A key the schema does not have, such as a retired pending action, is noise.
-    model_config = ConfigDict(extra="ignore")
-
-    intent: ConversationIntent
-    action: ContextualAction | None = None
-    project_changes: list[ProjectChange] = Field(default_factory=list, max_length=3)
-    follow_up_question: str | None = Field(default=None, max_length=300)
-    reply: str | None = Field(default=None, max_length=1_000)
-    source_ids: list[str] = Field(default_factory=list, max_length=6)
-
-    @field_validator("follow_up_question", "reply")
-    @classmethod
-    def optional_reply_text_is_not_whitespace(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        value = value.strip()
-        return value or None
-
-    @model_validator(mode="before")
-    @classmethod
-    def ignore_payloads_the_intent_does_not_use(cls, value: object) -> object:
-        # A field the intent never reads is not wrong, so it is dropped rather than
-        # rejected: source_ids only feed an answer's source cards, a question or an
-        # answer writes nothing, and a follow-up question is only appended to a write.
-        if not isinstance(value, dict):
-            return value
-        intent = value.get("intent")
-        unused = set()
-        if intent not in {"local_answer", "project_answer", "reply_only"}:
-            unused.add("source_ids")
-        if intent not in _WRITE_INTENTS:
-            unused.update({"action", "project_changes", "follow_up_question"})
-        return {key: item for key, item in value.items() if key not in unused}
-
-    @field_validator("source_ids")
-    @classmethod
-    def source_ids_are_unique(cls, value: list[str]) -> list[str]:
-        if len(set(value)) != len(value):
-            raise ValueError("answer source IDs must be unique")
-        return value
-
-    @model_validator(mode="after")
-    def intent_matches_payload(self) -> "ConversationDecision":
-        action_for_intent = {
-            "calendar_create": "create_event",
-            "calendar_update": "update_event",
-            "calendar_delete": "delete_event",
-            "save_idea": "save_idea",
-            "save_note": "save_note",
-        }
-        expected_action = action_for_intent.get(self.intent)
-        if expected_action is not None:
-            if self.action is None or self.action.action != expected_action:
-                raise ValueError(f"{self.intent} requires a {expected_action} action")
-            if (
-                self.intent in {"calendar_update", "calendar_delete"}
-                and self.action.target_event_id is None
-            ):
-                raise ValueError(f"a {self.intent.replace('_', ' ')} requires a candidate event target")
-            if self.project_changes:
-                raise ValueError("a local write cannot include tracker changes")
-        elif self.intent == "tracker_change":
-            if not self.project_changes:
-                raise ValueError("a tracker change requires project changes")
-            if self.action is not None:
-                raise ValueError("a tracker change cannot include a calendar or idea action")
-        elif self.intent == "clarify":
-            if not self.reply:
-                raise ValueError("a clarification requires its question in reply")
-        else:
-            if self.intent == "reply_only" and self.source_ids:
-                raise ValueError("a reply-only decision cannot cite local sources")
-            # An answer's text is written by Python or by a second call, never taken
-            # from the routing decision, so only reply_only needs one here.
-            if self.intent == "reply_only" and not self.reply:
-                raise ValueError("a reply-only decision requires a reply")
-        return self
 
 
 class CalendarEventUpdateOperation(BaseModel):

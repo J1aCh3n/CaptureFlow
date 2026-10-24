@@ -27,17 +27,14 @@ from typing import Any
 from pydantic import BaseModel
 
 from captureflow.llm import InvalidStructuredOutput, ModelError
-from captureflow.models import ConversationDecision
 from captureflow.read_agent import AgentModelTurn
 
 
 RECORDING_VERSION = 1
 
-# The two calls a turn can make, with the schema each answer is read back as.
-RESPONSE_SCHEMAS: dict[str, type[BaseModel]] = {
-    "propose_conversation_decision": ConversationDecision,
-    "next_read_agent_turn": AgentModelTurn,
-}
+# The one call a turn makes, with the schema its answer is read back as. There used to be
+# a second, the router's single decision, which the agent's tools replaced.
+RESPONSE_SCHEMAS: dict[str, type[BaseModel]] = {"next_read_agent_turn": AgentModelTurn}
 
 # The loop branches on InvalidStructuredOutput, so a recording that flattened every
 # failure into one class would replay the wrong control flow.
@@ -62,9 +59,6 @@ class RecordingModel:
     def __init__(self, model: Any) -> None:
         self.model = model
         self.calls: list[dict[str, Any]] = []
-
-    def propose_conversation_decision(self, **kwargs) -> ConversationDecision:
-        return self._call("propose_conversation_decision", kwargs)
 
     def next_read_agent_turn(self, **kwargs) -> AgentModelTurn:
         return self._call("next_read_agent_turn", kwargs)
@@ -102,9 +96,6 @@ class ReplayModel:
             )
         self.calls = list(recording["calls"])
         self.position = 0
-
-    def propose_conversation_decision(self, **kwargs) -> ConversationDecision:
-        return self._next("propose_conversation_decision", kwargs)
 
     def next_read_agent_turn(self, **kwargs) -> AgentModelTurn:
         return self._next("next_read_agent_turn", kwargs)
@@ -149,9 +140,6 @@ class LooseReplayModel:
         self.calls = list(recording["calls"])
         self.position = 0
         self.sent: list[tuple[str, str, dict[str, Any]]] = []
-
-    def propose_conversation_decision(self, **kwargs) -> ConversationDecision:
-        return self._next("propose_conversation_decision", kwargs)
 
     def next_read_agent_turn(self, **kwargs) -> AgentModelTurn:
         return self._next("next_read_agent_turn", kwargs)

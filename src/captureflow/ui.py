@@ -787,12 +787,8 @@ def render_chat_input(
                     _remember_turn_diagnostics(
                         turn.user_message.id,
                         mode="contextual_agent",
-                        intent=None if turn.decision is None else turn.decision.intent,
                         bounded_context_messages=len(turn.context_window.messages),
                         context_truncated=turn.context_window.truncated,
-                        candidate_events=len(turn.candidates.events),
-                        candidate_saved_items=len(turn.candidates.saved_items),
-                        candidate_project_records=len(turn.candidates.project_records),
                         outcome=turn.outcome,
                         failure_reason=turn.failure_reason,
                         model_calls=turn.model_calls,
@@ -815,12 +811,8 @@ def render_chat_input(
                     _remember_turn_diagnostics(
                         turn.user_message.id,
                         mode="configuration_error",
-                        intent=None,
                         bounded_context_messages=0,
                         context_truncated=False,
-                        candidate_events=0,
-                        candidate_saved_items=0,
-                        candidate_project_records=0,
                         outcome="no_model_call",
                         model_calls=0,
                         model_seconds=0,
@@ -856,17 +848,11 @@ def _render_turn_diagnostics(message_id: str) -> None:
                 f"Agent tools: {diagnostics.get('tool_calls', 0)} · "
                 f"Stop: {diagnostics.get('agent_stop_reason') or 'not available'}"
             )
-        if "intent" in diagnostics:
-            intent = diagnostics["intent"] or "not available"
+        if "bounded_context_messages" in diagnostics:
+            # A local shortcut never built a context window, so it has none to report.
             st.caption(
-                f"Intent: {intent} · Bounded context: "
-                f"{diagnostics['bounded_context_messages']} message(s) · "
+                f"Bounded context: {diagnostics['bounded_context_messages']} message(s) · "
                 f"Truncated: {'yes' if diagnostics['context_truncated'] else 'no'}"
-            )
-            st.caption(
-                f"Candidates: events {diagnostics['candidate_events']} · "
-                f"ideas/notes {diagnostics['candidate_saved_items']} · "
-                f"project records {diagnostics['candidate_project_records']}"
             )
         st.caption("Session-only timing; prompts, raw model output, and credentials are not stored.")
 

@@ -15,13 +15,12 @@ from pydantic import ValidationError
 from .context_service import ContextWindow, RouterCandidates, select_context_window, select_router_candidates
 from .credentials import contains_credential_disclosure
 from .date_tool import calendar_reference
-from .llm import ContextualConversationModel, InvalidStructuredOutput, ModelError, describe_validation_error
+from .llm import CaptureFlowModel, InvalidStructuredOutput, ModelError, describe_validation_error
 from .local_context_service import answer_source_references
 from .models import (
     CalendarEvent,
     CalendarEventUpdateOperation,
     ContextualAction,
-    ConversationDecision,
     EvidenceReference,
     Message,
     ProjectChange,
@@ -51,7 +50,6 @@ MAX_EVENT_SOURCES = 3
 class ConversationRouterTurn:
     user_message: Message
     assistant_message: Message
-    decision: ConversationDecision | None
     context_window: ContextWindow
     candidates: RouterCandidates
     operations: tuple[RouterOperation, ...]
@@ -145,9 +143,12 @@ class _TurnWriter:
         operations, reply = step(self.user_message, contextual, self.context_window)
         self.operations = (*self.operations, *operations)
         self.replies.append(reply)
-        self.outcomes.append(
-            "calendar_update" if action == "update_event" else "calendar_delete_review"
-        )
+        if action != "update_event":
+            self.outcomes.append("calendar_delete_review")
+        else:
+            # Name the result, not the step: an update that matched what was already
+            # stored changed nothing, and reporting it as a change would be false.
+            self.outcomes.append("calendar_update" if operations else "calendar_unchanged")
         if not operations or operations[0].status != "committed":
             # A deletion waits for the user, and an update that changed nothing stored nothing.
             return None, reply
@@ -158,10 +159,7 @@ class _TurnWriter:
     ) -> tuple[ProjectRecord | None, str]:
         operations, reply = self.service._apply_tracker_change(
             self.user_message,
-            ConversationDecision(
-                intent="tracker_change",
-                project_changes=[ProjectChange(action=action, target_record_id=target.id, **fields)],
-            ),
+            [ProjectChange(action=action, target_record_id=target.id, **fields)],
             self.context_window,
             # The ledger's row is the candidate list: the model had to search for it.
             RouterCandidates(events=(), saved_items=(), project_records=(target,)),
@@ -216,10 +214,7 @@ class _TurnWriter:
 
         operations, reply = self.service._apply_tracker_change(
             self.user_message,
-            ConversationDecision(
-                intent="tracker_change",
-                project_changes=[ProjectChange(action="create_record", **fields)],
-            ),
+            [ProjectChange(action="create_record", **fields)],
             self.context_window,
             self.candidates,
         )
@@ -251,12 +246,7 @@ class RouterState(TypedDict, total=False):
     context_window: ContextWindow
     candidates: RouterCandidates
     existing_reply: Message | None
-    decision: ConversationDecision
-    model_seconds: float
     local_started: float
-    # What the agent spent before handing a write back, so the turn reports every call.
-    agent_usage: ReadAgentUsage | None
-    hand_off: str | None
     # Set by the node that finishes the turn; None while the turn continues.
     turn: ConversationRouterTurn | None
 
@@ -267,7 +257,7 @@ class ConversationRouterService:
     def __init__(
         self,
         store: CaptureStore,
-        model: ContextualConversationModel,
+        model: CaptureFlowModel,
         reference_date: date,
         timezone: str = "America/Vancouver",
         reference_time: time | None = None,
@@ -300,12 +290,8 @@ class ConversationRouterService:
         graph.add_node("reload", self._reload)
         graph.add_node("resume", self._resume)
         graph.add_node("guard_credentials", self._guard_credentials)
-        graph.add_node("decide", self._decide)
-        graph.add_node("calendar_policy", self._guarded(self._calendar_policy))
-        graph.add_node("clarify", self._guarded(self._clarify))
-        graph.add_node("execute", self._execute_decision)
-        # The node guards itself: it runs before any decision exists, so _guarded's failure
-        # reply cannot read one.
+        # The node guards itself, and it finishes every turn it starts: there is no second
+        # decision behind it any more.
         graph.add_node("agent", self._agent_front)
 
         graph.add_edge(START, "load_turn")
@@ -313,13 +299,7 @@ class ConversationRouterService:
         graph.add_edge("reload", END)
         graph.add_conditional_edges("resume", _unless_finished("guard_credentials"), [END, "guard_credentials"])
         graph.add_conditional_edges("guard_credentials", _unless_finished("agent"), [END, "agent"])
-        graph.add_conditional_edges("agent", _unless_finished("decide"), [END, "decide"])
-        graph.add_conditional_edges(
-            "decide", _dispatch, [END, "calendar_policy", "clarify", "execute"]
-        )
-        graph.add_conditional_edges("calendar_policy", _unless_finished("execute"), [END, "execute"])
-        for node in ("clarify", "execute"):
-            graph.add_edge(node, END)
+        graph.add_edge("agent", END)
         return graph.compile()
 
     # Graph nodes. Each reads the turn so far and returns only the keys it sets.
@@ -341,7 +321,6 @@ class ConversationRouterService:
             "turn": ConversationRouterTurn(
                 user_message,
                 state["existing_reply"],
-                None,
                 state["context_window"],
                 state["candidates"],
                 self._persisted_operations(user_message.id),
@@ -357,7 +336,6 @@ class ConversationRouterService:
             "turn": self._reply(
                 state["user_message"],
                 "Resumed the saved local operation without another model call.",
-                None,
                 state["context_window"],
                 state["candidates"],
                 resumed,
@@ -372,78 +350,12 @@ class ConversationRouterService:
             "turn": self._reply(
                 state["user_message"],
                 "I did not process that message because it appears to contain a credential.",
-                None,
                 state["context_window"],
                 state["candidates"],
                 (),
                 outcome="blocked_credential",
             )
         }
-
-    def _decide(self, state: RouterState) -> RouterState:
-        """The turn's one routing call, and the check that its IDs are candidates."""
-
-        user_message = state["user_message"]
-        context_window = state["context_window"]
-        candidates = state["candidates"]
-        started = perf_counter()
-        try:
-            decision = ConversationDecision.model_validate(
-                self.model.propose_conversation_decision(
-                    current_message=self._message_for_router(user_message),
-                    recent_messages=context_window.for_router(),
-                    **candidates.for_router(),
-                    truncated_candidate_lists=list(candidates.truncated_kinds),
-                    reference_date=self.reference_date.isoformat(),
-                    reference_time=(
-                        None if self.reference_time is None else self.reference_time.strftime("%H:%M")
-                    ),
-                    timezone=self.timezone,
-                    context_truncated=context_window.truncated,
-                    calendar=calendar_reference(self.reference_date),
-                )
-            )
-            self._validate_decision(decision, candidates)
-        except (InvalidStructuredOutput, ModelError, ValidationError, ValueError) as error:
-            return {
-                "turn": self._reply(
-                    user_message,
-                    "I could not safely validate this conversation decision, so no local record was changed.",
-                    None,
-                    context_window,
-                    candidates,
-                    (),
-                    **self._spent(state, perf_counter() - started),
-                    outcome="model_or_validation_failure",
-                    failure_reason=_failure_reason(error),
-                )
-            }
-        return {"decision": decision, "model_seconds": perf_counter() - started, "local_started": perf_counter()}
-
-    def _guarded(
-        self, step: Callable[[RouterState], ConversationRouterTurn | None]
-    ) -> Callable[[RouterState], RouterState]:
-        """A step after the decision; a local rule it breaks fails the turn without a write."""
-
-        def node(state: RouterState) -> RouterState:
-            try:
-                return {"turn": step(state)}
-            except (KeyError, ValidationError, ValueError) as error:
-                return {"turn": self._dispatch_failure(state, error)}
-
-        return node
-
-    def _calendar_policy(self, state: RouterState) -> ConversationRouterTurn | None:
-        missing_field = self._calendar_clarification_field(state["decision"].action)
-        if missing_field is None:
-            return None
-        # Python's policy question is a plain reply; nothing waits for the answer.
-        assistant = self._assistant_message(state["user_message"], self._question(missing_field))
-        return self._turn_without_writes(state, assistant, "clarification_created")
-
-    def _clarify(self, state: RouterState) -> ConversationRouterTurn:
-        assistant = self._assistant_message(state["user_message"], state["decision"].reply or "")
-        return self._turn_without_writes(state, assistant, "clarification_created")
 
     def _agent_front(self, state: RouterState) -> RouterState:
         """Let the agent take the turn; a write it hands back continues to the router."""
@@ -468,7 +380,6 @@ class ConversationRouterService:
         usage = ReadAgentUsage()
         try:
             run = ReadAgentLoop(self.model).run(
-                hand_off=True,
                 system_prompt=prompt,
                 user_input={
                     "message": self._message_for_router(state["user_message"]),
@@ -494,11 +405,6 @@ class ConversationRouterService:
                     writer=writer,
                 )
             }
-
-        if run.stop_reason == "handed_off":
-            # The turn is not finished: the router decides and validates the write, as before.
-            # A hand-off cannot follow a write, so there is nothing stored to carry over.
-            return {"agent_usage": usage, "hand_off": run.hand_off}
 
         if run.final_response is None:
             content = {
@@ -590,7 +496,6 @@ class ConversationRouterService:
         return ConversationRouterTurn(
             state["user_message"],
             assistant,
-            state.get("decision"),
             state["context_window"],
             state["candidates"],
             operations,
@@ -625,7 +530,6 @@ class ConversationRouterService:
         return self._reply(
             state["user_message"],
             content,
-            state.get("decision"),
             state["context_window"],
             state["candidates"],
             operations,
@@ -637,87 +541,6 @@ class ConversationRouterService:
             outcome=outcome,
             failure_reason=failure_reason,
         )
-
-    def _execute_decision(self, state: RouterState) -> RouterState:
-        decision = state["decision"]
-        user_message = state["user_message"]
-        # Only the write is guarded: a reply that fails to save after it is not a refused write.
-        try:
-            operations, reply = self._execute(decision, user_message, state["context_window"], state["candidates"])
-        except (KeyError, ValidationError, ValueError) as error:
-            return {"turn": self._dispatch_failure(state, error)}
-
-        outcome = decision.intent if decision.intent != "reply_only" or operations else "reply_only"
-        if decision.intent == "calendar_update" and not operations:
-            outcome = "calendar_unchanged"
-        if decision.intent == "calendar_delete":
-            outcome = "calendar_delete_review"
-        # A second item is asked about only once this turn has saved its own.
-        if operations and decision.follow_up_question:
-            reply = f"{reply}\n\n{decision.follow_up_question}"
-        return {
-            "turn": self._reply(
-                user_message,
-                reply,
-                decision,
-                state["context_window"],
-                state["candidates"],
-                operations,
-                **self._spent(state, state["model_seconds"]),
-                local_seconds=perf_counter() - state["local_started"],
-                outcome=outcome,
-            )
-        }
-
-    def _turn_without_writes(
-        self, state: RouterState, assistant: Message, outcome: str
-    ) -> ConversationRouterTurn:
-        return ConversationRouterTurn(
-            state["user_message"],
-            assistant,
-            state["decision"],
-            state["context_window"],
-            state["candidates"],
-            (),
-            outcome=outcome,
-            local_seconds=perf_counter() - state["local_started"],
-            **self._spent(state, state["model_seconds"]),
-        )
-
-    def _dispatch_failure(self, state: RouterState, error: Exception) -> ConversationRouterTurn:
-        return self._reply(
-            state["user_message"],
-            f"I could not safely apply that local change: {error}",
-            state["decision"],
-            state["context_window"],
-            state["candidates"],
-            (),
-            **self._spent(state, state["model_seconds"]),
-            local_seconds=perf_counter() - state["local_started"],
-            outcome="write_or_dispatch_failure",
-            failure_reason=_failure_reason(error),
-        )
-
-    def _execute(
-        self,
-        decision: ConversationDecision,
-        user_message: Message,
-        context_window: ContextWindow,
-        candidates: RouterCandidates,
-    ) -> tuple[tuple[RouterOperation, ...], str]:
-        """Commit the decision's one local write, or return the reply for a turn with none."""
-
-        if decision.intent == "calendar_create":
-            return self._create_event(user_message, decision.action, context_window)
-        if decision.intent == "calendar_update":
-            return self._update_event(user_message, decision.action, context_window)
-        if decision.intent == "calendar_delete":
-            return self._delete_event(user_message, decision.action, context_window)
-        if decision.intent in _SAVED_ITEM_WRITES:
-            return self._save_item(user_message, decision.action)
-        if decision.intent == "tracker_change":
-            return self._apply_tracker_change(user_message, decision, context_window, candidates)
-        return (), decision.reply or "I cannot take a local action for that."
 
     def _create_event(
         self, user_message: Message, action: ContextualAction | None, context_window: ContextWindow
@@ -959,14 +782,14 @@ class ConversationRouterService:
     def _apply_tracker_change(
         self,
         user_message: Message,
-        decision: ConversationDecision,
+        changes: list[ProjectChange],
         context_window: ContextWindow,
         candidates: RouterCandidates,
     ) -> tuple[tuple[ProjectChangeOperation, ...], str]:
         project = self.store.get_conversation_project(user_message.conversation_id)
         if project is None:
             raise ValueError("assign a project before changing its tracker")
-        resolved = [self._resolved_deadline(change) for change in decision.project_changes]
+        resolved = [self._resolved_deadline(change) for change in changes]
         deadline_notes = [note for _, note in resolved if note is not None]
         changes = [change for change, _ in resolved if change is not None]
         if not changes:
@@ -1162,48 +985,10 @@ class ConversationRouterService:
             }
         )
 
-    @staticmethod
-    def _validate_decision(decision: ConversationDecision, candidates: RouterCandidates) -> None:
-        """Every ID a decision writes to or cites must be one the router supplied."""
-
-        if decision.intent in _ANSWER_INTENTS:
-            # The router is only reached by a handed-back write now, and the agent answers
-            # questions itself. The intents remain in the schema until it is retired.
-            raise ValueError("the router no longer answers questions")
-        event_ids = {event.id for event in candidates.events}
-        item_ids = {item.id for item in candidates.saved_items}
-        record_ids = {record.id for record in candidates.project_records}
-        if decision.action is not None and decision.action.target_event_id is not None:
-            if decision.action.target_event_id not in event_ids:
-                raise ValueError("calendar update target is outside supplied candidates")
-        if any(change.due_at is not None for change in decision.project_changes):
-            raise ValueError("a tracker deadline must be resolved locally, not supplied by the model")
-        if any(
-            change.target_record_id is not None and change.target_record_id not in record_ids
-            for change in decision.project_changes
-        ):
-            raise ValueError("project change target is outside supplied candidates")
-        if any(source_id not in event_ids | item_ids | record_ids for source_id in decision.source_ids):
-            raise ValueError("answer source is outside supplied candidates")
-
-    def _spent(self, state: RouterState, router_seconds: float) -> dict[str, Any]:
-        """What a decided turn has spent: the router's one call, plus a hand-off's agent calls."""
-
-        usage = state.get("agent_usage")
-        if usage is None:
-            return {"model_calls": 1, "model_seconds": router_seconds}
-        return {
-            "model_calls": 1 + usage.model_calls,
-            "model_seconds": router_seconds + usage.model_seconds,
-            "tool_calls": usage.tool_calls,
-            "agent_stop_reason": "handed_off",
-        }
-
     def _reply(
         self,
         user_message: Message,
         content: str,
-        decision: ConversationDecision | None,
         context_window: ContextWindow,
         candidates: RouterCandidates,
         operations: tuple[RouterOperation, ...],
@@ -1220,7 +1005,6 @@ class ConversationRouterService:
         return ConversationRouterTurn(
             user_message,
             assistant,
-            decision,
             context_window,
             candidates,
             operations,
@@ -1281,19 +1065,6 @@ def _unless_finished(next_node: str) -> Callable[[RouterState], str]:
         return END if state.get("turn") is not None else next_node
 
     return route
-
-
-def _dispatch(state: RouterState) -> str:
-    """After a valid decision, the step its intent needs; a failed decision ends the turn."""
-
-    if state.get("turn") is not None:
-        return END
-    intent = state["decision"].intent
-    if intent in _CALENDAR_WRITES:
-        return "calendar_policy"
-    if intent in {"clarify", "local_answer", "project_answer"}:
-        return intent
-    return "execute"
 
 
 def _failure_reason(error: Exception) -> str:

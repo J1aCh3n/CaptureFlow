@@ -1,7 +1,13 @@
 # The Contextual Router as a LangGraph Graph
 
-**Status:** implemented. Every scripted turn in the deterministic suite has the same
-result as before; see Evidence.
+**Status:** implemented, then narrowed. The migration below is what it was. Since then
+the agent took the whole turn: the one-shot routing call and the four nodes behind it
+(`decide`, `calendar_policy`, `clarify`, `execute`, and the two answer nodes) are gone,
+and a write is a tool the agent calls. The graph is now
+`load_turn → reload | resume → guard_credentials → agent → END`, five nodes, drawn
+below. The rules those nodes applied are unchanged and still reached, through
+`_TurnWriter`; what disappeared is the classification in front of them. Everything from
+**Boundary** down describes the migration as it happened and is kept as its record.
 
 ## Why
 
@@ -50,19 +56,8 @@ flowchart TD
     resume -.->|saved operations committed| END
     resume -.-> guard_credentials
     guard_credentials -.->|credential found| END
-    guard_credentials -.-> decide
-    decide -.->|model or validation failure| END
-    decide -.->|calendar write| calendar_policy
-    decide -.->|clarify| clarify
-    decide -.->|local_answer| local_answer
-    decide -.->|project_answer| project_answer
-    decide -.->|other intents| execute
-    calendar_policy -.->|policy question| END
-    calendar_policy -.-> execute
-    clarify --> END
-    local_answer --> END
-    project_answer --> END
-    execute --> END
+    guard_credentials -.-> agent
+    agent --> END
 ```
 
 Dashed edges are conditional. `test_a_turn_runs_through_the_router_graph_without_a_checkpointer`
@@ -74,16 +69,11 @@ checks the node and edge sets against this drawing.
 | `reload` | 0 | Returns the saved reply and operations (`reloaded`) | Always |
 | `resume` | 0 | Commits operations a crash left prepared (`resumed`) | Any operation exists for the message |
 | `guard_credentials` | 0 | The deterministic credential check (`blocked_credential`) | A credential is found |
-| `decide` | 1 | The routing call and the candidate-ID check | The call or validation fails (`model_or_validation_failure`) |
-| `calendar_policy` | 0 | Timezone, recurrence, date, duration, and start-time policy | A policy question is needed (`clarification_created`) |
-| `clarify` | 0 | Replies with the model's question | Always |
-| `local_answer` | 0 | Answers from the named SQLite rows or the lookup | Always |
-| `project_answer` | 0 or 1 more | The project snapshot and the second call | Always |
-| `execute` | 0 | Commits the one write, or replies for `reply_only` | Always |
+| `agent` | 1 per loop turn, up to the budget | Runs the agent loop, which searches and writes through its tools, then answers | Always |
 
-The state (`RouterState`) holds the turn's inputs, what `load_turn` and `decide`
-produced, the timing marks, and `turn`, which the finishing node sets. It lives only
-for one `submit()`.
+The state (`RouterState`) holds the turn's inputs, what `load_turn` produced, the
+timing marks, and `turn`, which the finishing node sets. It lives only for one
+`submit()`.
 
 Errors keep the method's old boundaries. A `KeyError`, `ValueError`, or
 `ValidationError` from a step after the decision becomes `write_or_dispatch_failure`;

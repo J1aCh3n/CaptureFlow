@@ -84,7 +84,7 @@ captureflow/
 │   ├── local_context_service.py    # Answers about specific events, ideas, notes, or records
 │   ├── project_answer_service.py   # Project snapshot and the second model call for project questions
 │   ├── project_service.py          # Validates tracker changes and commits those needing no review
-│   ├── models.py                   # Pydantic models: records, operations, ConversationDecision
+│   ├── models.py                   # Pydantic models: records, operations, stored changes
 │   ├── storage.py                  # CaptureStore: every SQLite read and write
 │   ├── migrations.py               # Ordered, versioned schema migrations
 │   ├── credentials.py              # Deterministic credential-disclosure check
@@ -94,7 +94,8 @@ captureflow/
 │   └── fixtures/                   # Frozen Phase 9 and Phase 10 acceptance cases
 ├── scripts/
 │   ├── run_local_app.ps1           # Starts Streamlit from this checkout with Qwen defaults
-│   └── run_phase10_live_acceptance.py  # Live acceptance run against a real model
+│   ├── model_replay.py             # Records one live run's answers, then replays them free
+│   └── run_read_agent_acceptance.py  # Live acceptance run against a real model
 └── docs/                           # Phase designs, evidence, and migration notes
 ```
 
@@ -127,20 +128,23 @@ message goes to the contextual router
 
 1. A deterministic credential check runs first and blocks the turn without a
    model call.
-2. The model receives the context in layers: the recent conversation within
-   12,000 characters, where the last two turns are always whole and an older long
-   message is a one-line reference; the stored state as one line per item (up to
-   15 events from the calendar window, 30 active project records, and 20 ideas or
-   notes, plus up to five further events the message names); the current local
-   date and time; and a calendar table. A message the credential check blocked is
-   never included.
-3. It returns one `ConversationDecision`: `calendar_create`, `calendar_update`,
-   `calendar_delete`, `save_idea`, `save_note`, `tracker_change` (for a
-   conversation assigned to a project), `local_answer`, `project_answer`,
-   `clarify`, or `reply_only`.
-4. Python checks every candidate ID, applies policy, and commits at most one
-   local write through an audited, restart-safe operation. Every committed change
-   is visible in Chat and has a guarded Undo.
+2. The agent receives the message, the recent conversation within 12,000
+   characters (the last two turns whole, an older long message as a one-line
+   reference), the current local date and time, and a calendar table. Stored state
+   is not pre-selected into the prompt: the agent searches for what it needs. A
+   message the credential check blocked is never included.
+3. The agent takes the turn. It searches with `search_calendar`,
+   `search_project_records` and `search_saved_items`, decides what to do next from
+   what came back, and writes with one of nine write tools: `save_note`,
+   `save_idea`, `create_record`, `create_event`, `update_event`, `delete_event`,
+   `transition_record`, `set_deadline`, `supersede_record`. There is no
+   classification step and no intent.
+4. Python owns every write. The rules are the tools' parameters and the router's
+   own checks behind them, and a tool that names something stored must have found
+   it with a search in the same turn: the provenance ledger refuses an ID that did
+   not come back from a tool, is out of scope, or has changed. One turn stores one
+   change, through an audited, restart-safe operation. Every committed change is
+   visible in Chat and has a guarded Undo.
 
 These steps are the nodes of a LangGraph `StateGraph`, compiled without a
 checkpointer: recovery after a crash comes from the stored operations alone. See
@@ -164,23 +168,17 @@ Behavior worth knowing:
 - A stated foreign timezone or a repeating schedule is clarified rather than
   stored, because neither is supported.
 - A meeting reported as already held becomes a note, not a Calendar event.
-- One turn commits one action or up to three tracker changes. When a message
-  states a second item, CaptureFlow asks about it in a follow-up question.
-- An event's source card shows the whole user messages it came from. A tracker
-  record keeps a short quote, which may come from an earlier message such as
-  pasted minutes; a quote that is not exact falls back to the whole message.
+- One turn stores one change: a second write in the same turn is refused. That is
+  what keeps a prepared operation's ID stable and a crash in the middle
+  recoverable.
+- A stored change quotes the message that asked for it, which is the message that
+  authorizes it.
 - A task deadline appears on the Calendar without becoming an event.
 - Replacing an active decision or constraint waits for approval from its Chat card.
-- A question about specific stored items (`local_answer`) — a meeting, an idea or
-  note, or one task's deadline — is answered from the SQLite rows the model named,
-  with source cards and times rendered from storage. When the model names none, a
-  date and keyword lookup finds them. It works in an unassigned conversation.
-- A question about the whole project (`project_answer`) — progress, outstanding
-  work, blockers, or why a decision changed — makes a second model call over a
-  bounded snapshot of the project's records, including superseded decisions and
-  upcoming events. Python checks every citation and renders deadlines and event
-  times under the answer. See
-  [phase-12-answer-intents-design.md](docs/phase-12-answer-intents-design.md).
+- A question is answered from the rows the agent's own searches returned and
+  cited. Python checks every citation against the ledger and renders dates and
+  times from storage, under source cards. An unassigned conversation is simply
+  offered fewer tools.
 
 Known limits: a bare hour such as `明天十点` is resolved to 10:00 without a
 question, and the reply states it; range questions such as `我下周有什么安排？` are
@@ -204,15 +202,17 @@ configuration failure and creates no record.
 
 Turn on **Diagnostics** in the Streamlit sidebar before submitting a message. The
 matching assistant response then includes a collapsed session-only panel with
-the intent, candidate counts, model-call count, model time, local
-validation/write time, outcome, and total submit time. Diagnostics are off by
+the model-call and tool-call counts, model time, local write time, outcome,
+the agent's stop reason, and total submit time. Diagnostics are off by
 default and do not store prompts, raw model output, credentials, or new database
 rows.
 
 ## Status and evidence
 
-The deterministic suite passes 190 tests. It verifies the database, validation,
-and model-write boundaries with scripted model decisions.
+The deterministic suite passes 279 tests. It verifies the database, the tools,
+the validation and write boundaries, and the whole turn, from scripted agent turns.
+A recorded live run can drive the same code for free; the recording for the current
+tools has not been taken yet, so no replay test is in the suite at the moment.
 
 The frozen Phase 10 live acceptance (20 ordered records, protocol version 3)
 exercises calendar creation and correction, task distinction, meeting questions,
@@ -241,7 +241,7 @@ local database and writes a trace without credentials or raw model output to the
 ignored output directory:
 
 ```powershell
-python scripts/run_phase10_live_acceptance.py --output-dir runs/phase10-live-YYYYMMDD
+python -m scripts.run_read_agent_acceptance run --output-dir runs/agent-live-YYYYMMDD
 ```
 
 The fixture's model is the acceptance protocol. To run the same cases

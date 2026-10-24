@@ -19,7 +19,6 @@ MAX_AGENT_TOOL_CALLS = 6
 
 AgentStopReason = Literal[
     "completed",
-    "handed_off",
     "validation_failed",
     "model_budget_exhausted",
     "tool_budget_exhausted",
@@ -57,41 +56,6 @@ _RESPOND_DEFINITION = {
         "name": RESPOND_TOOL,
         "description": "Give your final response. Call it once, alone, when you have finished searching.",
         "parameters": AgentFinalResponse.model_json_schema(),
-    },
-}
-
-
-class HandOffRequest(BaseModel):
-    """What the model says the message asks to change; the router reads the message itself."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    request: str = Field(min_length=1, max_length=300)
-
-    @field_validator("request")
-    @classmethod
-    def normalize_request(cls, value: str) -> str:
-        value = value.strip()
-        if not value:
-            raise ValueError("request must contain text")
-        return value
-
-
-HAND_OFF_TOOL = "hand_off_write"
-# Writing stays behind the router's validated path, so the loop only reports that a write
-# was asked for and stops. Calling it once and stopping is what keeps one turn to one write.
-_HAND_OFF_DEFINITION = {
-    "type": "function",
-    "function": {
-        "name": HAND_OFF_TOOL,
-        "description": (
-            "Call this when the message asks for a stored change that none of the offered write "
-            "tools makes: changing or deleting something that already exists, or finishing, "
-            "replacing or re-dating a record. CaptureFlow carries out the change itself after "
-            "this call, so call it alone and do not search first. Anything a write tool above "
-            "covers, it does: use that tool instead."
-        ),
-        "parameters": HandOffRequest.model_json_schema(),
     },
 }
 
@@ -158,7 +122,6 @@ class ReadAgentUsage:
 @dataclass(frozen=True)
 class ReadAgentRun:
     final_response: AgentFinalResponse | None
-    hand_off: str | None
     observed_resources: dict[str, ObservedResource]
     model_calls: int
     tool_calls: int
@@ -170,10 +133,8 @@ class ReadAgentRun:
 class ReadAgentState(TypedDict, total=False):
     messages: list[dict[str, Any]]
     tools: BoundReadTools
-    hand_off_allowed: bool
     model_turn: AgentModelTurn | None
     final_response: AgentFinalResponse | None
-    hand_off: str | None
     usage: ReadAgentUsage
     stop_reason: AgentStopReason | None
 
@@ -202,7 +163,6 @@ class ReadAgentLoop:
         user_input: dict[str, Any],
         tools: BoundReadTools,
         usage: ReadAgentUsage | None = None,
-        hand_off: bool = False,
     ) -> ReadAgentRun:
         usage = ReadAgentUsage() if usage is None else usage
         initial: ReadAgentState = {
@@ -218,9 +178,7 @@ class ReadAgentLoop:
                 {"role": "user", "content": json.dumps(user_input, ensure_ascii=False)},
             ],
             "tools": tools,
-            "hand_off_allowed": hand_off,
             "final_response": None,
-            "hand_off": None,
             "usage": usage,
             "stop_reason": None,
         }
@@ -230,7 +188,6 @@ class ReadAgentLoop:
             raise RuntimeError("read agent graph ended without a stop reason")
         return ReadAgentRun(
             final_response=state.get("final_response"),
-            hand_off=state.get("hand_off"),
             observed_resources=dict(tools.observed_resources),
             model_calls=usage.model_calls,
             tool_calls=usage.tool_calls,
@@ -264,17 +221,9 @@ class ReadAgentLoop:
             or usage.tool_calls >= self.max_tool_calls
         )
         messages = state["messages"]
-        # A write can still be handed back on the reserved call: offering only respond would
-        # force an answer to a message that asked for a change. Once this turn has stored a
-        # change, handing another one back would make two, which the stable IDs of a prepared
-        # operation cannot represent.
-        hand_off_open = bool(state.get("hand_off_allowed")) and not state["tools"].wrote_this_turn
-        closing = [_RESPOND_DEFINITION]
-        if hand_off_open:
-            closing.append(_HAND_OFF_DEFINITION)
-        definitions = [*state["tools"].definitions_for_model(), *closing]
+        definitions = [*state["tools"].definitions_for_model(), _RESPOND_DEFINITION]
         if finishing:
-            definitions = closing
+            definitions = [_RESPOND_DEFINITION]
             messages = [*messages, {
                 "role": "user",
                 "content": (
@@ -306,19 +255,6 @@ class ReadAgentLoop:
         finally:
             usage.model_seconds += perf_counter() - started
         update: ReadAgentState = {"model_turn": turn, "messages": messages}
-        handed_off = next(
-            (call for call in turn.tool_calls if call.name == HAND_OFF_TOOL), None
-        )
-        if handed_off is not None and hand_off_open:
-            try:
-                update["hand_off"] = HandOffRequest.model_validate(handed_off.arguments).request
-            except ValidationError:
-                # The restatement is only a note in the trace; the router reads the message
-                # itself, so an unreadable one is not worth a round trip. stop_reason carries
-                # the hand-off either way.
-                update["hand_off"] = None
-            update["stop_reason"] = "handed_off"
-            return update
         if finishing and turn.tool_calls:
             update["stop_reason"] = (
                 "tool_budget_exhausted" if usage.tool_calls >= self.max_tool_calls

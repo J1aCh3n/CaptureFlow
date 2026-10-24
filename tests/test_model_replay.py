@@ -20,7 +20,7 @@ from captureflow.models import (
     Project,
     ProjectRecord,
 )
-from captureflow.read_agent import HAND_OFF_TOOL, AgentFinalResponse, AgentModelTurn, AgentToolCall
+from captureflow.read_agent import AgentFinalResponse, AgentModelTurn, AgentToolCall
 from captureflow.storage import CaptureStore
 from scripts.model_replay import RECORDING_VERSION, RecordingModel, ReplayModel
 
@@ -34,18 +34,7 @@ def _scripted():
     """One agent read turn, then one write turn, as the model would answer them."""
 
     return ScriptedContextualModel(
-        # Only the handed-back write reaches the router's decision.
         [
-            {
-                "intent": "save_note",
-                "action": {
-                    "action": "save_note",
-                    "content": "Latency work starts after the review.",
-                    "source_message_ids": ["replay-write"],
-                },
-            }
-        ],
-        agent_turns=[
             AgentModelTurn(
                 tool_calls=[
                     AgentToolCall(
@@ -63,12 +52,13 @@ def _scripted():
             AgentModelTurn(
                 tool_calls=[
                     AgentToolCall(
-                        id="hand-off",
-                        name=HAND_OFF_TOOL,
-                        arguments={"request": "Save a note about latency work."},
+                        id="save",
+                        name="save_note",
+                        arguments={"content": "Latency work starts after the review."},
                     )
                 ]
             ),
+            AgentModelTurn(final_response=AgentFinalResponse(reply="Saved your note.")),
         ],
     )
 
@@ -162,7 +152,7 @@ class ModelReplayTests(unittest.TestCase):
                 "next_read_agent_turn",
                 "next_read_agent_turn",
                 "next_read_agent_turn",
-                "propose_conversation_decision",
+                "next_read_agent_turn",
             ],
         )
 
@@ -197,12 +187,15 @@ class ModelReplayTests(unittest.TestCase):
             replay.next_read_agent_turn(messages=[{"role": "user", "content": "other"}], tools=[])
 
     def test_a_run_that_calls_a_different_method_is_refused(self) -> None:
+        # A turn sends one method today, so this asks the dispatcher directly. The guard
+        # stays because a recording is a list of calls in order: a second method added
+        # later must not silently read an answer recorded for the first.
         recorder = RecordingModel(_scripted())
         self._run(self._store("recorded"), recorder)
         replay = ReplayModel(recorder.recording(model="scripted"))
 
         with self.assertRaisesRegex(AssertionError, "is next_read_agent_turn"):
-            replay.propose_conversation_decision(current_message={}, recent_messages=[])
+            replay._next("propose_conversation_decision", {})
 
     def test_a_run_longer_than_its_recording_is_refused(self) -> None:
         recorder = RecordingModel(_scripted())
@@ -222,7 +215,7 @@ class ModelReplayTests(unittest.TestCase):
             (ModelError("provider refused"), ModelError),
         ):
             with self.subTest(error=type(error).__name__):
-                recorder = RecordingModel(ScriptedContextualModel([], agent_turns=[error]))
+                recorder = RecordingModel(ScriptedContextualModel([error]))
                 with self.assertRaises(expected):
                     recorder.next_read_agent_turn(messages=[{"role": "user"}], tools=[])
                 replay = ReplayModel(recorder.recording(model="scripted"))

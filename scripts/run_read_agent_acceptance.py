@@ -24,12 +24,6 @@ from captureflow.llm import ModelSettings, OpenAICompatibleModel
 from captureflow.models import CalendarEvent, Conversation, Message, Project, ProjectRecord, SavedItem
 from captureflow.storage import CaptureStore
 from scripts.model_replay import RecordingModel
-from scripts.run_phase10_live_acceptance import (
-    TokenCounter,
-    _git_revision,
-    _validate_model_selection,
-    _working_tree_dirty,
-)
 
 ROOT = Path(__file__).parents[1]
 FIXTURE = ROOT / "tests" / "fixtures" / "read_agent_acceptance.json"
@@ -86,6 +80,75 @@ PROVIDER_ACCESS_ERROR = re.compile(r"Error code: (401|403)\b")
 # Seeded rows are stamped with this instead of the moment of seeding, so a recorded run can
 # be replayed: see seed_database.
 SEED_INSTANT = datetime(2026, 9, 8, 12, 0, tzinfo=timezone.utc)
+
+
+# Moved here when the Phase 10 acceptance script was deleted with the router path it
+# drove; these four are about the run, not about any one protocol.
+class TokenCounter:
+    """Record each model request's token counts; the prompt and output are not kept."""
+
+    def __init__(self, model: OpenAICompatibleModel) -> None:
+        self.requests: list[tuple[int | None, int | None]] = []
+        completions = model.client.chat.completions
+        create = completions.create
+
+        def counted_create(**kwargs):
+            response = create(**kwargs)
+            usage = getattr(response, "usage", None)
+            self.requests.append(
+                (getattr(usage, "prompt_tokens", None), getattr(usage, "completion_tokens", None))
+            )
+            return response
+
+        completions.create = counted_create
+
+    def since(self, start: int) -> dict[str, int | None]:
+        requests = self.requests[start:]
+        return {
+            "input_tokens": _total(count for count, _ in requests),
+            "output_tokens": _total(count for _, count in requests),
+        }
+
+
+def _validate_model_selection(
+    configured_model: str, protocol_model: str, allow_override: bool
+) -> bool:
+    model_overridden = configured_model != protocol_model
+    if model_overridden and not allow_override:
+        raise SystemExit(
+            f"expected CAPTUREFLOW_MODEL={protocol_model}; "
+            "pass --allow-model-override for a cross-model run"
+        )
+    return model_overridden
+
+
+def _git_revision() -> str | None:
+    try:
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
+def _working_tree_dirty() -> bool | None:
+    try:
+        return bool(
+            subprocess.run(
+                ["git", "status", "--porcelain"], check=True, capture_output=True, text=True
+            ).stdout.strip()
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+
+def _total(counts) -> int | None:
+    counts = list(counts)
+    return None if not counts or None in counts else sum(counts)
 
 
 def main() -> int:
@@ -207,7 +270,6 @@ def run_fixture(
             "name": name,
             "elapsed_seconds": perf_counter() - started,
             "outcome": turn.outcome,
-            "intent": None if turn.decision is None else turn.decision.intent,
             "model_calls": turn.model_calls,
             "tool_calls": turn.tool_calls,
             "agent_stop_reason": turn.agent_stop_reason,

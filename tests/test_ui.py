@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import unittest
@@ -18,56 +19,44 @@ from captureflow.models import (
 )
 from captureflow.storage import CaptureStore
 from captureflow.time_config import configured_reference_date
-from captureflow.read_agent import HAND_OFF_TOOL, AgentFinalResponse, AgentModelTurn, AgentToolCall
+from captureflow.read_agent import AgentFinalResponse, AgentModelTurn, AgentToolCall
 
 
-class _HandsOffWrites:
-    """The agent takes every turn now, so a write fake has to hand the write back first."""
+class _CalendarWritingUiModel:
+    """A deterministic seam: AppTest never reaches an external model.
 
-    def next_read_agent_turn(self, **_: object) -> AgentModelTurn:
-        return AgentModelTurn(
-            tool_calls=[
-                AgentToolCall(
-                    id="ui-hand-off",
-                    name=HAND_OFF_TOOL,
-                    arguments={"request": "Apply the change the message asks for."},
-                )
-            ]
-        )
+    One turn creates an event with a write tool; the next searches for it and moves it,
+    taking the id out of that search's own result, which is the only id the ledger will
+    vouch for. Each turn ends in a final response, as a real turn does.
+    """
 
+    def __init__(self) -> None:
+        self.agent_calls = 0
 
-class _CalendarRoutingUiModel(_HandsOffWrites):
-    """A deterministic Phase 6 seam: AppTest never reaches an external model."""
-
-    def propose_conversation_decision(
-        self,
-        *,
-        current_message: dict[str, str],
-        candidate_events: list[str],
-        reference_date: str,
-        **_: object,
-    ) -> dict:
-        if candidate_events:
-            return {
-                "intent": "calendar_update",
-                "action": {
-                    "action": "update_event",
-                    "target_event_id": _candidate_id(candidate_events[0]),
-                    "start_time": "15:00",
+    def next_read_agent_turn(self, *, messages: list[dict], **_: object) -> AgentModelTurn:
+        self.agent_calls += 1
+        if self.agent_calls == 1:
+            tomorrow = date.fromisoformat(_sent(messages)["reference_date"]) + timedelta(days=1)
+            return _ui_tools(
+                "ui-create",
+                "create_event",
+                {
+                    "title": "Algorithm review",
+                    "description": "Discuss the algorithm bottleneck.",
+                    "date": tomorrow.isoformat(),
+                    "start_time": "14:00",
+                    "end_time": "15:00",
                 },
-            }
-        return {
-            "intent": "calendar_create",
-            "action": {
-                "action": "create_event",
-                "content": "Algorithm review",
-                "description": "Discuss the algorithm bottleneck.",
-                "date": (date.fromisoformat(reference_date) + timedelta(days=1)).isoformat(),
-                "start_time": "14:00",
-                "end_time": "15:00",
-                "source_message_ids": [current_message["message_id"]],
-            },
-        }
+            )
+        if self.agent_calls == 3:
+            return _ui_tools("ui-search", "search_calendar", {})
+        if self.agent_calls == 4:
+            return _ui_tools(
+                "ui-update",
+                "update_event",
+                {"target_id": _searched_id(messages), "start_time": "15:00"},
+            )
+        return AgentModelTurn(final_response=AgentFinalResponse(reply="Done."))
 
 
 class _LocalAnswerUiModel:
@@ -98,23 +87,16 @@ class _AgentLocalAnswerUiModel:
         self.event_date = event_date
         self.agent_calls = 0
 
-    def propose_conversation_decision(self, **_: object) -> dict:
-        return {"intent": "local_answer"}
-
     def next_read_agent_turn(self, **_: object) -> AgentModelTurn:
         self.agent_calls += 1
         if self.agent_calls == 1:
-            return AgentModelTurn(
-                tool_calls=[
-                    AgentToolCall(
-                        id="ui-calendar-search",
-                        name="search_calendar",
-                        arguments={
-                            "start_date": self.event_date.isoformat(),
-                            "end_date": self.event_date.isoformat(),
-                        },
-                    )
-                ]
+            return _ui_tools(
+                "ui-calendar-search",
+                "search_calendar",
+                {
+                    "start_date": self.event_date.isoformat(),
+                    "end_date": self.event_date.isoformat(),
+                },
             )
         return AgentModelTurn(
             final_response=AgentFinalResponse(
@@ -124,16 +106,34 @@ class _AgentLocalAnswerUiModel:
         )
 
 
-class _CalendarDeleteUiModel(_HandsOffWrites):
-    def propose_conversation_decision(self, *, candidate_events: list[str], **_: object) -> dict:
-        return {
-            "intent": "calendar_delete",
-            "action": {"action": "delete_event", "target_event_id": _candidate_id(candidate_events[0])},
-        }
+class _CalendarDeleteUiModel:
+    def __init__(self) -> None:
+        self.agent_calls = 0
+
+    def next_read_agent_turn(self, *, messages: list[dict], **_: object) -> AgentModelTurn:
+        self.agent_calls += 1
+        if self.agent_calls == 1:
+            return _ui_tools("ui-search", "search_calendar", {})
+        if self.agent_calls == 2:
+            return _ui_tools("ui-delete", "delete_event", {"target_id": _searched_id(messages)})
+        return AgentModelTurn(final_response=AgentFinalResponse(reply="Confirm the deletion below."))
 
 
-def _candidate_id(line: str) -> str:
-    return line.split(" | ", 1)[0]
+def _ui_tools(call_id: str, name: str, arguments: dict) -> AgentModelTurn:
+    return AgentModelTurn(tool_calls=[AgentToolCall(id=call_id, name=name, arguments=arguments)])
+
+
+def _sent(messages: list[dict]) -> dict:
+    """What the router put in front of the agent, which carries the reference date."""
+
+    return json.loads(messages[1]["content"])
+
+
+def _searched_id(messages: list[dict]) -> str:
+    """The first row the last search returned, as the model would copy its id."""
+
+    results = [message for message in messages if message["role"] == "tool"]
+    return json.loads(results[-1]["content"])["items"][0]["id"]
 
 
 def expander_labels(app: AppTest) -> list[str]:
@@ -439,12 +439,12 @@ class UiTests(unittest.TestCase):
         self.assertEqual(len(store.list_calendar_events()), 0)
         self.assertTrue(any("CAPTUREFLOW_API_KEY" in element.value for element in app.markdown))
 
-    def test_ordinary_chat_routes_calendar_create_and_update_through_contextual_router(self) -> None:
+    def test_ordinary_chat_creates_then_updates_a_calendar_event_through_the_agent(self) -> None:
         os.environ["CAPTUREFLOW_API_KEY"] = "ui-test-key"
         os.environ["CAPTUREFLOW_MODEL"] = "ui-test-model"
         with patch(
             "captureflow.ui.OpenAICompatibleModel",
-            return_value=_CalendarRoutingUiModel(),
+            return_value=_CalendarWritingUiModel(),
         ):
             app = AppTest.from_file("app.py").run()
             app.sidebar.toggle[0].set_value(True).run()
@@ -468,7 +468,7 @@ class UiTests(unittest.TestCase):
         self.assertTrue(
             any(button.key.startswith("undo-calendar-update-") for button in app.button)
         )
-        self.assertTrue(any("Intent: calendar_update" in caption.value for caption in app.caption))
+        self.assertTrue(any("Outcome: calendar_update" in caption.value for caption in app.caption))
 
     def test_a_chat_deletion_waits_for_the_delete_button(self) -> None:
         os.environ["CAPTUREFLOW_API_KEY"] = "ui-test-key"

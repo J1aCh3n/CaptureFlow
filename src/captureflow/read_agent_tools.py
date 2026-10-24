@@ -695,7 +695,7 @@ class BoundReadTools:
         return ReadToolResult(
             ok=True,
             scope="project",
-            items=[_project_record_item(record, recorded_at=False)],
+            items=[_project_record_item(record)],
             total=1,
             detail=note,
         )
@@ -754,7 +754,7 @@ class BoundReadTools:
         item = (
             _calendar_item(row)
             if isinstance(row, CalendarEvent)
-            else _project_record_item(row, recorded_at=False)
+            else _project_record_item(row)
         )
         return ReadToolResult(ok=True, scope=scope_kind, items=[item], total=1, detail=note)
 
@@ -906,13 +906,15 @@ def _calendar_item(event: CalendarEvent) -> dict[str, Any]:
     }
 
 
-def _project_record_item(record: ProjectRecord, *, recorded_at: bool = True) -> dict[str, Any]:
-    """A tracker row as the model sees it.
+def _project_record_item(record: ProjectRecord) -> dict[str, Any]:
+    """A tracker row as the model sees it, carrying no clock.
 
-    A search includes when the row last changed, which is how a decision's history reads.
-    A write's own result does not: the model just made this row, so when the database
-    recorded it tells it nothing, and a timestamp from inside the turn would make the turn
-    impossible to replay offline.
+    It used to report when the row last changed. Nothing asked for it: a decision's history
+    is carried by supersedes_record_id, the rationale and the state. What it did carry was
+    the moment the database recorded the row, so a row created earlier in the same run came
+    back from a later search with a different value every time, and no run could be replayed
+    offline. Every other field here is the user's own data, so this is the only place a
+    wall clock could reach the model.
     """
 
     item = {
@@ -925,8 +927,6 @@ def _project_record_item(record: ProjectRecord, *, recorded_at: bool = True) -> 
         "state": record.state,
         "supersedes_record_id": record.supersedes_record_id,
     }
-    if recorded_at:
-        item["updated_at"] = record.updated_at.isoformat()
     return item
 
 

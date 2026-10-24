@@ -861,8 +861,11 @@ class BoundReadToolsTests(unittest.TestCase):
 
         self.assertEqual(rows[replacement.id]["supersedes_record_id"], original.id)
         self.assertIsNone(rows[original.id]["supersedes_record_id"])
-        self.assertEqual(rows[replacement.id]["updated_at"], replacement.updated_at.isoformat())
-        self.assertEqual(rows[original.id]["updated_at"], original.updated_at.isoformat())
+        # No clock: the history is the supersede link, the rationale and the state. A
+        # commit time would differ on every run and no run could then be replayed.
+        self.assertNotIn("updated_at", rows[replacement.id])
+        self.assertNotIn("updated_at", rows[original.id])
+        self.assertEqual(rows[original.id]["state"], "superseded")
         self.assertEqual({row.id for row in tools.resolve_observed(list(rows))}, {original.id, replacement.id})
 
     def test_invalid_or_credential_bearing_arguments_return_typed_errors(self) -> None:
