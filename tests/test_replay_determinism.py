@@ -84,8 +84,14 @@ class WriteDeterminismTests(unittest.TestCase):
             _tools(("update_event", {"target_id": "read-agent-architecture-review", "date": "2026-09-18", "start_time": "14:00"})),
             _answer("已改时间。"),
             _tools(("search_project_records", {})),
+            _tools(("set_deadline", {"target_id": seed["task"].id, "due_date": "2026-09-18", "due_time": "17:00"})),
+            _answer("已记下截止时间。"),
+            _tools(("search_project_records", {})),
             _tools(("transition_record", {"target_id": seed["task"].id, "target_state": "completed"})),
             _answer("已标记完成。"),
+            _tools(("search_calendar", {})),
+            _tools(("delete_event", {"target_id": "read-agent-release-demo"})),
+            _answer("删除要你确认一下。"),
         ]
 
     def _one_pass(self, name: str) -> list:

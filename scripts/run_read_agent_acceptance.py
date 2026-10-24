@@ -12,11 +12,12 @@ import argparse
 import hashlib
 import json
 import re
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timezone
 from pathlib import Path
 from math import ceil
 from statistics import median
 from time import perf_counter
+from zoneinfo import ZoneInfo
 
 from captureflow import read_agent_tools
 from captureflow.conversation_router_service import ConversationRouterService
@@ -35,7 +36,16 @@ MIN_PASS_RATE = 0.8
 ANSWER_MODE = "agent"
 # The only cases whose turn is expected to store a change.
 WRITE_CASES = frozenset(
-    {"note_write", "idea_write", "record_write", "event_write", "event_update", "record_done"}
+    {
+        "note_write",
+        "idea_write",
+        "record_write",
+        "event_write",
+        "event_update",
+        "record_deadline",
+        "record_done",
+        "event_delete",
+    }
 )
 ALL_CASES = (
     "meeting_question",
@@ -51,7 +61,9 @@ ALL_CASES = (
     "record_write",
     "event_write",
     "event_update",
+    "record_deadline",
     "record_done",
+    "event_delete",
 )
 CASE_SEQUENCE = (
     ("meeting_question", "main", "read-agent-meeting"),
@@ -67,7 +79,10 @@ CASE_SEQUENCE = (
     ("record_write", "main", "read-agent-record-write"),
     ("event_write", "main", "read-agent-event-write"),
     ("event_update", "main", "read-agent-event-update"),
+    # The deadline comes before the record is finished: it needs the task still active.
+    ("record_deadline", "main", "read-agent-record-deadline"),
     ("record_done", "main", "read-agent-record-done"),
+    ("event_delete", "main", "read-agent-event-delete"),
     ("answer_replay", "main", "read-agent-meeting"),
 )
 # stored_instruction runs two submits and answer_replay re-sends an earlier message, so the
@@ -365,9 +380,30 @@ def run_fixture(
                 date.fromisoformat(protocol["event_update_date"]),
             ),
         )
+    if "record_deadline" in cases:
+        dated = submit("record_deadline", main_id, "read-agent-record-deadline")
+        checked(
+            "record_deadline",
+            lambda: dated_a_record(
+                store,
+                dated,
+                seed["task"].id,
+                datetime.combine(
+                    date.fromisoformat(protocol["record_deadline_date"]),
+                    time.fromisoformat(protocol["record_deadline_time"]),
+                    tzinfo=ZoneInfo(protocol["timezone"]),
+                ),
+            ),
+        )
     if "record_done" in cases:
         finished = submit("record_done", main_id, "read-agent-record-done")
         checked("record_done", lambda: finished_a_record(store, finished, seed["task"].id))
+    if "event_delete" in cases:
+        doomed = submit("event_delete", main_id, "read-agent-event-delete")
+        checked(
+            "event_delete",
+            lambda: asked_to_delete_an_event(store, doomed, protocol["event_delete_id"]),
+        )
     if "answer_replay" in cases:
         replay = submit("answer_replay", main_id, "read-agent-meeting")
         checked(
@@ -677,6 +713,42 @@ def updated_an_event(store: CaptureStore, turn, seed: dict, event_id: str, on: d
     if [getattr(operation, "status", None) for operation in turn.operations] != ["committed"]:
         return False
     return store.get_calendar_event(event_id).start_date == on
+
+
+def dated_a_record(store: CaptureStore, turn, record_id: str, due_at: datetime) -> bool:
+    """The agent put a deadline on a task that already existed, which it had to search for.
+
+    Python attaches the timezone: the tool takes a date and a clock time, never a ready-made
+    timestamp, so what is stored is what this compares against.
+    """
+
+    if turn is None or turn.failure_reason is not None:
+        return False
+    if turn.agent_stop_reason != "completed":
+        return False
+    if [getattr(operation, "status", None) for operation in turn.operations] != ["committed"]:
+        return False
+    return store.get_project_record(record_id).due_at == due_at
+
+
+def asked_to_delete_an_event(store: CaptureStore, turn, event_id: str) -> bool:
+    """A deletion is prepared and waits for the user, so the event is still there afterwards.
+
+    There is no checkpointer to hold the question, which is the point: the operation in
+    SQLite is what the next turn -- or the Chat button -- answers.
+    """
+
+    if turn is None or turn.failure_reason is not None:
+        return False
+    if turn.agent_stop_reason != "completed":
+        return False
+    operations = turn.operations
+    if [getattr(operation, "event_id", None) for operation in operations] != [event_id]:
+        return False
+    if [getattr(operation, "status", None) for operation in operations] != ["review"]:
+        return False
+    after = getattr(operations[0], "after", None)
+    return getattr(after, "status", None) == "deleted" and store.get_calendar_event(event_id).status == "active"
 
 
 def finished_a_record(store: CaptureStore, turn, record_id: str) -> bool:

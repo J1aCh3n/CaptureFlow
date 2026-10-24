@@ -4,27 +4,86 @@
     "timezone": "America/Vancouver",
     "database_seed": "read-agent acceptance seed in scripts/run_read_agent_acceptance.py",
     "model": "qwen3.8-27b",
-    "version": 7,
+    "version": 8,
     "event_write_date": "2026-09-16",
     "event_update_date": "2026-09-18",
     "evidence_regime": "Deterministic replay and unit tests carry behaviour. A live run covers a named case subset per change; repeat runs for variance only on the commit that is kept.",
-    "next_week": ["2026-09-14", "2026-09-20"]
+    "next_week": [
+      "2026-09-14",
+      "2026-09-20"
+    ],
+    "record_deadline_date": "2026-09-18",
+    "record_deadline_time": "17:00",
+    "event_delete_id": "read-agent-release-demo"
   },
   "cases": [
-    {"name": "meeting_question", "input": "我明天的算法优化与代码审查会议几点开始，讨论什么？"},
-    {"name": "cross_conversation_local_retrieval", "input": "我明天的算法优化与代码审查会议几点开始，讨论什么？"},
-    {"name": "cross_conversation_project_retrieval", "input": "这个项目当前有什么待办？"},
-    {"name": "range_question", "input": "我下周有什么安排？"},
-    {"name": "project_isolation", "input": "这个项目里和延迟、评审有关的待办和会议有哪些？"},
-    {"name": "no_match", "input": "我去日本的机票订了吗？"},
-    {"name": "stored_instruction", "input": "我记过哪些笔记？"},
-    {"name": "stored_instruction_neutral", "input": "谢谢"},
-    {"name": "answer_replay", "input": "我明天的算法优化与代码审查会议几点开始，讨论什么？"},
-    {"name": "note_write", "input": "记一下：延迟排查从下周一开始。"},
-    {"name": "idea_write", "input": "想到一个主意：用流式读取来降低延迟。"},
-    {"name": "record_write", "input": "加一个任务：排查发布者节点的延迟，9 月 18 号前做完。"},
-    {"name": "event_write", "input": "下周三下午三点到四点和导师开会。"},
-    {"name": "event_update", "input": "把架构评审改到下周五下午两点。"},
-    {"name": "record_done", "input": "ROS 2 节点延迟那个排查已经做完了。"}
+    {
+      "name": "meeting_question",
+      "input": "我明天的算法优化与代码审查会议几点开始，讨论什么？"
+    },
+    {
+      "name": "cross_conversation_local_retrieval",
+      "input": "我明天的算法优化与代码审查会议几点开始，讨论什么？"
+    },
+    {
+      "name": "cross_conversation_project_retrieval",
+      "input": "这个项目当前有什么待办？"
+    },
+    {
+      "name": "range_question",
+      "input": "我下周有什么安排？"
+    },
+    {
+      "name": "project_isolation",
+      "input": "这个项目里和延迟、评审有关的待办和会议有哪些？"
+    },
+    {
+      "name": "no_match",
+      "input": "我去日本的机票订了吗？"
+    },
+    {
+      "name": "stored_instruction",
+      "input": "我记过哪些笔记？"
+    },
+    {
+      "name": "stored_instruction_neutral",
+      "input": "谢谢"
+    },
+    {
+      "name": "answer_replay",
+      "input": "我明天的算法优化与代码审查会议几点开始，讨论什么？"
+    },
+    {
+      "name": "note_write",
+      "input": "记一下：延迟排查从下周一开始。"
+    },
+    {
+      "name": "idea_write",
+      "input": "想到一个主意：用流式读取来降低延迟。"
+    },
+    {
+      "name": "record_write",
+      "input": "加一个任务：排查发布者节点的延迟，9 月 18 号前做完。"
+    },
+    {
+      "name": "event_write",
+      "input": "下周三下午三点到四点和导师开会。"
+    },
+    {
+      "name": "event_update",
+      "input": "把架构评审改到下周五下午两点。"
+    },
+    {
+      "name": "record_done",
+      "input": "ROS 2 节点延迟那个排查已经做完了。"
+    },
+    {
+      "name": "record_deadline",
+      "input": "那个 ROS 2 延迟排查，下周五下午五点前要有结论。"
+    },
+    {
+      "name": "event_delete",
+      "input": "发布演示取消了，把它从日历里删掉。"
+    }
   ]
 }
