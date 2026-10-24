@@ -157,10 +157,6 @@ def _working_tree_dirty() -> bool | None:
         return None
 
 
-if __name__ == "__main__":
-    raise SystemExit(main())
-
-
 def _total(counts) -> int | None:
     counts = list(counts)
     return None if not counts or None in counts else sum(counts)
