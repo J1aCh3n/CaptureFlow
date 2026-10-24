@@ -12,6 +12,7 @@ import argparse
 import hashlib
 import json
 import re
+import subprocess
 from datetime import date, datetime, time, timezone
 from pathlib import Path
 from math import ceil
