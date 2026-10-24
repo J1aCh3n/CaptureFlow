@@ -209,10 +209,11 @@ rows.
 
 ## Status and evidence
 
-The deterministic suite passes 279 tests. It verifies the database, the tools,
-the validation and write boundaries, and the whole turn, from scripted agent turns.
-A recorded live run can drive the same code for free; the recording for the current
-tools has not been taken yet, so no replay test is in the suite at the moment.
+The deterministic suite passes 283 tests. It verifies the database, the tools,
+the validation and write boundaries, and the whole turn, from scripted agent turns
+and from one recorded live run replayed for free: 12 acceptance cases in 6.9
+seconds and no tokens, covering every write tool the agent has except
+`supersede_record`.
 
 The frozen Phase 10 live acceptance (20 ordered records, protocol version 3)
 exercises calendar creation and correction, task distinction, meeting questions,
