@@ -334,10 +334,11 @@ class WriteCaseChecksTests(unittest.TestCase):
 
                 self.assertTrue(any(expected in problem for problem in problems))
 
-    def test_a_handed_back_write_fails_the_note_case_without_crashing(self) -> None:
-        # The agent can hand a note request back instead of using its own tool, and the
-        # router may then store a tracker record, whose operation has no tool name. A run
-        # is paid for turn by turn, so this must read as a wrong answer, not an exception.
+    def test_a_tracker_write_fails_the_note_case_without_crashing(self) -> None:
+        # The agent can answer a note request with a tracker tool instead of save_note, and
+        # that operation has no tool name. stage7-27b-record-1 did exactly this: 记一下 was
+        # read as a deadline and set_deadline was called. A run is paid for turn by turn, so
+        # this must read as a wrong answer, not an exception that throws the run away.
         record = SimpleNamespace(record_id="r", action="create_record")
 
         verdict = stored_an_item(
@@ -349,7 +350,7 @@ class WriteCaseChecksTests(unittest.TestCase):
     def _turn_with_operations(self, operations):
         assistant = self.store.save_message(
             Message(
-                id=f"handed-back-answer-{self._next_answer()}",
+                id=f"agent-answer-{self._next_answer()}",
                 conversation_id=self.question.conversation_id,
                 role="assistant",
                 content="Done.",
@@ -360,9 +361,8 @@ class WriteCaseChecksTests(unittest.TestCase):
             user_message=self.question,
             assistant_message=assistant,
             operations=tuple(operations),
-            agent_stop_reason="handed_off",
+            agent_stop_reason="completed",
             failure_reason=None,
-            decision=None,
             tool_calls=0,
         )
 
@@ -415,7 +415,7 @@ class WriteCaseChecksTests(unittest.TestCase):
 
         self.assertFalse(
             updated_an_event(
-                self.store, self._completed([committed]), self.seed, target.id, date(2026, 9, 18)
+                self.store, self._turn_with_operations([committed]), self.seed, target.id, date(2026, 9, 18)
             ),
             "the seeded event has not moved, so the case must not pass",
         )
@@ -427,44 +427,36 @@ class WriteCaseChecksTests(unittest.TestCase):
 
         self.assertTrue(
             updated_an_event(
-                self.store, self._completed([committed]), self.seed, target.id, date(2026, 9, 18)
+                self.store, self._turn_with_operations([committed]), self.seed, target.id, date(2026, 9, 18)
             )
         )
         # A deletion waiting for the user has not changed anything yet.
         waiting = SimpleNamespace(event_id=target.id, status="review")
         self.assertFalse(
             updated_an_event(
-                self.store, self._completed([waiting]), self.seed, target.id, date(2026, 9, 18)
+                self.store, self._turn_with_operations([waiting]), self.seed, target.id, date(2026, 9, 18)
             )
         )
-        # A turn the agent handed back is not its own write.
+        # A turn that ran out of budget did not finish, whatever it had already stored.
+        unfinished = SimpleNamespace(
+            **{
+                **self._turn_with_operations([committed]).__dict__,
+                "agent_stop_reason": "tool_budget_exhausted",
+            }
+        )
         self.assertFalse(
-            updated_an_event(
-                self.store,
-                self._turn_with_operations([committed]),
-                self.seed,
-                target.id,
-                date(2026, 9, 18),
-            )
+            updated_an_event(self.store, unfinished, self.seed, target.id, date(2026, 9, 18))
         )
 
     def test_a_finished_record_must_actually_be_completed(self) -> None:
         task = self.seed["task"]
         committed = SimpleNamespace(status="committed")
 
-        self.assertFalse(finished_a_record(self.store, self._completed([committed]), task.id))
+        self.assertFalse(finished_a_record(self.store, self._turn_with_operations([committed]), task.id))
         self.store.transition_project_record(task.id, "completed")
 
-        self.assertTrue(finished_a_record(self.store, self._completed([committed]), task.id))
-        self.assertFalse(finished_a_record(self.store, self._completed([]), task.id))
-
-    def _completed(self, operations):
-        """A turn the agent finished itself, carrying the operations it stored."""
-
-        turn = self._turn_with_operations(operations)
-        return SimpleNamespace(
-            **{**turn.__dict__, "agent_stop_reason": "completed"}
-        )
+        self.assertTrue(finished_a_record(self.store, self._turn_with_operations([committed]), task.id))
+        self.assertFalse(finished_a_record(self.store, self._turn_with_operations([]), task.id))
 
     def _event_on(self, day: date) -> None:
         self.store.save_calendar_event(

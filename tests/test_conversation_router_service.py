@@ -301,6 +301,22 @@ class ConversationRouterServiceTests(unittest.TestCase):
         feedback = model.agent_calls[1]["messages"][-1]["content"]
         self.assertIn("recurring", feedback)
 
+    def test_a_duplicate_is_refused_however_many_records_the_project_already_has(self) -> None:
+        # The list this is compared against used to be cut at 30, most recently updated
+        # first, because it went into the router's prompt. A duplicate of the record past
+        # that cut was let through. Nothing is cut now: the list only reaches this rule.
+        for index in range(31):
+            self._project_record(f"bulk-{index:02d}", "task", "active", f"任务 {index}")
+        model = self._writes("create_record", {"kind": "task", "content": "任务 0"})
+
+        turn = self.submit(model, "加一个任务：任务 0", "duplicate-past-the-old-bound")
+
+        self.assertEqual(turn.operations, ())
+        self.assertEqual(len(self.store.list_project_records(self.project.id, states=("active",))), 31)
+        refused = self._tool_result(model)["error"]
+        self.assertEqual(refused["category"], "policy_denied")
+        self.assertIn("already exists", refused["message"])
+
     def test_a_second_decision_is_held_for_review_and_cannot_be_cited(self) -> None:
         self._project_record("first-decision", "decision", "active", "用 SQLite 存储")
         model = ScriptedContextualModel(

@@ -13,7 +13,7 @@ from langgraph.graph.state import CompiledStateGraph
 from pydantic import ValidationError
 
 from .answer_rendering import answer_source_references, with_stored_dates
-from .context_service import ContextWindow, RouterCandidates, select_context_window, select_router_candidates
+from .context_service import ContextWindow, active_project_records, select_context_window
 from .credentials import contains_credential_disclosure
 from .date_tool import calendar_reference
 from .llm import CaptureFlowModel, InvalidStructuredOutput, ModelError, describe_validation_error
@@ -38,9 +38,6 @@ from .storage import CaptureStore
 
 RouterOperation = ToolOperation | CalendarEventUpdateOperation | ProjectChangeOperation
 
-_SAVED_ITEM_WRITES = {"save_idea", "save_note"}
-_CALENDAR_WRITES = {"calendar_create", "calendar_update", "calendar_delete"}
-_ANSWER_INTENTS = {"local_answer", "project_answer"}
 # A stored event keeps at most this many source messages.
 MAX_EVENT_SOURCES = 3
 
@@ -50,7 +47,6 @@ class ConversationRouterTurn:
     user_message: Message
     assistant_message: Message
     context_window: ContextWindow
-    candidates: RouterCandidates
     operations: tuple[RouterOperation, ...]
     outcome: str
     model_calls: int = 0
@@ -75,12 +71,13 @@ class _TurnWriter:
         service: "ConversationRouterService",
         user_message: Message,
         context_window: ContextWindow,
-        candidates: RouterCandidates,
+        records: tuple[ProjectRecord, ...],
     ) -> None:
         self.service = service
         self.user_message = user_message
         self.context_window = context_window
-        self.candidates = candidates
+        # The project's active records, which creating a record is compared against.
+        self.records = records
         self.operations: tuple[RouterOperation, ...] = ()
         self.replies: list[str] = []
         # What the write was, named by the step that made it rather than guessed from the
@@ -160,8 +157,9 @@ class _TurnWriter:
             self.user_message,
             [ProjectChange(action=action, target_record_id=target.id, **fields)],
             self.context_window,
-            # The ledger's row is the candidate list: the model had to search for it.
-            RouterCandidates(events=(), saved_items=(), project_records=(target,)),
+            # The ledger's row is the only one a target write compares against: the model
+            # had to search for it, and the rule looks the target up by id.
+            (target,),
         )
         self.operations = (*self.operations, *operations)
         self.replies.append(reply)
@@ -215,7 +213,7 @@ class _TurnWriter:
             self.user_message,
             [ProjectChange(action="create_record", **fields)],
             self.context_window,
-            self.candidates,
+            self.records,
         )
         self.operations = (*self.operations, *operations)
         self.replies.append(reply)
@@ -243,7 +241,7 @@ class RouterState(TypedDict, total=False):
     message_id: str | None
     user_message: Message
     context_window: ContextWindow
-    candidates: RouterCandidates
+    records: tuple[ProjectRecord, ...]
     existing_reply: Message | None
     local_started: float
     # Set by the node that finishes the turn; None while the turn continues.
@@ -251,7 +249,12 @@ class RouterState(TypedDict, total=False):
 
 
 class ConversationRouterService:
-    """Persist one normal-language turn, then execute exactly one validated decision."""
+    """Persist one normal-language turn, and let the agent carry it out.
+
+    The turn is one graph run with no checkpointer: a crash is recovered from the
+    operations in SQLite. Python owns every write the agent asks for, and a turn
+    stores at most one change.
+    """
 
     def __init__(
         self,
@@ -308,9 +311,7 @@ class ConversationRouterService:
         return {
             "user_message": user_message,
             "context_window": select_context_window(self.store.list_messages(state["conversation_id"])),
-            "candidates": select_router_candidates(
-                self.store, state["conversation_id"], self.reference_date, user_message.content
-            ),
+            "records": active_project_records(self.store, state["conversation_id"]),
             "existing_reply": self.store.get_assistant_reply(user_message.id),
         }
 
@@ -321,7 +322,6 @@ class ConversationRouterService:
                 user_message,
                 state["existing_reply"],
                 state["context_window"],
-                state["candidates"],
                 self._persisted_operations(user_message.id),
                 outcome="reloaded",
             )
@@ -336,7 +336,6 @@ class ConversationRouterService:
                 state["user_message"],
                 "Resumed the saved local operation without another model call.",
                 state["context_window"],
-                state["candidates"],
                 resumed,
                 outcome="resumed",
             )
@@ -350,17 +349,21 @@ class ConversationRouterService:
                 state["user_message"],
                 "I did not process that message because it appears to contain a credential.",
                 state["context_window"],
-                state["candidates"],
                 (),
                 outcome="blocked_credential",
             )
         }
 
     def _agent_front(self, state: RouterState) -> RouterState:
-        """Let the agent take the turn; a write it hands back continues to the router."""
+        """Let the agent take the turn, including its writes, and finish it.
+
+        It used to be able to hand a write back to a second decision behind this node.
+        There is no second decision: the agent writes through its own tools, and this
+        node ends every turn it starts.
+        """
 
         writer = _TurnWriter(
-            self, state["user_message"], state["context_window"], state["candidates"]
+            self, state["user_message"], state["context_window"], state["records"]
         )
         tools = BoundReadTools.for_conversation(self.store, state["conversation_id"], writer=writer)
         prompt = (
@@ -496,7 +499,6 @@ class ConversationRouterService:
             state["user_message"],
             assistant,
             state["context_window"],
-            state["candidates"],
             operations,
             outcome=outcome if writer is None or writer.outcome is None else writer.outcome,
             model_calls=usage.model_calls,
@@ -530,7 +532,6 @@ class ConversationRouterService:
             state["user_message"],
             content,
             state["context_window"],
-            state["candidates"],
             operations,
             model_calls=usage.model_calls,
             model_seconds=state.get("model_seconds", 0.0) + usage.model_seconds,
@@ -783,7 +784,7 @@ class ConversationRouterService:
         user_message: Message,
         changes: list[ProjectChange],
         context_window: ContextWindow,
-        candidates: RouterCandidates,
+        records: tuple[ProjectRecord, ...],
     ) -> tuple[tuple[ProjectChangeOperation, ...], str]:
         project = self.store.get_conversation_project(user_message.conversation_id)
         if project is None:
@@ -798,7 +799,7 @@ class ConversationRouterService:
             project,
             user_message,
             changes,
-            list(candidates.project_records),
+            list(records),
             context_window.messages,
         )
         operations = tuple([*committed, *reviewed])
@@ -989,7 +990,6 @@ class ConversationRouterService:
         user_message: Message,
         content: str,
         context_window: ContextWindow,
-        candidates: RouterCandidates,
         operations: tuple[RouterOperation, ...],
         *,
         model_calls: int = 0,
@@ -1005,7 +1005,6 @@ class ConversationRouterService:
             user_message,
             assistant,
             context_window,
-            candidates,
             operations,
             outcome=outcome,
             model_calls=model_calls,
