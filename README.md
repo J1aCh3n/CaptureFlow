@@ -35,11 +35,11 @@ is organized in layers. Services never import the UI, and only `storage.py` and
 flowchart TD
     UI["ui.py<br/>Streamlit pages: Chat, Tracker, Calendar, Ideas & Notes"]
     CMD["chat_service.py<br/>/event, /idea, /note"]
-    ROUTER["conversation_router_service.py<br/>LangGraph turn graph, one typed decision per turn"]
+    ROUTER["conversation_router_service.py<br/>LangGraph turn graph; the agent takes the turn"]
     CTX["context_service.py<br/>layered context"]
     LLM["llm.py<br/>OpenAI-compatible client"]
-    LOCAL["local_context_service.py<br/>local_answer"]
-    PANS["project_answer_service.py<br/>project_answer"]
+    AGENT["read_agent.py + read_agent_tools.py<br/>the loop, its search and write tools, the ledger"]
+    REND["answer_rendering.py<br/>stored dates and source cards"]
     PSVC["project_service.py<br/>tracker changes"]
     STORE["storage.py<br/>CaptureStore"]
     DB[("SQLite<br/>data/captureflow.sqlite3")]
@@ -48,14 +48,13 @@ flowchart TD
     UI -->|ordinary text| ROUTER
     ROUTER --> CTX
     ROUTER --> LLM
-    ROUTER --> LOCAL
-    ROUTER --> PANS
+    ROUTER --> AGENT
+    ROUTER --> REND
     ROUTER --> PSVC
-    PANS --> LLM
+    AGENT --> LLM
+    AGENT --> STORE
     CMD --> STORE
     CTX --> STORE
-    LOCAL --> STORE
-    PANS --> STORE
     PSVC --> STORE
     STORE --> DB
 ```
@@ -64,7 +63,8 @@ flowchart TD
 | --- | --- | --- |
 | Presentation | `ui.py`, `app.py` | Streamlit pages and widgets. Chooses the command service or the router for each message and renders records, source cards, and Undo. |
 | Turn handling | `conversation_router_service.py`, `chat_service.py` | Turns one user message into at most one validated write, or a reply. |
-| Understanding and answers | `context_service.py`, `llm.py`, `local_context_service.py`, `project_answer_service.py`, `project_service.py` | Builds the model's context, makes the model call, answers questions, and checks proposed tracker changes. |
+| The agent and its tools | `read_agent.py`, `read_agent_tools.py` | The loop the model runs in, the search and write tools it is offered, and the provenance ledger that vouches for a write's target. |
+| Understanding and answers | `context_service.py`, `llm.py`, `answer_rendering.py`, `project_service.py` | Builds the model's context, makes the model call, renders an answer's stored dates and source cards, and checks proposed tracker changes. |
 | Persistence | `storage.py`, `migrations.py`, `models.py` | Typed records, schema migrations, and audited, restart-safe writes to SQLite. |
 | Shared helpers | `credentials.py`, `date_tool.py`, `time_config.py` | Credential detection, the calendar reference table, and configured local time. |
 
@@ -81,8 +81,9 @@ captureflow/
 │   ├── chat_service.py             # Model-free /event, /idea, /note commands and reply-only turns
 │   ├── context_service.py          # Recent conversation and one-line stored state for the model
 │   ├── llm.py                      # ModelSettings, the OpenAI-compatible client, and its prompts
-│   ├── local_context_service.py    # Answers about specific events, ideas, notes, or records
-│   ├── project_answer_service.py   # Project snapshot and the second model call for project questions
+│   ├── read_agent.py               # The agent loop: one model call per turn of it
+│   ├── read_agent_tools.py         # The search and write tools, and the provenance ledger
+│   ├── answer_rendering.py         # An answer's stored dates and source cards
 │   ├── project_service.py          # Validates tracker changes and commits those needing no review
 │   ├── models.py                   # Pydantic models: records, operations, stored changes
 │   ├── storage.py                  # CaptureStore: every SQLite read and write

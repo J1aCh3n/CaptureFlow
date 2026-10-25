@@ -9,9 +9,8 @@ to the user is read from SQLite, never written by the model.
 import unittest
 from datetime import date, datetime, timezone
 
-from captureflow.local_context_service import answer_source_references
+from captureflow.answer_rendering import answer_source_references, with_stored_dates
 from captureflow.models import CalendarEvent, ProjectRecord, SavedItem
-from captureflow.project_answer_service import with_stored_dates
 
 
 def _event(event_id: str, title: str, start_at, end_at=None) -> CalendarEvent:

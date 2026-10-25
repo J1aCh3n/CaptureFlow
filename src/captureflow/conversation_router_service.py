@@ -12,11 +12,11 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from pydantic import ValidationError
 
+from .answer_rendering import answer_source_references, with_stored_dates
 from .context_service import ContextWindow, RouterCandidates, select_context_window, select_router_candidates
 from .credentials import contains_credential_disclosure
 from .date_tool import calendar_reference
 from .llm import CaptureFlowModel, InvalidStructuredOutput, ModelError, describe_validation_error
-from .local_context_service import answer_source_references
 from .models import (
     CalendarEvent,
     CalendarEventUpdateOperation,
@@ -30,7 +30,6 @@ from .models import (
     ToolOperation,
     utc_now,
 )
-from .project_answer_service import with_stored_dates
 from .project_service import apply_validated_changes
 from .read_agent import ReadAgentLoop, ReadAgentUsage
 from .read_agent_tools import BoundReadTools, WriteNeedsClarification

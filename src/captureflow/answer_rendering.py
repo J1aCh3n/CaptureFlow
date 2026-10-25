@@ -1,15 +1,34 @@
-"""Render the stored dates of an answer's cited rows underneath it.
+"""How an answer presents the rows it cited: their stored dates, and their source cards.
 
-This is what remains of the project-answer service. The router used to make a second model
-call over a snapshot of the whole project; the agent now searches the project itself. The
-time policy survives unchanged: a date or time shown to the user is read from SQLite and
-never written by the model (Phases 11 and 12).
+This is what is left of the two answer services. The router used to answer a question
+about specific stored items from candidates the model named, and to make a second model
+call over a snapshot of the whole project; the agent searches for what it needs and cites
+what it found, so neither remains. What survives is the part that was never the model's
+job: a date or time a user reads is read from SQLite and never written by the model
+(Phases 11 and 12), and a cited row is turned into the kind of source card SQLite keeps.
 """
 
-from .models import CalendarEvent, ProjectRecord
+from .models import CalendarEvent, LocalContextSourceRef, ProjectRecord, SavedItem
 
 
 _STORED_DATES_HEADER = "Stored dates:"
+
+
+def answer_source_references(
+    sources: list[CalendarEvent | SavedItem | ProjectRecord],
+) -> tuple[list[str], list[LocalContextSourceRef]]:
+    """Split an answer's sources into project record IDs and Calendar/Note/Idea references."""
+
+    project_record_ids = [source.id for source in sources if isinstance(source, ProjectRecord)]
+    local_references = [
+        LocalContextSourceRef(
+            source_type="calendar_event" if isinstance(source, CalendarEvent) else "saved_item",
+            source_id=source.id,
+        )
+        for source in sources
+        if isinstance(source, (CalendarEvent, SavedItem))
+    ]
+    return project_record_ids, local_references
 
 
 def with_stored_dates(

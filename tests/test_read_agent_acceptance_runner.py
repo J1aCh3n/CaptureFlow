@@ -6,9 +6,8 @@ from itertools import count
 from pathlib import Path
 from types import SimpleNamespace
 
-from captureflow.local_context_service import answer_source_references
+from captureflow.answer_rendering import answer_source_references, with_stored_dates
 from captureflow.models import CalendarEvent, Message, ProjectRecord, SavedItem
-from captureflow.project_answer_service import with_stored_dates
 from captureflow.storage import CaptureStore
 from scripts.run_read_agent_acceptance import (
     ALL_CASES,
