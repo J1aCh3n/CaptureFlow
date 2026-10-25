@@ -210,7 +210,7 @@ rows.
 
 ## Status and evidence
 
-The deterministic suite passes 283 tests. It verifies the database, the tools,
+The deterministic suite passes 279 tests. It verifies the database, the tools,
 the validation and write boundaries, and the whole turn, from scripted agent turns
 and from one recorded live run replayed for free: 12 acceptance cases in 6.9
 seconds and no tokens, covering every write tool the agent has except
