@@ -185,7 +185,7 @@ Known limits: a bare hour such as `明天十点` is resolved to 10:00 without a
 question, and the reply states it; range questions such as `我下周有什么安排？` are
 not answered; pasted text that leaves the last two turns before everything in it
 is saved is seen only as a reference. See
-[phase-13-simplified-router-design.md](docs/phase-13-simplified-router-design.md).
+[phase-13-simplified-router-design.md](docs/outdated/phase-13-simplified-router-design.md).
 
 These explicit commands need no model call:
 
@@ -225,17 +225,17 @@ from the redundancy cleanup onward.
 
 | Document | Covers |
 | --- | --- |
-| [phase-9-local-context-evidence.md](docs/phase-9-local-context-evidence.md) | Deterministic local recall |
-| [phase-10-baseline.md](docs/phase-10-baseline.md) | The contextual router's acceptance contract |
-| [phase-10-live-evidence.md](docs/phase-10-live-evidence.md) | First frozen live acceptance |
-| [phase-10.4](docs/phase-10.4-calendar-deletion-and-noon-times.md) – [phase-10.7](docs/phase-10.7-capability-boundary-probe.md) | Feedback rounds: deletion, compound turns, deadlines, boundary probe |
-| [phase-10.8-frozen-acceptance-rerun.md](docs/phase-10.8-frozen-acceptance-rerun.md) | Acceptance reruns after those rounds |
-| [phase-11-model-normalized-time-design.md](docs/phase-11-model-normalized-time-design.md) | Moving date and time understanding to the model |
-| [phase-11-evidence.md](docs/phase-11-evidence.md) | Phase 11 results and acceptance reruns |
-| [redundancy-cleanup.md](docs/redundancy-cleanup.md) | Removal of code the app no longer reaches |
-| [qwen-migration.md](docs/qwen-migration.md) | Moving the router and acceptance protocol to Qwen |
-| [phase-12-answer-intents-design.md](docs/phase-12-answer-intents-design.md) | What `local_answer` and `project_answer` mean |
-| [phase-13-simplified-router-design.md](docs/phase-13-simplified-router-design.md) | A simpler router: plain questions, model-judged targets, layered context |
+| [phase-9-local-context-evidence.md](docs/outdated/phase-9-local-context-evidence.md) | Deterministic local recall |
+| [phase-10-baseline.md](docs/outdated/phase-10-baseline.md) | The contextual router's acceptance contract |
+| [phase-10-live-evidence.md](docs/outdated/phase-10-live-evidence.md) | First frozen live acceptance |
+| [phase-10.4](docs/outdated/phase-10.4-calendar-deletion-and-noon-times.md) – [phase-10.7](docs/outdated/phase-10.7-capability-boundary-probe.md) | Feedback rounds: deletion, compound turns, deadlines, boundary probe |
+| [phase-10.8-frozen-acceptance-rerun.md](docs/outdated/phase-10.8-frozen-acceptance-rerun.md) | Acceptance reruns after those rounds |
+| [phase-11-model-normalized-time-design.md](docs/outdated/phase-11-model-normalized-time-design.md) | Moving date and time understanding to the model |
+| [phase-11-evidence.md](docs/outdated/phase-11-evidence.md) | Phase 11 results and acceptance reruns |
+| [redundancy-cleanup.md](docs/outdated/redundancy-cleanup.md) | Removal of code the app no longer reaches |
+| [qwen-migration.md](docs/outdated/qwen-migration.md) | Moving the router and acceptance protocol to Qwen |
+| [phase-12-answer-intents-design.md](docs/outdated/phase-12-answer-intents-design.md) | What `local_answer` and `project_answer` mean |
+| [phase-13-simplified-router-design.md](docs/outdated/phase-13-simplified-router-design.md) | A simpler router: plain questions, model-judged targets, layered context |
 | [langgraph-router-migration.md](docs/langgraph-router-migration.md) | Running the router's turn as a LangGraph graph, with unchanged behavior |
 
 The live acceptance needs explicit API-cost approval. It creates only an isolated

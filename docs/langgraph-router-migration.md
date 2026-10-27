@@ -22,7 +22,7 @@ business rules the nodes call are the same methods as before.
 
 The `langgraph` dependency returns. The redundancy cleanup removed it with the
 Phase 1–3 capture graph, which the app no longer reached (see
-[redundancy-cleanup.md](redundancy-cleanup.md)); this graph is the path every ordinary
+[redundancy-cleanup.md](outdated/redundancy-cleanup.md)); this graph is the path every ordinary
 chat turn takes.
 
 ## Boundary
